@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# Model weights — large, fetched separately (see README)
+models/
+*.gguf
+
+# Book inputs (copyrighted) and all generated data — keep the public repo code-only
+*.epub
+*.pdf
+*.csv
+archive/
+missed_shadow.txt
+
+# Local agent / editor config
+.claude/

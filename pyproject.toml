@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "concordance"
+version = "0.1.0"
+description = "Extract interesting vocabulary from EPUB/PDF books using a local LLM."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "ebooklib>=0.18",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+    "pymupdf>=1.24",
+    "wordfreq>=3.1",
+    "symspellpy>=6.7",
+    "nltk>=3.8",
+    "requests>=2.31",
+    "rich>=13.7",
+    "typer>=0.12",
+    "spacy>=3.7",
+]
+
+[project.optional-dependencies]
+llm = ["llama-cpp-python>=0.2.80"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+concordance = "concordance.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["concordance*"]
