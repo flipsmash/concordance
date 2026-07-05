@@ -120,6 +120,34 @@ It shows the surviving count for a one-line `y/N` confirm, then:
   and your cleaned version — leaving the working directory to just the books
   still in flight.
 
+### Sync the master list to PostgreSQL (`sync-db`)
+
+The CSVs stay the working format, but the cross-book `master_vocab.csv` can be
+mirrored into Postgres for a future web app:
+
+```bash
+concordance sync-db                      # loads ./master_vocab.csv
+concordance sync-db --schema concordance # tables live in their own schema
+```
+
+Set the connection in a git-ignored `.env` (or the environment):
+
+```
+DATABASE_URL=postgresql://user:pass@host:5432/dbname
+```
+
+It creates a small normalised schema and upserts idempotently (re-run any time):
+
+- **`word`** — one row per lemma (definition, POS, IPA, sentence, etymology,
+  `synonyms text[]`, `first_added`, source), unique on `lower(lemma)`.
+- **`book`** — the source books.
+- **`word_book`** — the many-to-many that unpacks the CSV's `source_book` list, so
+  a word surfaced by two books is linked to both.
+
+Tables live in a dedicated schema (default `concordance`) so they can share a
+database with other projects. `pg_trgm` is enabled when privileges allow, giving a
+trigram index on `lemma` for future fuzzy lookups.
+
 ## Running the local model (RTX 3060, 12 GB)
 
 The judge talks to `llama.cpp` through the `llama-cpp-python` bindings — no

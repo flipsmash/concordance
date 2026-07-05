@@ -19,6 +19,7 @@ from rich.console import Console
 
 from .config import Config
 from .extract import ScannedPDFError, UnsupportedFormatError
+from . import db
 from .deepen import define as define_cmd
 from .finalize import finalize_file
 from .pipeline import run as run_pipeline
@@ -81,6 +82,35 @@ def finalize(
         console.print(f"[red]✗[/red] no such file: {vocab_csv}")
         raise typer.Exit(code=1)
     finalize_file(vocab_csv, console, assume_yes=yes)
+
+
+
+@app.command("sync-db")
+def sync_db(
+    master_csv: Path = typer.Argument(Path("master_vocab.csv"), help="Master vocab CSV to load."),
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema to write into."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Sync master_vocab.csv into PostgreSQL (creates the schema, then upserts)."""
+    if not master_csv.exists():
+        console.print(f"[red]✗[/red] no such file: {master_csv}")
+        raise typer.Exit(code=1)
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}")
+        console.print("[dim]set DATABASE_URL in the environment or a .env file[/dim]")
+        raise typer.Exit(code=1)
+    trgm = db.apply_schema(conn, schema)
+    stats = db.sync_master(master_csv, conn, schema)
+    conn.close()
+    console.print(
+        f"[green]✓[/green] synced [bold]{stats['words']}[/bold] words, "
+        f"{stats['books']} books, {stats['links']} word→book links into schema '{schema}'."
+    )
+    if not trgm:
+        console.print("[dim]note: pg_trgm index skipped (needs CREATE EXTENSION privilege).[/dim]")
+
 
 
 if __name__ == "__main__":
