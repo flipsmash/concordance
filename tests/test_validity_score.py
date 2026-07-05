@@ -56,3 +56,42 @@ def test_dominant_neighbor_ignores_proper_names():
     n = V._dominant_neighbor("tarrie")
     if n:
         assert V._in_wordnet(n[0]) or n[1] >= 4.0
+
+
+# --- foreign-language context rule ----------------------------------------
+
+def _stub_real_zipf(monkeypatch, *, ng=1e-7, corpus=True, root=None):
+    monkeypatch.setattr(V, "_ngram_peak", lambda w, s: ng)
+    monkeypatch.setattr(V, "_wordset", lambda: {"purus", "regia"} if corpus else set())
+    monkeypatch.setattr(V, "_in_wordnet", lambda w: False)
+    monkeypatch.setattr(V, "_dominant_neighbor", lambda w: None)
+    monkeypatch.setattr(V, "_morph_root", lambda w: root)
+    # NB: real zipf_frequency left in place so _english_fraction works.
+
+
+def test_foreign_context_caps_to_artifact(monkeypatch):
+    _stub_real_zipf(monkeypatch)
+    e = V.estimate("purus", sentence="Integer vitae, scelerisque purus, Non eget Mauri iaculis, nec arcu")
+    assert e.label == "likely-artifact"
+    assert "foreign-language context" in e.notes
+
+
+def test_english_context_not_flagged(monkeypatch):
+    _stub_real_zipf(monkeypatch)
+    e = V.estimate("regardance", sentence="Since you to non-regardance cast my faith and that I have adjudged")
+    assert "foreign-language context" not in e.notes
+    assert e.label != "likely-artifact"        # not penalised for language
+
+
+def test_short_sentence_not_flagged(monkeypatch):
+    # too few tokens to judge the language — must not trip the rule
+    _stub_real_zipf(monkeypatch)
+    e = V.estimate("purus", sentence="purus est")
+    assert "foreign-language context" not in e.notes
+
+
+def test_english_fraction_helper():
+    hi, n = V._english_fraction("the quick brown fox jumps over the lazy dog again")
+    assert hi > 0.5 and n >= 5
+    lo, _ = V._english_fraction("Hic ibat Simois hic est Sigeia tellus hic steterat Priami regia")
+    assert lo < 0.5

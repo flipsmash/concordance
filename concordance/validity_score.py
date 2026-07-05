@@ -18,6 +18,7 @@ rule that an LLM must never be the authority on whether a word is real:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 import requests
@@ -28,6 +29,14 @@ _NGRAM = "https://books.google.com/ngrams/json"
 # Order-of-magnitude Zipf jump to a near neighbor that marks a misspelling/variant
 # (matches validity.py's misspelling_zipf_gap).
 _NEIGHBOR_GAP = 1.5
+
+# Context-language check: an English rare word sits in an English sentence; a
+# Latin/French token sits among other foreign tokens. If too few of the context
+# sentence's words are common English, the whole line is another language and the
+# target word is probably foreign too.
+_FOREIGN_MIN_TOKENS = 5
+_FOREIGN_ENGLISH_FRACTION = 0.5
+_COMMON_ENGLISH_ZIPF = 3.0
 
 _PREFIXES = ("un", "re", "over", "under", "dis", "mis", "out", "be", "en", "im", "in")
 _SUFFIXES = ("edly", "ing", "ed", "es", "s", "er", "est", "ness", "less", "ly",
@@ -137,8 +146,18 @@ def _morph_root(word: str) -> str | None:
 
 # --- scoring --------------------------------------------------------------
 
+def _english_fraction(sentence: str) -> tuple[float, int]:
+    """(share of sentence tokens that are common English words, token count)."""
+    toks = [t.lower() for t in re.findall(r"[A-Za-z]+", sentence) if len(t) > 1]
+    if not toks:
+        return 1.0, 0
+    n_eng = sum(1 for t in toks if zipf_frequency(t, "en") >= _COMMON_ENGLISH_ZIPF)
+    return n_eng / len(toks), len(toks)
+
+
 def estimate(word: str, zipf: float | None = None,
-             session: requests.Session | None = None) -> ValidityEstimate:
+             session: requests.Session | None = None,
+             sentence: str = "") -> ValidityEstimate:
     word = word.strip().lower()
     zf = zipf_frequency(word, "en") if zipf is None else zipf
     ng = _ngram_peak(word, session)
@@ -174,6 +193,14 @@ def estimate(word: str, zipf: float | None = None,
         notes.append(f"near '{neighbor[0]}' (zipf {neighbor[1]:.1f}) — likely variant/OCR")
 
     score = max(0.0, min(1.0, score))
+
+    # A foreign-language context sentence is decisive: whatever corpus/ngram credit
+    # the token earned, if it lives among non-English words it is very likely not an
+    # English word. Cap it down into the artifact range.
+    frac, ntok = _english_fraction(sentence)
+    if ntok >= _FOREIGN_MIN_TOKENS and frac < _FOREIGN_ENGLISH_FRACTION:
+        score = min(score, 0.25)
+        notes.append(f"foreign-language context ({frac*100:.0f}% English)")
     label = "likely-valid" if score >= 0.6 else "likely-artifact" if score <= 0.35 else "uncertain"
     return ValidityEstimate(word=word, score=round(score, 2), label=label,
                             notes="; ".join(notes), suggestion=suggestion)

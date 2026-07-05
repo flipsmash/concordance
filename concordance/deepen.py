@@ -93,7 +93,7 @@ def define(vocab_path: Path, console: Console | None = None,
                 _fill(row, cand)
                 dict_hits += 1
             else:
-                est = validity_score.estimate(row["word"], session=session)
+                est = validity_score.estimate(row["word"], session=session, sentence=row.get("sentence", ""))
                 # Only spend a web search on words that aren't already obvious junk.
                 if use_web and est.label != "likely-artifact" and websearch.define_via_web(cand, llm):
                     _fill(row, cand)
