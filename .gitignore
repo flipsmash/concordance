@@ -20,3 +20,7 @@ missed_shadow.txt
 
 # Local agent / editor config
 .claude/
+
+# Secrets / local env
+.env
+*.env

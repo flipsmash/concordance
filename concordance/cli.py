@@ -19,6 +19,7 @@ from rich.console import Console
 
 from .config import Config
 from .extract import ScannedPDFError, UnsupportedFormatError
+from .deepen import define as define_cmd
 from .finalize import finalize_file
 from .pipeline import run as run_pipeline
 
@@ -55,6 +56,19 @@ def run(
     console.rule("[bold green]Done[/bold green]")
     console.print(f"[bold]{len(result.kept)}[/bold] words → {result.vocab_path.name}")
     console.print(f"[dim]{len(result.rejected)} rejected → {result.rejected_path.name}[/dim]")
+
+
+@app.command()
+def define(
+    vocab_csv: Path = typer.Argument(..., help="A <book>.vocab.csv; undefined rows are resolved / scored."),
+    web: bool = typer.Option(False, "--web", help="Last resort: web-search + grounded LLM extraction for words no dictionary defines."),
+    model: Optional[Path] = typer.Option(None, "--model", "-m", help="Model for --web extraction (defaults to the 14B)."),
+) -> None:
+    """Resolve still-undefined words via deeper sources; score the rest for validity."""
+    if not vocab_csv.exists():
+        console.print(f"[red]✗[/red] no such file: {vocab_csv}")
+        raise typer.Exit(code=1)
+    define_cmd(vocab_csv, console, use_web=web, model_path=str(model) if model else None)
 
 
 @app.command()

@@ -12,7 +12,7 @@ requirements & architecture spec for the full rationale.
 
 ```
 extract → clean → tokenize → frequency-floor → strip-proper-nouns
-        → validity-gate → LLM-judge → dictionary-lookup → review → CSV
+        → validity-gate → LLM-judge → dictionary-lookup → CSV → (define) → (finalize)
 ```
 
 - **frequency floor** — a stop-word-style cut of common words (never a rarity *ceiling*)
@@ -46,8 +46,8 @@ python -m spacy download en_core_web_sm
 # default: judges with the 14B at models/Qwen2.5-14B-Instruct-Q4_K_M.gguf
 concordance run "some book.epub"
 
-# skip the interactive pass, cap the shortlist
-concordance run "some book.epub" --no-review --limit 200
+# cap the shortlist size
+concordance run "some book.epub" --limit 200
 
 # point at a different model (e.g. the faster 7B for a big book)
 concordance run "some book.epub" --model models/Qwen2.5-7B-Instruct-Q4_K_M.gguf
@@ -65,7 +65,36 @@ common words off the list.
 Outputs land next to the book: `book.vocab.csv` and `book.rejected.csv`.
 
 Flags: `--min-zipf` (frequency floor; higher = rarer only), `--limit`,
-`--no-review`, `--accept-all`, `--no-lookup`, `--model`, `--stub`.
+`--no-lookup`, `--model`, `--stub`.
+
+### Resolving undefined words (`define`)
+
+The archaic / nonce tail (e.g. Shakespeare's *ungenitured*, *scrimer*) is often
+absent from the free dictionaries. `define` reaches further, touching only rows
+still missing a definition:
+
+```bash
+concordance define "some book.vocab.csv"
+```
+
+1. It looks each undefined word up in **Wordnik** (Century Dictionary + Webster's,
+   which carry archaic vocabulary) and **yourdictionary.com**, and writes any
+   definition it finds back into the CSV.
+2. Whatever still can't be defined gets a **validity estimate** written to a
+   sibling `<book>.undefined.csv`: a 0–1 score, a label (`likely-valid` /
+   `uncertain` / `likely-artifact`), explanatory notes, and a suggested
+   correction — so you can tell a real rare word (*cobloaf*, *overscutched*) from
+   an OCR/old-spelling artifact (*bareheade* → bareheaded) or nonsense. Signals
+   are deterministic and explainable: Google Books Ngram, wordfreq, WordNet/NLTK
+   wordlists, morphology, and a SymSpell near-neighbour check.
+
+Wordnik needs a free API key. Put it in a git-ignored `.env` at the project root:
+
+```
+WORDNIK_API_KEY=your_key_here
+```
+
+(or export `WORDNIK_API_KEY`). Without it, `define` uses yourdictionary only.
 
 ### Review by editing → master list → archive
 
@@ -124,7 +153,7 @@ Want it snappier for big books? Swap in `Qwen2.5-7B-Instruct` or
 **3. Run it.**
 
 ```bash
-concordance "some book.epub" --model models/Qwen2.5-14B-Instruct-Q4_K_M.gguf
+concordance run "some book.epub" --model models/Qwen2.5-14B-Instruct-Q4_K_M.gguf
 ```
 
 `Config.n_gpu_layers = -1` offloads as many layers to the GPU as the VRAM
