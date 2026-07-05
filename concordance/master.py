@@ -27,7 +27,7 @@ MASTER_NAME = "master_vocab.csv"
 
 # Per-book files to sweep into the archive, given the book stem. The source book
 # itself (.epub/.pdf/.txt) is matched separately since its extension varies.
-_ARTIFACT_SUFFIXES = (".vocab.csv", ".rejected.csv", ".enriched.csv")
+_ARTIFACT_SUFFIXES = (".vocab.csv", ".rejected.csv", ".enriched.csv", ".undefined.csv")
 _BOOK_SUFFIXES = (".epub", ".pdf", ".txt")
 
 

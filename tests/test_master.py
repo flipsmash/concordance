@@ -68,12 +68,15 @@ def test_archive_moves_artifacts_and_book(tmp_path):
     stem = "MyBook"
     (tmp_path / f"{stem}.vocab.csv").write_text("x")
     (tmp_path / f"{stem}.rejected.csv").write_text("x")
+    (tmp_path / f"{stem}.undefined.csv").write_text("x")
     (tmp_path / f"{stem}.epub").write_text("x")
     (tmp_path / "unrelated.txt").write_text("x")
     arch = tmp_path / "archive"
     moved, failed = master.archive_book(tmp_path / f"{stem}.vocab.csv", arch)
     assert failed == []
-    assert {p.name for p in moved} == {f"{stem}.vocab.csv", f"{stem}.rejected.csv", f"{stem}.epub"}
+    assert {p.name for p in moved} == {
+        f"{stem}.vocab.csv", f"{stem}.rejected.csv", f"{stem}.undefined.csv", f"{stem}.epub"}
+    assert (arch / f"{stem}.undefined.csv").exists()
     assert (arch / f"{stem}.epub").exists()
     assert not (tmp_path / f"{stem}.vocab.csv").exists()
     assert (tmp_path / "unrelated.txt").exists()   # untouched
