@@ -24,3 +24,7 @@ missed_shadow.txt
 # Secrets / local env
 .env
 *.env
+
+# Database dumps (data, not code)
+*.dump
+*.sql

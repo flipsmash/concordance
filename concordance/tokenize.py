@@ -18,6 +18,46 @@ from .model import Candidate, Occurrence
 
 _MAX_CHUNK = 90_000  # keep each spaCy call well under its default max_length
 
+_word_corpus = None
+
+
+def _wordset() -> frozenset[str]:
+    """NLTK's 234k-word dictionary (lazy, cached) — broad archaic coverage used to
+    tell a real lemma from a mangled one. Mirrors validity.py's loader."""
+    global _word_corpus
+    if _word_corpus is None:
+        try:
+            from nltk.corpus import words
+            _word_corpus = frozenset(w.lower() for w in words.words())
+        except Exception:
+            try:
+                import nltk
+                nltk.download("words", quiet=True)
+                from nltk.corpus import words
+                _word_corpus = frozenset(w.lower() for w in words.words())
+            except Exception:
+                _word_corpus = frozenset()
+    return _word_corpus
+
+
+def _attested(word: str) -> bool:
+    from wordfreq import zipf_frequency
+    return zipf_frequency(word, "en") > 0 or word in _wordset()
+
+
+def _resolve_lemma(tok) -> str:
+    """spaCy's rule lemmatizer sometimes strips a real word down to a non-word
+    (afeared -> afeare, overscutched -> overscutche, windring -> windre). Trust a
+    *changed* lemma only when it is itself a real word; otherwise keep the author's
+    spelling (which for archaic vocabulary is usually the correct headword)."""
+    lemma = tok.lemma_.lower().strip()
+    surface = tok.text.lower().strip()
+    if not lemma:
+        return surface
+    if lemma == surface or _attested(lemma):
+        return lemma
+    return surface if _attested(surface) else lemma
+
 
 @dataclass
 class _Acc:
@@ -76,7 +116,7 @@ def tokenize(chapters: list[Chapter]) -> dict[str, Candidate]:
                 for tok in sent:
                     if not tok.is_alpha or tok.is_stop or len(tok) < 3:
                         continue
-                    lemma = tok.lemma_.lower().strip()
+                    lemma = _resolve_lemma(tok)
                     if not lemma:
                         continue
                     a = acc[lemma]
