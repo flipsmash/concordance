@@ -76,7 +76,28 @@ CREATE TABLE IF NOT EXISTS {s}.word_book (
     book_id  integer NOT NULL REFERENCES {s}.book(id) ON DELETE CASCADE,
     PRIMARY KEY (word_id, book_id)
 );
+
+CREATE TABLE IF NOT EXISTS {s}.category (
+    id          serial PRIMARY KEY,
+    taxonomy    text NOT NULL DEFAULT 'usas',
+    code        text NOT NULL,
+    name        text NOT NULL,
+    parent_id   integer REFERENCES {s}.category(id) ON DELETE CASCADE,
+    level       integer NOT NULL DEFAULT 0,
+    assignable  boolean NOT NULL DEFAULT true,
+    UNIQUE (taxonomy, code)
+);
+
+CREATE TABLE IF NOT EXISTS {s}.word_category (
+    word_id     integer NOT NULL REFERENCES {s}.word(id) ON DELETE CASCADE,
+    category_id integer NOT NULL REFERENCES {s}.category(id) ON DELETE CASCADE,
+    confidence  real,
+    source      text,          -- 'usas-tagger' | 'wordnet' | 'llm' | 'dict-label'
+    is_primary  boolean NOT NULL DEFAULT false,
+    PRIMARY KEY (word_id, category_id)
+);
 """
+
 
 # pg_trgm powers future fuzzy "did-you-mean" lookups; optional because CREATE
 # EXTENSION needs privileges a managed role may lack.
@@ -177,3 +198,30 @@ def sync_master(csv_path: Path, conn: psycopg.Connection,
                     stats["links"] += 1
     conn.commit()
     return stats
+
+
+def load_taxonomy(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA,
+                  taxonomy: str = "usas") -> dict:
+    """Upsert the USAS category tree into {schema}.category. Idempotent."""
+    from . import usas
+    s = _safe_schema(schema)
+    cats = usas.categories()
+    code_to_id: dict[str, int] = {}
+    with conn.cursor() as cur:
+        # pass 1: upsert nodes (parent set in pass 2 once every id is known)
+        for c in cats:
+            cur.execute(
+                f"""INSERT INTO {s}.category (taxonomy, code, name, level, assignable)
+                    VALUES (%s,%s,%s,%s,%s)
+                    ON CONFLICT (taxonomy, code) DO UPDATE SET
+                        name=EXCLUDED.name, level=EXCLUDED.level, assignable=EXCLUDED.assignable
+                    RETURNING id""",
+                (taxonomy, c["code"], c["name"], c["level"], c["assignable"]))
+            code_to_id[c["code"]] = cur.fetchone()[0]
+        # pass 2: wire parents
+        for c in cats:
+            pid = code_to_id.get(c["parent_code"]) if c["parent_code"] else None
+            cur.execute(f"UPDATE {s}.category SET parent_id=%s WHERE id=%s",
+                        (pid, code_to_id[c["code"]]))
+    conn.commit()
+    return {"categories": len(cats), "top_level": sum(1 for c in cats if c["parent_code"] is None)}

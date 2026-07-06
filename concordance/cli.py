@@ -113,5 +113,24 @@ def sync_db(
 
 
 
+
+@app.command("load-taxonomy")
+def load_taxonomy(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Create the category tables and load the USAS taxonomy into PostgreSQL."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}")
+        raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    stats = db.load_taxonomy(conn, schema)
+    conn.close()
+    console.print(f"[green]✓[/green] loaded [bold]{stats['categories']}[/bold] USAS categories "
+                  f"({stats['top_level']} top-level fields) into {schema}.category")
+
+
 if __name__ == "__main__":
     app()
