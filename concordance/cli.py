@@ -157,5 +157,24 @@ def classify(
                   f"-> {stats['assignments']} category assignments")
 
 
+
+@app.command()
+def archaic(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Set the archaic-currency flag (current/dated/archaic/obsolete) on word_difficulty."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    dist = db.compute_archaic(conn, schema)
+    conn.close()
+    total = sum(dist.values())
+    parts = ", ".join(f"{k} {v}" for k, v in sorted(dist.items()))
+    console.print(f"[green]✓[/green] archaic flags set on [bold]{total}[/bold] words — {parts}")
+
+
 if __name__ == "__main__":
     app()

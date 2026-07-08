@@ -96,6 +96,13 @@ CREATE TABLE IF NOT EXISTS {s}.word_category (
     is_primary  boolean NOT NULL DEFAULT false,
     PRIMARY KEY (word_id, category_id)
 );
+
+CREATE TABLE IF NOT EXISTS {s}.word_difficulty (
+    word_id           integer PRIMARY KEY REFERENCES {s}.word(id) ON DELETE CASCADE,
+    archaic           text,          -- current | dated | archaic | obsolete
+    archaic_evidence  text,
+    updated_at        timestamptz NOT NULL DEFAULT now()
+);
 """
 
 
@@ -225,3 +232,32 @@ def load_taxonomy(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA,
                         (pid, code_to_id[c["code"]]))
     conn.commit()
     return {"categories": len(cats), "top_level": sum(1 for c in cats if c["parent_code"] is None)}
+
+
+def compute_archaic(conn, schema: str = DEFAULT_SCHEMA) -> dict:
+    """Set the archaic-currency ordinal on word_difficulty for every word. Uses the
+    definition register-label + (if present) vocab.wiktionary is_archaic/is_obsolete."""
+    from collections import Counter
+    from . import archaic as _archaic
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute("select to_regclass('vocab.wiktionary')")
+        have_wik = cur.fetchone()[0] is not None
+    join = ("LEFT JOIN (select lower(term) t, bool_or(is_archaic) arc, bool_or(is_obsolete) obs "
+            "from vocab.wiktionary group by lower(term)) k on k.t = lower(w.lemma)") if have_wik else ""
+    cols = "coalesce(k.arc,false), coalesce(k.obs,false)" if have_wik else "false, false"
+    dist: Counter = Counter()
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT w.id, w.definition, {cols} FROM {s}.word w {join}")
+        rows = cur.fetchall()
+        for wid, defn, arc, obs in rows:
+            flag, evid = _archaic.classify(defn, arc, obs)
+            dist[flag] += 1
+            cur.execute(
+                f"""INSERT INTO {s}.word_difficulty (word_id, archaic, archaic_evidence, updated_at)
+                    VALUES (%s,%s,%s, now())
+                    ON CONFLICT (word_id) DO UPDATE SET
+                        archaic=EXCLUDED.archaic, archaic_evidence=EXCLUDED.archaic_evidence, updated_at=now()""",
+                (wid, flag, evid))
+    conn.commit()
+    return dict(dist)
