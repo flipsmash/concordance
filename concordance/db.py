@@ -148,6 +148,8 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
                     "ADD COLUMN IF NOT EXISTS difficulty_factors jsonb")
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS quiz_definition text")
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS quiz_def_source text")
+        cur.execute(f"ALTER TABLE {s}.word_difficulty ADD COLUMN IF NOT EXISTS quizzable boolean")
+        cur.execute(f"ALTER TABLE {s}.word_difficulty ADD COLUMN IF NOT EXISTS quizzable_reason text")
     trgm = True
     try:
         with conn.cursor() as cur:
@@ -397,3 +399,29 @@ def compute_quiz_definitions(conn, schema: str = DEFAULT_SCHEMA, cfg=None,
         conn.commit()
     return {"words": len(rows), "clean": stats["clean"],
             "rewritten": stats["rewritten"], "redacted": stats["redacted"]}
+
+
+def compute_quizzable(conn, schema: str = DEFAULT_SCHEMA) -> dict:
+    """Set the quizzable flag (+ reason) on word_difficulty for every word."""
+    from collections import Counter
+    from wordfreq import zipf_frequency
+    from . import quizdef
+    from .validity_score import _morph_root
+    s = _safe_schema(schema)
+    dist: Counter = Counter()
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT id, lemma, definition FROM {s}.word WHERE coalesce(definition,'') <> ''")
+        rows = cur.fetchall()
+        for wid, lemma, defn in rows:
+            root = _morph_root(lemma)
+            rz = zipf_frequency(root, "en") if root else None
+            ok, reason = quizdef.quizzable(defn, root, rz)
+            dist["quizzable" if ok else "excluded"] += 1
+            cur.execute(
+                f"""INSERT INTO {s}.word_difficulty (word_id, quizzable, quizzable_reason, updated_at)
+                    VALUES (%s,%s,%s, now())
+                    ON CONFLICT (word_id) DO UPDATE SET
+                        quizzable=EXCLUDED.quizzable, quizzable_reason=EXCLUDED.quizzable_reason, updated_at=now()""",
+                (wid, ok, reason or None))
+    conn.commit()
+    return dict(dist)

@@ -238,5 +238,23 @@ def quizdef(
                   f"({stats['clean']} clean, {stats['rewritten']} rewritten, {stats['redacted']} redacted)")
 
 
+
+@app.command()
+def quizzable(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Flag words as quizzable (exclude grammatical/variant forms and trivially-inferable derivatives)."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    dist = db.compute_quizzable(conn, schema)
+    conn.close()
+    console.print(f"[green]✓[/green] quizzable: [bold]{dist.get('quizzable',0)}[/bold] quizzable, "
+                  f"{dist.get('excluded',0)} excluded")
+
+
 if __name__ == "__main__":
     app()

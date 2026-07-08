@@ -143,3 +143,38 @@ def _parse(text: str):
         except json.JSONDecodeError:
             continue
     return []
+
+
+# --- quiz suitability -----------------------------------------------------
+
+# Definitions that just point at another word (the "answer" isn't real vocabulary).
+_VARIANT_RE = re.compile(
+    r"\b(form|spelling|inflection|tense|participle|plural|abbreviation|initialism) of\b"
+    r"|\b(first|second|third)-person (singular|plural)\b", re.IGNORECASE)
+
+# A morphological derivative whose root is at least this common is trivially
+# inferable from the root (reveller<-revel); a rare root (abacination<-abacinate)
+# is not, so the word stays quizzable. wordfreq Zipf is corpus-independent.
+_COMMON_ROOT_ZIPF = 3.0
+
+
+# TODO(quizzable-derivative-false-positives): the common-root rule is purely
+# ORTHOGRAPHIC — it excludes any word whose _morph_root strips to a common root,
+# even when the suffix shifted the meaning so the word is NOT inferable from the
+# root. e.g. `battlement` (indented parapet) is dropped as a "derivative of
+# 'battle'"; same risk for any word whose sense drifted from its root form.
+# ~762 words are excluded by this rule, so the blast radius is non-trivial.
+# Proposed fix: only exclude a derivative when the definition ALSO literally
+# leaks the root, i.e. gate on `has_leak(word, definition)` in addition to the
+# morphology+zipf match. That keeps semantically-drifted derivatives quizzable
+# (their gloss won't contain the root) while still dropping the truly
+# transparent ones (reveller -> "one who revels"). Needs the surface word passed
+# in, which compute_quizzable already has.
+def quizzable(definition: str, morph_root: str | None = None,
+              root_zipf: float | None = None) -> tuple[bool, str]:
+    """(quizzable, reason). False when the answer is trivially inferable."""
+    if _VARIANT_RE.search(definition or ""):
+        return False, "grammatical/variant form"
+    if morph_root and root_zipf is not None and root_zipf >= _COMMON_ROOT_ZIPF:
+        return False, f"transparent derivative of common root '{morph_root}'"
+    return True, ""
