@@ -196,5 +196,23 @@ def ngram(
                   f"({stats['in_corpus']} in corpus, {stats['failed']} failed)")
 
 
+
+@app.command()
+def difficulty(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Compute the ex-ante difficulty scalar (+ factor breakdown) on word_difficulty."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    stats = db.compute_difficulty(conn, schema)
+    conn.close()
+    console.print(f"[green]✓[/green] difficulty set on [bold]{stats['words']}[/bold] words "
+                  f"(mean {stats['mean']}, median {stats['median']})")
+
+
 if __name__ == "__main__":
     app()

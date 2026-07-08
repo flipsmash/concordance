@@ -142,6 +142,10 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
         # existing table, so evolve columns explicitly)
         cur.execute(f"ALTER TABLE {s}.word_difficulty "
                     "ADD COLUMN IF NOT EXISTS archaic_confidence double precision")
+        cur.execute(f"ALTER TABLE {s}.word_difficulty "
+                    "ADD COLUMN IF NOT EXISTS difficulty double precision")
+        cur.execute(f"ALTER TABLE {s}.word_difficulty "
+                    "ADD COLUMN IF NOT EXISTS difficulty_factors jsonb")
     trgm = True
     try:
         with conn.cursor() as cur:
@@ -315,3 +319,41 @@ def fetch_ngrams(conn, schema: str = DEFAULT_SCHEMA, only_missing: bool = True,
             time.sleep(delay)
     conn.commit()
     return stats
+
+
+def compute_difficulty(conn, schema: str = DEFAULT_SCHEMA) -> dict:
+    """Compute the ex-ante difficulty scalar (+ factor breakdown) for every word."""
+    import statistics
+    from psycopg.types.json import Json
+    from wordfreq import zipf_frequency
+    from . import difficulty as _diff
+    from .validity_score import _morph_root
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(f"""
+            SELECT w.id, w.lemma, g.peak, d.archaic, d.archaic_confidence, coalesce(dom.fields,'')
+            FROM {s}.word w
+            LEFT JOIN {s}.word_ngram g ON g.word_id = w.id
+            LEFT JOIN {s}.word_difficulty d ON d.word_id = w.id
+            LEFT JOIN (SELECT wc.word_id, string_agg(DISTINCT left(c.code,1), '') fields
+                       FROM {s}.word_category wc JOIN {s}.category c ON c.id = wc.category_id
+                       GROUP BY wc.word_id) dom ON dom.word_id = w.id""")
+        rows = cur.fetchall()
+        scores = []
+        for wid, lemma, peak, archaic, aconf, fields in rows:
+            zipf = zipf_frequency(lemma, "en")
+            has_domain = any(f in _diff.DOMAIN_FIELDS for f in fields)
+            morph = _morph_root(lemma) is not None
+            sc, factors = _diff.score(zipf, peak, archaic or "current", aconf, has_domain, morph)
+            scores.append(sc)
+            cur.execute(
+                f"""INSERT INTO {s}.word_difficulty (word_id, difficulty, difficulty_factors, updated_at)
+                    VALUES (%s,%s,%s, now())
+                    ON CONFLICT (word_id) DO UPDATE SET
+                        difficulty=EXCLUDED.difficulty, difficulty_factors=EXCLUDED.difficulty_factors,
+                        updated_at=now()""",
+                (wid, sc, Json(factors)))
+    conn.commit()
+    return {"words": len(scores),
+            "mean": round(statistics.mean(scores), 1) if scores else 0,
+            "median": statistics.median(scores) if scores else 0}
