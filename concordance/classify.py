@@ -149,24 +149,32 @@ def _parse(text: str):
     return []
 
 
-def classify_and_store(conn, schema: str, cfg: Config | None = None, limit: int = 0) -> dict:
+def classify_and_store(conn, schema: str, cfg: Config | None = None, limit: int = 0,
+                       only_missing: bool = False, batch: int | None = None) -> dict:
     """Classify every word in {schema}.word and write tags to word_category.
     Idempotent for the LLM-sourced rows (cleared and rewritten each run)."""
     ssch = db._safe_schema(schema)
     with conn.cursor() as cur:
-        cur.execute(f"SELECT id, lemma, part_of_speech, definition, sentence FROM {ssch}.word"
-                    + (f" LIMIT {int(limit)}" if limit else ""))
+        where = (" WHERE NOT EXISTS (SELECT 1 FROM " + ssch + ".word_category wc WHERE wc.word_id=word.id)"
+                 if only_missing else "")
+        cur.execute(f"SELECT id, lemma, part_of_speech, definition, sentence FROM {ssch}.word word"
+                    + where + (f" LIMIT {int(limit)}" if limit else ""))
         rows = cur.fetchall()
         cur.execute(f"SELECT code, id FROM {ssch}.category WHERE taxonomy='usas'")
         code_id = dict(cur.fetchall())
 
     items = [{"word": r[1], "pos": r[2] or "", "definition": r[3] or "",
               "sentence": r[4] or "", "_id": r[0]} for r in rows]
-    tags = Classifier(cfg).classify(items)
+    clf = Classifier(cfg)
+    if batch:
+        clf.batch = batch
+    tags = clf.classify(items)
 
     stats = {"words": len(items), "classified": 0, "assignments": 0}
     with conn.cursor() as cur:
-        if limit:
+        if only_missing:
+            pass                                   # these words have no rows to clear
+        elif limit:
             cur.execute(f"DELETE FROM {ssch}.word_category WHERE source IN ('llm','wnd+llm') "
                         "AND word_id = ANY(%s)", ([r[0] for r in rows],))
         else:

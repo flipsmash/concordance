@@ -138,6 +138,8 @@ def classify(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
     model: Optional[Path] = typer.Option(None, "--model", "-m", help="Model (defaults to the 14B)."),
     limit: int = typer.Option(0, "--limit", "-l", help="Only classify the first N words (0 = all)."),
+    only_missing: bool = typer.Option(False, "--only-missing", help="Only classify words that have no category yet."),
+    batch: int = typer.Option(0, "--batch", help="Override the batch size (smaller = fewer omissions)."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Tag every word in the DB with USAS categories (LLM + WordNet-Domains prior)."""
@@ -149,7 +151,7 @@ def classify(
     cfg = Config()
     if model:
         cfg.model_path = str(model)
-    stats = classify_and_store(conn, schema, cfg, limit)
+    stats = classify_and_store(conn, schema, cfg, limit, only_missing=only_missing, batch=batch or None)
     conn.close()
     console.print(f"[green]✓[/green] classified [bold]{stats['classified']}[/bold]/{stats['words']} words "
                   f"-> {stats['assignments']} category assignments")
