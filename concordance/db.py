@@ -100,9 +100,10 @@ CREATE TABLE IF NOT EXISTS {s}.word_category (
 
 CREATE TABLE IF NOT EXISTS {s}.word_difficulty (
     word_id           integer PRIMARY KEY REFERENCES {s}.word(id) ON DELETE CASCADE,
-    archaic           text,          -- current | dated | archaic | obsolete
-    archaic_evidence  text,
-    updated_at        timestamptz NOT NULL DEFAULT now()
+    archaic             text,          -- current | dated | archaic | obsolete
+    archaic_evidence    text,
+    archaic_confidence  double precision,
+    updated_at          timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS {s}.word_ngram (
@@ -137,6 +138,10 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
     s = _safe_schema(schema)
     with conn.cursor() as cur:
         cur.execute(_SCHEMA_DDL.format(s=s))
+        # idempotent column additions (CREATE TABLE IF NOT EXISTS won't alter an
+        # existing table, so evolve columns explicitly)
+        cur.execute(f"ALTER TABLE {s}.word_difficulty "
+                    "ADD COLUMN IF NOT EXISTS archaic_confidence double precision")
     trgm = True
     try:
         with conn.cursor() as cur:
@@ -263,14 +268,15 @@ def compute_archaic(conn, schema: str = DEFAULT_SCHEMA) -> dict:
                         LEFT JOIN {s}.word_ngram g ON g.word_id = w.id""")
         rows = cur.fetchall()
         for wid, defn, arc, obs, peak, ratio in rows:
-            flag, evid = _archaic.classify(defn, arc, obs, peak, ratio)
+            flag, evid, conf = _archaic.classify(defn, arc, obs, peak, ratio)
             dist[flag] += 1
             cur.execute(
-                f"""INSERT INTO {s}.word_difficulty (word_id, archaic, archaic_evidence, updated_at)
-                    VALUES (%s,%s,%s, now())
+                f"""INSERT INTO {s}.word_difficulty (word_id, archaic, archaic_evidence, archaic_confidence, updated_at)
+                    VALUES (%s,%s,%s,%s, now())
                     ON CONFLICT (word_id) DO UPDATE SET
-                        archaic=EXCLUDED.archaic, archaic_evidence=EXCLUDED.archaic_evidence, updated_at=now()""",
-                (wid, flag, evid))
+                        archaic=EXCLUDED.archaic, archaic_evidence=EXCLUDED.archaic_evidence,
+                        archaic_confidence=EXCLUDED.archaic_confidence, updated_at=now()""",
+                (wid, flag, evid, conf))
     conn.commit()
     return dict(dist)
 
