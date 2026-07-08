@@ -214,5 +214,29 @@ def difficulty(
                   f"(mean {stats['mean']}, median {stats['median']})")
 
 
+
+@app.command()
+def quizdef(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    model: Optional[Path] = typer.Option(None, "--model", "-m", help="Model for rewrites (defaults to the 14B)."),
+    refresh: bool = typer.Option(False, "--refresh", help="Recompute all (default: only words without a quiz definition)."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap words processed."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Build quiz-safe definitions: clean defs pass through, leaking ones are LLM-rewritten."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    cfg = Config()
+    if model:
+        cfg.model_path = str(model)
+    stats = db.compute_quiz_definitions(conn, schema, cfg, only_missing=not refresh, limit=limit)
+    conn.close()
+    console.print(f"[green]✓[/green] quiz defs: [bold]{stats['words']}[/bold] words "
+                  f"({stats['clean']} clean, {stats['rewritten']} rewritten, {stats['redacted']} redacted)")
+
+
 if __name__ == "__main__":
     app()

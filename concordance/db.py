@@ -146,6 +146,8 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
                     "ADD COLUMN IF NOT EXISTS difficulty double precision")
         cur.execute(f"ALTER TABLE {s}.word_difficulty "
                     "ADD COLUMN IF NOT EXISTS difficulty_factors jsonb")
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS quiz_definition text")
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS quiz_def_source text")
     trgm = True
     try:
         with conn.cursor() as cur:
@@ -357,3 +359,41 @@ def compute_difficulty(conn, schema: str = DEFAULT_SCHEMA) -> dict:
     return {"words": len(scores),
             "mean": round(statistics.mean(scores), 1) if scores else 0,
             "median": statistics.median(scores) if scores else 0}
+
+
+def compute_quiz_definitions(conn, schema: str = DEFAULT_SCHEMA, cfg=None,
+                             only_missing: bool = True, limit: int = 0) -> dict:
+    """Set quiz_definition/quiz_def_source. Clean defs pass through free; leakers are
+    LLM-rewritten (validated) or redacted. Resumable via only_missing (scale-ready)."""
+    from collections import Counter
+    from . import quizdef
+    s = _safe_schema(schema)
+    where = "quiz_definition IS NULL AND " if only_missing else ""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT id, lemma, definition FROM {s}.word "
+                    f"WHERE {where}coalesce(definition,'') <> ''" + (f" LIMIT {int(limit)}" if limit else ""))
+        rows = cur.fetchall()
+
+    clean = [(i, l, d) for i, l, d in rows if not quizdef.has_leak(l, d)]
+    leakers = [(i, l, d) for i, l, d in rows if quizdef.has_leak(l, d)]
+    stats = Counter()
+
+    with conn.cursor() as cur:
+        for wid, lemma, defn in clean:                       # free — no model
+            cur.execute(f"UPDATE {s}.word SET quiz_definition=%s, quiz_def_source='clean' WHERE id=%s",
+                        (defn, wid))
+            stats["clean"] += 1
+        conn.commit()
+
+    if leakers:
+        rw = quizdef.Rewriter(cfg)
+        res = rw.rewrite([{"word": l, "definition": d} for _, l, d in leakers])
+        with conn.cursor() as cur:
+            for wid, lemma, defn in leakers:
+                qd, src = res.get(lemma.lower(), (quizdef.redact(lemma, defn), "redacted"))
+                cur.execute(f"UPDATE {s}.word SET quiz_definition=%s, quiz_def_source=%s WHERE id=%s",
+                            (qd, src, wid))
+                stats[src] += 1
+        conn.commit()
+    return {"words": len(rows), "clean": stats["clean"],
+            "rewritten": stats["rewritten"], "redacted": stats["redacted"]}
