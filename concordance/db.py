@@ -23,6 +23,7 @@ from pathlib import Path
 import csv
 
 import psycopg
+import requests
 
 from .deepdef import _load_dotenv
 
@@ -102,6 +103,15 @@ CREATE TABLE IF NOT EXISTS {s}.word_difficulty (
     archaic           text,          -- current | dated | archaic | obsolete
     archaic_evidence  text,
     updated_at        timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS {s}.word_ngram (
+    word_id        integer PRIMARY KEY REFERENCES {s}.word(id) ON DELETE CASCADE,
+    peak           double precision,
+    recent         double precision,
+    recency_ratio  double precision,
+    peak_year      integer,
+    fetched_at     timestamptz NOT NULL DEFAULT now()
 );
 """
 
@@ -248,10 +258,12 @@ def compute_archaic(conn, schema: str = DEFAULT_SCHEMA) -> dict:
     cols = "coalesce(k.arc,false), coalesce(k.obs,false)" if have_wik else "false, false"
     dist: Counter = Counter()
     with conn.cursor() as cur:
-        cur.execute(f"SELECT w.id, w.definition, {cols} FROM {s}.word w {join}")
+        cur.execute(f"""SELECT w.id, w.definition, {cols}, g.peak, g.recency_ratio
+                        FROM {s}.word w {join}
+                        LEFT JOIN {s}.word_ngram g ON g.word_id = w.id""")
         rows = cur.fetchall()
-        for wid, defn, arc, obs in rows:
-            flag, evid = _archaic.classify(defn, arc, obs)
+        for wid, defn, arc, obs, peak, ratio in rows:
+            flag, evid = _archaic.classify(defn, arc, obs, peak, ratio)
             dist[flag] += 1
             cur.execute(
                 f"""INSERT INTO {s}.word_difficulty (word_id, archaic, archaic_evidence, updated_at)
@@ -261,3 +273,39 @@ def compute_archaic(conn, schema: str = DEFAULT_SCHEMA) -> dict:
                 (wid, flag, evid))
     conn.commit()
     return dict(dist)
+
+
+def fetch_ngrams(conn, schema: str = DEFAULT_SCHEMA, only_missing: bool = True,
+                 limit: int = 0, delay: float = 0.3) -> dict:
+    """Fetch + cache Google Books Ngram features for words. Returns counts."""
+    import time
+    from . import ngram
+    s = _safe_schema(schema)
+    where = (f" WHERE NOT EXISTS (SELECT 1 FROM {s}.word_ngram g WHERE g.word_id=w.id)"
+             if only_missing else "")
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT w.id, w.lemma FROM {s}.word w{where}" + (f" LIMIT {int(limit)}" if limit else ""))
+        rows = cur.fetchall()
+    session = requests.Session()
+    session.headers.update({"User-Agent": "Mozilla/5.0 (concordance vocab tool)"})
+    stats = {"words": len(rows), "fetched": 0, "in_corpus": 0, "failed": 0}
+    with conn.cursor() as cur:
+        for wid, lemma in rows:
+            f = ngram.fetch(lemma, session)
+            if f is None:
+                stats["failed"] += 1
+                time.sleep(delay); continue
+            if f["peak"]:
+                stats["in_corpus"] += 1
+            cur.execute(
+                f"""INSERT INTO {s}.word_ngram (word_id, peak, recent, recency_ratio, peak_year, fetched_at)
+                    VALUES (%s,%s,%s,%s,%s, now())
+                    ON CONFLICT (word_id) DO UPDATE SET peak=EXCLUDED.peak, recent=EXCLUDED.recent,
+                        recency_ratio=EXCLUDED.recency_ratio, peak_year=EXCLUDED.peak_year, fetched_at=now()""",
+                (wid, f["peak"], f["recent"], f["recency_ratio"], f["peak_year"]))
+            stats["fetched"] += 1
+            if stats["fetched"] % 200 == 0:
+                conn.commit()
+            time.sleep(delay)
+    conn.commit()
+    return stats

@@ -176,5 +176,25 @@ def archaic(
     console.print(f"[green]✓[/green] archaic flags set on [bold]{total}[/bold] words — {parts}")
 
 
+
+@app.command()
+def ngram(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    refetch: bool = typer.Option(False, "--refetch", help="Refetch all words (default: only uncached)."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of words fetched."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Fetch + cache Google Books Ngram features (rarity + recency) into word_ngram."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    stats = db.fetch_ngrams(conn, schema, only_missing=not refetch, limit=limit)
+    conn.close()
+    console.print(f"[green]✓[/green] ngram: fetched [bold]{stats['fetched']}[/bold]/{stats['words']} "
+                  f"({stats['in_corpus']} in corpus, {stats['failed']} failed)")
+
+
 if __name__ == "__main__":
     app()

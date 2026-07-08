@@ -36,3 +36,18 @@ def test_evidence_is_reported():
 def test_word_boundary_avoids_false_positives():
     # 'undated' must not trip the 'dated' matcher
     assert archaic.classify("An undated manuscript.")[0] == "current"
+
+
+def test_recency_decline_flags_faded_common_words():
+    # high peak + steep decline -> archaic (forsooth/raiment-like)
+    flag, ev = archaic.classify("Truly.", ngram_peak=1.6e-5, recency_ratio=0.01)
+    assert flag == "archaic" and "faded" in ev
+
+
+def test_low_peak_decline_does_not_flag():
+    # rare historical-referent word (cangue): decline but tiny peak -> stays current
+    assert archaic.classify("A wooden collar.", ngram_peak=6e-7, recency_ratio=0.01)[0] == "current"
+
+
+def test_current_word_with_high_recency_stays_current():
+    assert archaic.classify("To speak softly.", ngram_peak=1.3e-5, recency_ratio=0.65)[0] == "current"

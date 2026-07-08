@@ -23,6 +23,12 @@ _OBSOLETE_RE = re.compile(r"\bobsolete\b", re.IGNORECASE)
 _ARCHAIC_RE = re.compile(r"\barchaic\b", re.IGNORECASE)
 _DATED_RE = re.compile(r"\b(dated|old-fashioned)\b", re.IGNORECASE)
 
+# Recency-decline => archaic, but only for words that were GENUINELY common and
+# faded (high peak) — a low-peak decline just means a rare/historical referent
+# (cangue), not an archaic English word.
+_RECENCY_MIN_PEAK = 1e-6
+_RECENCY_MAX_RATIO = 0.15
+
 
 def _def_tier(definition: str) -> int:
     """0 current .. 3 obsolete, from a register label in the gloss."""
@@ -36,7 +42,8 @@ def _def_tier(definition: str) -> int:
     return 0
 
 
-def classify(definition: str, wik_archaic: bool = False, wik_obsolete: bool = False) -> tuple[str, str]:
+def classify(definition: str, wik_archaic: bool = False, wik_obsolete: bool = False,
+             ngram_peak: float | None = None, recency_ratio: float | None = None) -> tuple[str, str]:
     """Return (flag, evidence). Strongest signal wins."""
     tier, evidence = 0, []
     dt = _def_tier(definition)
@@ -49,4 +56,8 @@ def classify(definition: str, wik_archaic: bool = False, wik_obsolete: bool = Fa
     elif wik_archaic and tier < 2:
         tier = 2
         evidence.append("wiktionary: archaic")
+    if (tier < 2 and ngram_peak is not None and recency_ratio is not None
+            and ngram_peak >= _RECENCY_MIN_PEAK and recency_ratio < _RECENCY_MAX_RATIO):
+        tier = 2
+        evidence.append(f"faded in print (recency {recency_ratio:.2f})")
     return _TIERS[tier], "; ".join(evidence)
