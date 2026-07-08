@@ -132,5 +132,28 @@ def load_taxonomy(
                   f"({stats['top_level']} top-level fields) into {schema}.category")
 
 
+
+@app.command()
+def classify(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    model: Optional[Path] = typer.Option(None, "--model", "-m", help="Model (defaults to the 14B)."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Only classify the first N words (0 = all)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Tag every word in the DB with USAS categories (LLM + WordNet-Domains prior)."""
+    from .classify import classify_and_store
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    cfg = Config()
+    if model:
+        cfg.model_path = str(model)
+    stats = classify_and_store(conn, schema, cfg, limit)
+    conn.close()
+    console.print(f"[green]✓[/green] classified [bold]{stats['classified']}[/bold]/{stats['words']} words "
+                  f"-> {stats['assignments']} category assignments")
+
+
 if __name__ == "__main__":
     app()
