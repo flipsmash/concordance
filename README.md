@@ -196,15 +196,19 @@ feature (quizzing, stats) just needs to filter on `active = true`, and history
 (audio, ngram data, etc.) stays intact.
 
 ```bash
-# backend (FastAPI) — from the project root, with the venv active
+# first time only
 pip install -e ".[web]"
-uvicorn webapp.backend.main:app --reload --port 8000 --app-dir .
+(cd webapp/frontend && npm install)
 
-# frontend (React + Vite), in a second terminal
-cd webapp/frontend
-npm install   # first time only
-npm run dev   # http://localhost:5173
+# every time — runs backend + frontend together, http://localhost:5173
+./webapp/dev.sh
 ```
+
+`dev.sh` also sets `WATCHFILES_FORCE_POLLING=true` for uvicorn (Vite's own
+polling is configured in `frontend/vite.config.js`). Both are needed because
+this repo lives on `/mnt/c` — a Windows drive mounted into WSL — where native
+fs-change notifications don't reliably reach either dev server's watcher, so
+edits silently fail to hot-reload without polling.
 
 ## Status
 

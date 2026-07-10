@@ -4,6 +4,8 @@
   --bg: #fff;
   --border: #e5e4e7;
   --row-alt: #faf9fc;
+  --row-hover: rgba(170, 59, 255, 0.08);
+  --row-danger-hover: rgba(209, 41, 61, 0.12);
   --danger: #d1293d;
   --danger-hover: #a91f2f;
   --accent: #aa3bff;
@@ -28,6 +30,8 @@
     --bg: #16171d;
     --border: #2e303a;
     --row-alt: #1b1c23;
+    --row-hover: rgba(192, 132, 252, 0.14);
+    --row-danger-hover: rgba(229, 72, 77, 0.16);
     --danger: #e5484d;
     --danger-hover: #ff6369;
     --accent: #c084fc;

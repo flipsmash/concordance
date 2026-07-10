@@ -71,23 +71,26 @@ def list_words(
     page_size: int = Query(50, ge=1, le=500),
     sort: Literal["lemma", "part_of_speech", "definition", "difficulty"] = "difficulty",
     dir: Literal["asc", "desc"] = "asc",
+    pos: str | None = None,
 ) -> WordPage:
     order_col = SORT_COLUMNS[sort]
     order_dir = "ASC" if dir == "asc" else "DESC"
     offset = (page - 1) * page_size
+    pos_filter = " AND w.part_of_speech = %s" if pos else ""
+    params = (pos,) if pos else ()
 
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(f"SELECT count(*) FROM {SCHEMA}.word w WHERE w.active")
+        cur.execute(f"SELECT count(*) FROM {SCHEMA}.word w WHERE w.active{pos_filter}", params)
         total = cur.fetchone()[0]
 
         cur.execute(
             f"""SELECT w.id, w.lemma, w.part_of_speech, w.definition, d.difficulty
                 FROM {SCHEMA}.word w
                 LEFT JOIN {SCHEMA}.word_difficulty d ON d.word_id = w.id
-                WHERE w.active
+                WHERE w.active{pos_filter}
                 ORDER BY {order_col} {order_dir} NULLS LAST, w.lemma ASC
                 LIMIT %s OFFSET %s""",
-            (page_size, offset),
+            (*params, page_size, offset),
         )
         rows = cur.fetchall()
 
@@ -96,6 +99,17 @@ def list_words(
         for r in rows
     ]
     return WordPage(items=items, total=total, page=page, page_size=page_size)
+
+
+@app.get("/api/pos-values", response_model=list[str])
+def pos_values() -> list[str]:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT DISTINCT w.part_of_speech FROM {SCHEMA}.word w
+                WHERE w.active AND w.part_of_speech IS NOT NULL
+                ORDER BY 1"""
+        )
+        return [r[0] for r in cur.fetchall()]
 
 
 @app.delete("/api/words/{word_id}", status_code=204)

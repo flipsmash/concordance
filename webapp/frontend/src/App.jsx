@@ -17,8 +17,17 @@ function App() {
   const [page, setPage] = useState(1)
   const [sort, setSort] = useState('difficulty')
   const [dir, setDir] = useState('asc')
+  const [pos, setPos] = useState('')
+  const [posOptions, setPosOptions] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/pos-values`)
+      .then((res) => res.json())
+      .then(setPosOptions)
+      .catch(() => {})
+  }, [])
 
   const load = useCallback(() => {
     setLoading(true)
@@ -29,6 +38,7 @@ function App() {
       sort,
       dir,
     })
+    if (pos) params.set('pos', pos)
     fetch(`${API_BASE}/api/words?${params}`)
       .then((res) => {
         if (!res.ok) throw new Error(`load failed: ${res.status}`)
@@ -40,11 +50,16 @@ function App() {
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false))
-  }, [page, sort, dir])
+  }, [page, sort, dir, pos])
 
   useEffect(() => {
     load()
   }, [load])
+
+  function handlePosChange(value) {
+    setPos(value)
+    setPage(1)
+  }
 
   function handleSort(key) {
     if (sort === key) {
@@ -71,9 +86,22 @@ function App() {
     <div className="review-app">
       <header>
         <h1>Vocab Review</h1>
-        <span className="count">
-          {total.toLocaleString()} active term{total === 1 ? '' : 's'}
-        </span>
+        <div className="header-controls">
+          <label className="pos-filter">
+            POS:{' '}
+            <select value={pos} onChange={(e) => handlePosChange(e.target.value)}>
+              <option value="">All</option>
+              {posOptions.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+          </label>
+          <span className="count">
+            {total.toLocaleString()} active term{total === 1 ? '' : 's'}
+          </span>
+        </div>
       </header>
 
       {error && <div className="error-banner">{error}</div>}
