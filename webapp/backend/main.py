@@ -9,22 +9,16 @@ later feature (quizzing, stats) just needs to filter on active=true.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from concordance import db as cdb
 
 app = FastAPI(title="Concordance Review API")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
-    allow_methods=["GET", "DELETE"],
-    allow_headers=["*"],
-)
 
 SCHEMA = cdb.DEFAULT_SCHEMA
 SORT_COLUMNS = {
@@ -122,3 +116,12 @@ def prune_word(word_id: int) -> None:
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="word not found")
         conn.commit()
+
+
+# Serves the built frontend (webapp/frontend/dist, from `npm run build`) so a
+# single port can be exposed publicly. Registered last so it never shadows an
+# /api/* route above; absent in plain local dev, where the Vite dev server is
+# used instead and this directory doesn't exist.
+_DIST_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+if _DIST_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=_DIST_DIR, html=True), name="frontend")

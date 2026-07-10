@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import './App.css'
 
-const API_BASE = 'http://localhost:8000'
+const API_BASE = '' // relative — dev proxies /api via vite.config.js, prod is same-origin
 const PAGE_SIZE = 50
 
 const COLUMNS = [

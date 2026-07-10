@@ -12,5 +12,11 @@ export default defineConfig({
     watch: {
       usePolling: true,
     },
+    // lets the frontend call relative /api/* paths in both dev (proxied here)
+    // and when FastAPI serves the built app directly (same origin, no proxy
+    // needed) — one code path for both.
+    proxy: {
+      '/api': 'http://localhost:8000',
+    },
   },
 })
