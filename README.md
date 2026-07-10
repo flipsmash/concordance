@@ -210,6 +210,38 @@ this repo lives on `/mnt/c` — a Windows drive mounted into WSL — where nativ
 fs-change notifications don't reliably reach either dev server's watcher, so
 edits silently fail to hot-reload without polling.
 
+### Public access — `vocab.brfinnegan.org`
+
+The app is exposed to that domain via a **Cloudflare Tunnel** running on this
+WSL machine (no port-forwarding/firewall changes) and gated by **Cloudflare
+Access** (Zero Trust → Access → Applications → "Vocab Review", policy allows
+only `brfinnegan@gmail.com`) — the API has no app-level auth of its own yet,
+so Access is the only thing standing between the internet and the delete
+button until real user accounts exist.
+
+Both pieces run as **systemd --user services** (survive reboot/logout via
+`loginctl enable-linger brian`, already enabled):
+
+- `concordance-web.service` — runs the backend directly against whatever's
+  already built in `webapp/frontend/dist`. It deliberately does **not**
+  rebuild the frontend itself — this unit's PATH doesn't include nvm's Node
+  (only an interactive shell profile sets that up), so a build attempted here
+  silently uses the system's older Node and breaks.
+- `concordance-tunnel.service` — runs `cloudflared tunnel run concordance-vocab`
+  (config at `~/.cloudflared/config.yml`, tunnel id in that file, credentials
+  JSON alongside it — none of this lives in the repo).
+
+To ship a frontend change to the public site: rebuild, then bounce the
+service so it picks up the new `dist/`:
+
+```bash
+cd webapp/frontend && npm run build
+systemctl --user restart concordance-web.service
+```
+
+Useful commands: `systemctl --user status concordance-web concordance-tunnel`,
+`journalctl --user -u concordance-web -u concordance-tunnel -f`.
+
 ## Status
 
 Walking skeleton — every stage is real and runs end-to-end; the LLM judge is

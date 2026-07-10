@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Build the frontend and run the backend as a single process serving both —
-# this is what should sit behind the Cloudflare Tunnel (one port, one origin,
-# no dev-server websockets exposed publicly). For local development with hot
-# reload, use dev.sh instead.
+# for manually testing the "public" single-origin setup locally. For local
+# development with hot reload, use dev.sh instead. The actual public deploy
+# (concordance-web.service) intentionally does NOT call this — it serves
+# whatever's already in frontend/dist without rebuilding (see README's
+# "Public access" section for why, and how to ship a frontend change).
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
