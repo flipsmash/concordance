@@ -187,6 +187,25 @@ concordance run "some book.epub" --model models/Qwen2.5-14B-Instruct-Q4_K_M.gguf
 `Config.n_gpu_layers = -1` offloads as many layers to the GPU as the VRAM
 allows; drop it if you hit out-of-memory.
 
+## Web app (`webapp/`)
+
+The first slice of a browser-based quizzing/viz/user-management app: a review
+table for pruning too-common/easy terms out of the vocab bank. Deleting a term
+doesn't hard-delete it — it flips `word.active` to false, so every downstream
+feature (quizzing, stats) just needs to filter on `active = true`, and history
+(audio, ngram data, etc.) stays intact.
+
+```bash
+# backend (FastAPI) — from the project root, with the venv active
+pip install -e ".[web]"
+uvicorn webapp.backend.main:app --reload --port 8000 --app-dir .
+
+# frontend (React + Vite), in a second terminal
+cd webapp/frontend
+npm install   # first time only
+npm run dev   # http://localhost:5173
+```
+
 ## Status
 
 Walking skeleton — every stage is real and runs end-to-end; the LLM judge is

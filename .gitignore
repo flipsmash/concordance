@@ -7,6 +7,9 @@ build/
 dist/
 .pytest_cache/
 
+# Frontend (webapp/frontend)
+node_modules/
+
 # Model weights — large, fetched separately (see README)
 models/
 *.gguf
