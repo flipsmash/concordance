@@ -114,6 +114,23 @@ CREATE TABLE IF NOT EXISTS {s}.word_ngram (
     peak_year      integer,
     fetched_at     timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS {s}.word_audio (
+    word_id      integer PRIMARY KEY REFERENCES {s}.word(id) ON DELETE CASCADE,
+    source       text,          -- 'commons' | 'azure' | 'none' (looked up, nothing found)
+    file_path    text,
+    ipa_used     text,          -- the exact phoneme string sent to the synthesizer (azure only)
+    voice        text,          -- azure voice name, or the Commons source URL
+    license_note text,
+    generated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS {s}.word_commons_search (
+    word_id      integer PRIMARY KEY REFERENCES {s}.word(id) ON DELETE CASCADE,
+    found_title  text,          -- Commons "File:..." title of an exact English match, or NULL
+    download_url text,
+    checked_at   timestamptz NOT NULL DEFAULT now()
+);
 """
 
 
@@ -150,6 +167,12 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS quiz_def_source text")
         cur.execute(f"ALTER TABLE {s}.word_difficulty ADD COLUMN IF NOT EXISTS quizzable boolean")
         cur.execute(f"ALTER TABLE {s}.word_difficulty ADD COLUMN IF NOT EXISTS quizzable_reason text")
+        # Raw Wordnik pronunciation, stored separately from ipa: fetching is a slow
+        # rate-limited pass (~1 word/6s observed), converting to IPA is fast and
+        # iterable — keeping them apart means a converter fix never costs a re-fetch.
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS wordnik_pron_raw text")
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS wordnik_pron_type text")
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS wordnik_checked_at timestamptz")
     trgm = True
     try:
         with conn.cursor() as cur:
@@ -423,5 +446,389 @@ def compute_quizzable(conn, schema: str = DEFAULT_SCHEMA) -> dict:
                     ON CONFLICT (word_id) DO UPDATE SET
                         quizzable=EXCLUDED.quizzable, quizzable_reason=EXCLUDED.quizzable_reason, updated_at=now()""",
                 (wid, ok, reason or None))
+    conn.commit()
+    return dict(dist)
+
+
+def fetch_wordnik_pronunciations(conn, schema: str = DEFAULT_SCHEMA, only_missing: bool = True,
+                                  limit: int = 0, delay: float = 0.1) -> dict:
+    """Fetch RAW pronunciation strings from Wordnik (ahd-5 diacritic respelling,
+    arpabet, or gcide-diacritical — whichever it has) and store them as-is, with
+    no IPA conversion here. Rate-limited (~1 word per several seconds observed on
+    the free tier) but that cost is paid once: wordnik_checked_at gates re-fetch,
+    so converting to IPA later is a separate, fast, freely-iterable pass that never
+    re-triggers this fetch."""
+    import time
+    from collections import Counter
+    from . import deepdef
+    s = _safe_schema(schema)
+    key = deepdef.wordnik_key()
+    if not key:
+        return {"error": "no WORDNIK_API_KEY in .env"}
+
+    where = f" WHERE wordnik_checked_at IS NULL" if only_missing else ""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT id, lemma FROM {s}.word{where}" + (f" LIMIT {int(limit)}" if limit else ""))
+        rows = cur.fetchall()
+
+    import requests
+    from .dictionary import _get
+    session = requests.Session()
+    dist: Counter = Counter()
+    with conn.cursor() as cur:
+        for i, (wid, lemma) in enumerate(rows, start=1):
+            r = _get(session, f"https://api.wordnik.com/v4/word.json/{lemma}/pronunciations",
+                     {"api_key": key, "limit": 5})
+            raw, rtype = None, None
+            if r is not None and r.status_code == 200:
+                data = r.json()
+                if data:
+                    raw, rtype = data[0].get("raw"), data[0].get("rawType")
+                    dist[rtype or "unknown"] += 1
+            if raw is None:
+                dist["none"] += 1
+            cur.execute(f"UPDATE {s}.word SET wordnik_pron_raw=%s, wordnik_pron_type=%s, "
+                        "wordnik_checked_at=now() WHERE id=%s", (raw, rtype, wid))
+            if i % 25 == 0:
+                conn.commit()
+                print(f"  ...{i}/{len(rows)} checked")
+            time.sleep(delay)
+    conn.commit()
+    return {"words": len(rows), **dist}
+
+
+def search_commons_direct(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None,
+                           only_missing: bool = True, limit: int = 0, delay: float = 2.5) -> dict:
+    """Second-pass Commons search for words kaikki's dump reported no audio for
+    (confirmed empirically to under-count: kaikki missed real, exact-match English
+    recordings for words like "unpeople"/"enkindle"). Stores only the search
+    result (title + constructed URL) — actually downloading is a separate,
+    fast, freely-retriable step. Deliberately slow (Commons rate-limits hard);
+    meant to run for hours unattended."""
+    import time
+    from collections import Counter
+    from . import commons_search, wiktextract
+    s = _safe_schema(schema)
+
+    where = (f" WHERE NOT EXISTS (SELECT 1 FROM {s}.word_commons_search c WHERE c.word_id=w.id)"
+             if only_missing else "")
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT w.id, w.lemma FROM {s}.word w{where}" +
+                    (f" LIMIT {int(limit)}" if limit else ""))
+        rows = cur.fetchall()
+    if not rows:
+        return {"candidates": 0}
+
+    # skip words kaikki already solved — only worth the slow search for real gaps
+    lemmas = {lemma.strip().lower() for _, lemma in rows}
+    dump_path = dump_path or wiktextract.DEFAULT_DUMP_PATH
+    lexicon = wiktextract.build_lexicon(
+        dump_path, lemmas, progress_cb=lambda n: print(f"  ...{n} lines scanned"))
+    candidates = [(wid, lemma) for wid, lemma in rows
+                  if not lexicon.get(lemma.strip().lower(), {}).get("audio")]
+
+    dist: Counter = Counter(total=len(rows), skipped_kaikki_has_audio=len(rows) - len(candidates))
+    session = requests.Session()
+    with conn.cursor() as cur:
+        for i, (wid, lemma) in enumerate(candidates, start=1):
+            titles = commons_search.search_word(lemma, session)
+            match = commons_search.best_english_exact_match(titles, lemma)
+            url = commons_search.download_url(match) if match else None
+            cur.execute(
+                f"""INSERT INTO {s}.word_commons_search (word_id, found_title, download_url, checked_at)
+                    VALUES (%s,%s,%s, now())
+                    ON CONFLICT (word_id) DO UPDATE SET found_title=EXCLUDED.found_title,
+                        download_url=EXCLUDED.download_url, checked_at=now()""",
+                (wid, match, url))
+            dist["found"] += 1 if match else 0
+            dist["not_found"] += 0 if match else 1
+            if i % 20 == 0:
+                conn.commit()
+                print(f"  ...{i}/{len(candidates)} searched")
+            time.sleep(delay)
+        # words skipped because kaikki already has audio still need a checked_at
+        # row so a re-run doesn't re-parse the dump for them pointlessly
+        for wid, lemma in rows:
+            if (wid, lemma) not in candidates:
+                cur.execute(
+                    f"""INSERT INTO {s}.word_commons_search (word_id, found_title, download_url, checked_at)
+                        VALUES (%s, NULL, NULL, now()) ON CONFLICT (word_id) DO NOTHING""", (wid,))
+    conn.commit()
+    return dict(dist)
+
+
+def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None,
+                 only_missing: bool = True, limit: int = 0) -> dict:
+    """Backfill + clean word.ipa. Sources tried in order per word: (1) kaikki's
+    Wiktextract dump; (2) Wordnik's raw pronunciation (already fetched by
+    `wordnik-pron`), converted via the matching notation converter — direct
+    IPA as-is, ARPAbet or AHD respellings through their own deterministic
+    converters (gcide-diacritical has no converter yet, lowest yield, skipped).
+    Also NULLs out any existing transcription that fails the English-language
+    sanity check (the pre-existing ad hoc scrape occasionally grabbed a
+    cross-referenced foreign cognate's IPA instead of the word's own — e.g.
+    "murmurer" had the French verb's transcription). Idempotent: with
+    only_missing=True (default), only words with an empty or invalid ipa are
+    candidates, so a re-run after everything's resolved does no dump parsing
+    at all and is a no-op."""
+    from collections import Counter
+    from . import ahd, arpabet, audio, wiktextract
+    s = _safe_schema(schema)
+
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT id, lemma, ipa, wordnik_pron_raw, wordnik_pron_type FROM {s}.word" +
+                    (f" LIMIT {int(limit)}" if limit else ""))
+        all_rows = cur.fetchall()
+
+    def is_valid(ipa):
+        return bool(ipa) and audio.looks_like_english_ipa(ipa)
+
+    candidates = all_rows if not only_missing else [r for r in all_rows if not is_valid(r[2])]
+    dist: Counter = Counter(total=len(all_rows), already_valid=len(all_rows) - len(candidates))
+    if not candidates:
+        return dict(dist)
+
+    lemmas = {lemma.strip().lower() for _, lemma, _, _, _ in candidates}
+    dump_path = dump_path or wiktextract.DEFAULT_DUMP_PATH
+    lexicon = wiktextract.build_lexicon(
+        dump_path, lemmas, progress_cb=lambda n: print(f"  ...{n} lines scanned"))
+
+    def wordnik_ipa(raw, rtype):
+        if not raw:
+            return None
+        if rtype == "IPA":
+            converted = raw
+        elif rtype == "arpabet":
+            converted = arpabet.to_ipa(raw)
+        elif rtype == "ahd-5":
+            converted = ahd.to_ipa(raw)
+        else:
+            return None  # gcide-diacritical: no converter yet
+        return converted if converted and audio.looks_like_english_ipa(converted) else None
+
+    with conn.cursor() as cur:
+        for wid, lemma, existing_ipa, wn_raw, wn_type in candidates:
+            had_valid_existing = is_valid(existing_ipa)
+            entry = lexicon.get(lemma.strip().lower(), {})
+            kaikki_ipa = wiktextract.best_ipa(entry.get("ipa", []))
+            if kaikki_ipa and not audio.looks_like_english_ipa(kaikki_ipa):
+                kaikki_ipa = None
+            replacement = kaikki_ipa or wordnik_ipa(wn_raw, wn_type)
+            source = "kaikki" if kaikki_ipa else ("wordnik" if replacement else None)
+
+            if had_valid_existing and not replacement:
+                dist["already_valid"] += 1  # nothing to do, no change
+                continue
+            if not (existing_ipa or "").strip() and replacement:
+                cur.execute(f"UPDATE {s}.word SET ipa=%s WHERE id=%s", (replacement, wid))
+                dist[f"backfilled_{source}"] += 1
+            elif (existing_ipa or "").strip() and not had_valid_existing and replacement:
+                cur.execute(f"UPDATE {s}.word SET ipa=%s WHERE id=%s", (replacement, wid))
+                dist[f"corrected_{source}"] += 1
+            elif (existing_ipa or "").strip() and not had_valid_existing:
+                cur.execute(f"UPDATE {s}.word SET ipa=NULL WHERE id=%s", (wid,))
+                dist["cleared_no_replacement"] += 1
+            else:
+                dist["unresolved"] += 1
+    conn.commit()
+    return dict(dist)
+
+
+def download_commons_direct_finds(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0,
+                                   delay: float = 4.0) -> dict:
+    """Download the real recordings `commons-search` confirmed exist, upgrading
+    any word currently on 'azure' or 'none' to the real recording. Split out
+    from `compute_audio` because interleaving Commons downloads with fast Azure
+    calls exhausted Commons' upload-CDN rate limit mid-run (429s that the
+    per-request backoff wasn't patient enough for — this earlier in the session
+    took over a minute to clear even at near-zero request volume). Paced like
+    `commons-search` itself: slow, meant to run unattended."""
+    import time
+    from collections import Counter
+    from . import audio
+    s = _safe_schema(schema)
+
+    with conn.cursor() as cur:
+        cur.execute(f"""
+            SELECT w.id, w.lemma, cs.download_url, a.source
+            FROM {s}.word w
+            JOIN {s}.word_commons_search cs ON cs.word_id = w.id
+            LEFT JOIN {s}.word_audio a ON a.word_id = w.id
+            WHERE cs.found_title IS NOT NULL AND (a.source IS NULL OR a.source <> 'commons')
+        """ + (f" LIMIT {int(limit)}" if limit else ""))
+        rows = cur.fetchall()
+
+    dist: Counter = Counter(candidates=len(rows))
+    if not rows:
+        return dict(dist)
+    audio.AUDIO_DIR.mkdir(exist_ok=True)
+
+    with conn.cursor() as cur:
+        for i, (wid, lemma, url, prior_source) in enumerate(rows, start=1):
+            lemma_lc = lemma.strip().lower()
+            dest = audio.AUDIO_DIR / f"{lemma_lc}.mp3"
+            if audio.fetch_commons_audio(url, dest, tries=6):
+                cur.execute(
+                    f"""INSERT INTO {s}.word_audio (word_id, source, file_path, ipa_used, voice, license_note, generated_at)
+                        VALUES (%s,'commons',%s,NULL,%s,%s, now())
+                        ON CONFLICT (word_id) DO UPDATE SET source='commons', file_path=EXCLUDED.file_path,
+                            ipa_used=NULL, voice=EXCLUDED.voice, license_note=EXCLUDED.license_note, generated_at=now()""",
+                    (wid, str(dest), url,
+                     "Wikimedia Commons recording (direct search — kaikki's dump missed it); "
+                     "verify per-file license before public reuse"))
+                dist["downloaded"] += 1
+                dist[f"upgraded_from_{prior_source}"] += 1 if prior_source else 0
+            else:
+                dist["failed"] += 1
+            if i % 20 == 0:
+                conn.commit()
+                print(f"  ...{i}/{len(rows)} downloaded")
+            time.sleep(delay)
+    conn.commit()
+    return dict(dist)
+
+
+def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None,
+                   only_missing: bool = True, limit: int = 0, delay: float = 0.3) -> dict:
+    """Fill in word_audio: real Commons recordings where kaikki/Wiktextract has
+    one, else a real recording the direct Commons search found that kaikki
+    missed, else Azure IPA-guided synthesis where a transcription is known
+    (ours, kaikki's, or Wordnik's — backfilling word.ipa along the way), else
+    a 'none' placeholder so re-runs don't keep re-parsing the dump for words
+    with nothing to find."""
+    import time
+    from collections import Counter
+    from . import audio, wiktextract
+    s = _safe_schema(schema)
+
+    where = (f" WHERE NOT EXISTS (SELECT 1 FROM {s}.word_audio a WHERE a.word_id=w.id)"
+             if only_missing else "")
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT w.id, w.lemma, w.ipa, cs.download_url
+                        FROM {s}.word w
+                        LEFT JOIN {s}.word_commons_search cs ON cs.word_id = w.id{where}""" +
+                    (f" LIMIT {int(limit)}" if limit else ""))
+        rows = cur.fetchall()
+
+    dist: Counter = Counter()
+    if not rows:
+        return {"candidates": 0, **dist}
+
+    lemmas = {lemma.strip().lower() for _, lemma, _, _ in rows}
+    dump_path = dump_path or wiktextract.DEFAULT_DUMP_PATH
+    lexicon = wiktextract.build_lexicon(
+        dump_path, lemmas, progress_cb=lambda n: print(f"  ...{n} lines scanned"))
+
+    key, region = audio.azure_credentials()
+    if not (key and region):
+        print("  (no AZURE_SPEECH_KEY/AZURE_SPEECH_REGION in .env — skipping synthesis, Commons-only pass)")
+    audio.AUDIO_DIR.mkdir(exist_ok=True)
+
+    with conn.cursor() as cur:
+        for i, (wid, lemma, existing_ipa, direct_search_url) in enumerate(rows, start=1):
+            lemma_lc = lemma.strip().lower()
+            entry = lexicon.get(lemma_lc, {})
+
+            existing_ipa = existing_ipa if audio.looks_like_english_ipa(existing_ipa or "") else None
+
+            kaikki_ipa = wiktextract.best_ipa(entry.get("ipa", []))
+            if kaikki_ipa and not audio.looks_like_english_ipa(kaikki_ipa):
+                kaikki_ipa = None
+            if kaikki_ipa and not (existing_ipa or "").strip():
+                cur.execute(f"UPDATE {s}.word SET ipa=%s WHERE id=%s", (kaikki_ipa, wid))
+                existing_ipa = kaikki_ipa
+
+            # tries=2 (not fetch_commons_audio's default 4-6): this loop needs to
+            # move fast through many candidates and has Azure as a good fallback.
+            # A sustained Commons rate-limit block turned a handful of slow
+            # downloads into an hours-long stall here — `commons-download` is the
+            # dedicated, patient (tries=6) pass for real recovery, run separately.
+            best_recording = wiktextract.best_audio(entry.get("audio", []))
+            row = None
+            if best_recording:
+                dest = audio.AUDIO_DIR / f"{lemma_lc}.mp3"
+                if audio.fetch_commons_audio(best_recording["url"], dest, tries=1):
+                    row = ("commons", str(dest), None, best_recording["url"],
+                           "Wikimedia Commons recording; verify per-file license before public reuse")
+                    dist["commons"] += 1
+            if row is None and direct_search_url:
+                dest = audio.AUDIO_DIR / f"{lemma_lc}.mp3"
+                if audio.fetch_commons_audio(direct_search_url, dest, tries=1):
+                    row = ("commons", str(dest), None, direct_search_url,
+                           "Wikimedia Commons recording (direct search — kaikki's dump missed it); "
+                           "verify per-file license before public reuse")
+                    dist["commons_direct_search"] += 1
+            if row is None and (existing_ipa or "").strip() and key and region:
+                clip = audio.synthesize_azure(lemma, existing_ipa, key, region)
+                if clip:
+                    dest = audio.AUDIO_DIR / f"{lemma_lc}.mp3"
+                    dest.write_bytes(clip)
+                    row = ("azure", str(dest), audio.normalize_ipa(existing_ipa), audio.AZURE_VOICE, None)
+                    dist["azure"] += 1
+            if row is None:
+                row = ("none", None, None, None, None)
+                dist["none"] += 1
+
+            cur.execute(
+                f"""INSERT INTO {s}.word_audio (word_id, source, file_path, ipa_used, voice, license_note, generated_at)
+                    VALUES (%s,%s,%s,%s,%s,%s, now())
+                    ON CONFLICT (word_id) DO UPDATE SET source=EXCLUDED.source, file_path=EXCLUDED.file_path,
+                        ipa_used=EXCLUDED.ipa_used, voice=EXCLUDED.voice, license_note=EXCLUDED.license_note,
+                        generated_at=now()""",
+                (wid, *row))
+            if i % 50 == 0:
+                conn.commit()
+                print(f"  ...{i}/{len(rows)} words processed")
+            time.sleep(delay)
+    conn.commit()
+    return {"candidates": len(rows), **dist}
+
+
+def synthesize_unverified_guesses(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0,
+                                   delay: float = 0.3) -> dict:
+    """Last resort for words with no real recording and no IPA anywhere: Azure
+    guesses pronunciation from spelling alone, same as any TTS would. Recorded
+    with source='azure_guess' — deliberately distinct from 'azure' (IPA-guided)
+    so the quiz app can flag these as unverified rather than presenting a guess
+    with the same confidence as a verified pronunciation."""
+    import time
+    from collections import Counter
+    from . import audio
+    s = _safe_schema(schema)
+
+    key, region = audio.azure_credentials()
+    if not (key and region):
+        return {"error": "no AZURE_SPEECH_KEY/AZURE_SPEECH_REGION in .env"}
+
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT w.id, w.lemma FROM {s}.word w
+                        JOIN {s}.word_audio a ON a.word_id = w.id
+                        WHERE a.source = 'none'""" + (f" LIMIT {int(limit)}" if limit else ""))
+        rows = cur.fetchall()
+
+    dist: Counter = Counter(candidates=len(rows))
+    if not rows:
+        return dict(dist)
+    audio.AUDIO_DIR.mkdir(exist_ok=True)
+
+    with conn.cursor() as cur:
+        for i, (wid, lemma) in enumerate(rows, start=1):
+            lemma_lc = lemma.strip().lower()
+            clip = audio.synthesize_azure_guess(lemma, key, region)
+            if clip:
+                dest = audio.AUDIO_DIR / f"{lemma_lc}.mp3"
+                dest.write_bytes(clip)
+                cur.execute(
+                    f"""UPDATE {s}.word_audio SET source='azure_guess', file_path=%s, ipa_used=NULL,
+                        voice=%s, license_note='unverified: no IPA available, Azure guessed from spelling',
+                        generated_at=now() WHERE word_id=%s""",
+                    (str(dest), audio.AZURE_VOICE, wid))
+                dist["synthesized"] += 1
+            else:
+                dist["failed"] += 1
+            if i % 50 == 0:
+                conn.commit()
+                print(f"  ...{i}/{len(rows)} words processed")
+            time.sleep(delay)
     conn.commit()
     return dict(dist)

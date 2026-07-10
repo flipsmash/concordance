@@ -256,5 +256,162 @@ def quizzable(
                   f"{dist.get('excluded',0)} excluded")
 
 
+@app.command()
+def commons_search(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    dump_path: str = typer.Option(None, "--dump-path", help="Path to the kaikki Wiktextract dump "
+                                   "(default: data/wiktextract-en.jsonl.gz)."),
+    refetch: bool = typer.Option(False, "--refetch", help="Re-check every word (default: only unchecked)."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of words searched."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Second-pass direct Commons search for real recordings kaikki's dump missed
+    (confirmed to happen). Slow — Commons rate-limits hard; meant to run for hours.
+    Stores only the search result; `audio` does the actual download."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    try:
+        stats = db.search_commons_direct(conn, schema, dump_path=dump_path, only_missing=not refetch, limit=limit)
+    except FileNotFoundError as exc:
+        console.print(f"[red]✗[/red] {exc}"); raise typer.Exit(code=1)
+    conn.close()
+    console.print(f"[green]✓[/green] commons-search: [bold]{stats.get('total',0)}[/bold] candidates — "
+                  f"{stats.get('found',0)} found, {stats.get('not_found',0)} not found, "
+                  f"{stats.get('skipped_kaikki_has_audio',0)} skipped (kaikki already has audio)")
+
+
+@app.command()
+def wordnik_pron(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    refetch: bool = typer.Option(False, "--refetch", help="Re-check every word (default: only unchecked)."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of words checked."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Fetch RAW Wordnik pronunciations (ahd-5/arpabet/gcide-diacritical) into
+    word.wordnik_pron_raw. No IPA conversion here — that's a separate `ipa` pass,
+    so a converter bug never costs re-running this slow, rate-limited fetch."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    stats = db.fetch_wordnik_pronunciations(conn, schema, only_missing=not refetch, limit=limit)
+    conn.close()
+    if "error" in stats:
+        console.print(f"[red]✗[/red] {stats['error']}"); raise typer.Exit(code=1)
+    console.print(f"[green]✓[/green] wordnik-pron: [bold]{stats.get('words',0)}[/bold] checked — " +
+                  ", ".join(f"{v} {k}" for k, v in stats.items() if k != "words"))
+
+
+@app.command()
+def ipa(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    dump_path: str = typer.Option(None, "--dump-path", help="Path to the kaikki Wiktextract dump "
+                                   "(default: data/wiktextract-en.jsonl.gz)."),
+    refetch: bool = typer.Option(False, "--refetch", help="Re-check every word (default: only empty/invalid ipa)."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of words checked."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Backfill + clean word.ipa from kaikki, then Wordnik (ARPAbet/AHD-5 converted,
+    direct IPA as-is). NULLs out+replaces transcriptions that fail an
+    English-language sanity check. Run this before `audio` — synthesis is only
+    as good as the IPA it's given."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    try:
+        stats = db.compute_ipa(conn, schema, dump_path=dump_path, only_missing=not refetch, limit=limit)
+    except FileNotFoundError as exc:
+        console.print(f"[red]✗[/red] {exc}"); raise typer.Exit(code=1)
+    conn.close()
+    backfilled = stats.get("backfilled_kaikki", 0) + stats.get("backfilled_wordnik", 0)
+    corrected = stats.get("corrected_kaikki", 0) + stats.get("corrected_wordnik", 0)
+    console.print(f"[green]✓[/green] ipa: {stats.get('total',0)} words — "
+                  f"[bold]{stats.get('already_valid',0)}[/bold] already valid, "
+                  f"{backfilled} backfilled ({stats.get('backfilled_kaikki',0)} kaikki, "
+                  f"{stats.get('backfilled_wordnik',0)} wordnik), "
+                  f"{corrected} corrected, "
+                  f"{stats.get('cleared_no_replacement',0)} cleared (no valid source found), "
+                  f"{stats.get('unresolved',0)} still unresolved")
+
+
+@app.command()
+def commons_download(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of files downloaded."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Download the real recordings `commons-search` confirmed exist, upgrading
+    any word currently on Azure-synthesized or no-data to the real recording.
+    Slow and deliberate — run separately from `audio`, which exhausted Commons'
+    rate limit when interleaved with fast Azure calls."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    stats = db.download_commons_direct_finds(conn, schema, limit=limit)
+    conn.close()
+    console.print(f"[green]✓[/green] commons-download: [bold]{stats.get('downloaded',0)}[/bold]/"
+                  f"{stats.get('candidates',0)} downloaded, {stats.get('failed',0)} failed "
+                  f"(upgraded from azure: {stats.get('upgraded_from_azure',0)}, "
+                  f"from none: {stats.get('upgraded_from_none',0)})")
+
+
+@app.command()
+def audio(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    dump_path: str = typer.Option(None, "--dump-path", help="Path to the kaikki Wiktextract dump "
+                                   "(default: data/wiktextract-en.jsonl.gz)."),
+    refetch: bool = typer.Option(False, "--refetch", help="Re-attempt all words (default: only ones with no word_audio row)."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of words processed."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Pronunciation audio: Commons recordings where they exist, else Azure IPA-guided
+    synthesis where a transcription is known. Words with neither are left alone."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    try:
+        stats = db.compute_audio(conn, schema, dump_path=dump_path, only_missing=not refetch, limit=limit)
+    except FileNotFoundError as exc:
+        console.print(f"[red]✗[/red] {exc}"); raise typer.Exit(code=1)
+    conn.close()
+    commons_total = stats.get('commons', 0) + stats.get('commons_direct_search', 0)
+    console.print(f"[green]✓[/green] audio: [bold]{stats.get('candidates',0)}[/bold] processed — "
+                  f"{commons_total} Commons ({stats.get('commons_direct_search',0)} via direct search), "
+                  f"{stats.get('azure',0)} Azure-synthesized, "
+                  f"{stats.get('none',0)} no data found")
+
+
+@app.command()
+def audio_guess(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of words synthesized."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Last resort for words with no real recording and no IPA anywhere: Azure
+    guesses pronunciation from spelling alone. Recorded as source='azure_guess'
+    — distinct from IPA-guided 'azure' — so the app can flag these unverified."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    stats = db.synthesize_unverified_guesses(conn, schema, limit=limit)
+    conn.close()
+    if "error" in stats:
+        console.print(f"[red]✗[/red] {stats['error']}"); raise typer.Exit(code=1)
+    console.print(f"[green]✓[/green] audio-guess: [bold]{stats.get('synthesized',0)}[/bold]/"
+                  f"{stats.get('candidates',0)} synthesized (unverified), {stats.get('failed',0)} failed")
+
+
 if __name__ == "__main__":
     app()

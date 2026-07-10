@@ -31,3 +31,8 @@ missed_shadow.txt
 
 # Licensed WordNet Domains / SentiWords data — do not publish
 wordnet-domains-sentiwords/
+
+# Wiktextract dump (large, fetched separately — see concordance/wiktextract.py)
+# and generated pronunciation audio (large, regenerable via `concordance audio`)
+data/
+audio/
