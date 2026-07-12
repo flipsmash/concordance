@@ -7,7 +7,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from . import clean, dictionary, extract, floor, judge, master, output, propernouns, tokenize, validity
+from . import clean, db, dictionary, extract, floor, judge, localdict, master, output, propernouns, tokenize, validity
 from .config import Config
 from .model import Candidate, Verdict
 
@@ -24,9 +24,16 @@ def process(book: str | Path, cfg: Config, console: Console | None = None) -> tu
     """Extract -> filter -> judge -> enrich a book, returning (kept, rejected).
     Shared by `run` (writes CSVs for hand-editing) and `ingest` (writes straight
     to Postgres) — everything through enrichment is identical; only what
-    happens with the result differs."""
+    happens with the result differs.
+
+    Requires a live DATABASE_URL for the local Wiktionary dump (vocab.wiktionary,
+    ~500k terms) — checked first in the validity gate and tried first during
+    enrichment, both because it's free (no network) and because unlike every
+    other authority here it carries no "Proper noun" POS at all, so it doesn't
+    get to vouch for real names the way the frequency-based checks do."""
     console = console or Console()
     book = Path(book)
+    conn = db.connect()
 
     with console.status("[bold]Extracting text…"):
         chapters = extract.extract(book)
@@ -38,11 +45,13 @@ def process(book: str | Path, cfg: Config, console: Console | None = None) -> tu
         candidates = tokenize.tokenize(chapters)
     console.print(f"Found [bold]{len(candidates)}[/bold] distinct lemmas.")
 
+    lexicon = localdict.build_lexicon(conn, set(candidates.keys()))
+
     # --- deterministic filters -------------------------------------------
     floor.apply_floor(candidates, cfg)
     propernouns.strip_proper_nouns(candidates, cfg)
     with console.status("[bold]Checking validity…"):
-        validity.apply_validity(candidates, cfg)
+        validity.apply_validity(candidates, cfg, local_dict=lexicon)
     survivors = [c for c in candidates.values() if c.verdict in (Verdict.KEEP, Verdict.UNSURE)]
     console.print(f"[bold]{len(survivors)}[/bold] candidates survived the floor + validity gate.")
 
@@ -62,9 +71,11 @@ def process(book: str | Path, cfg: Config, console: Console | None = None) -> tu
         session = dictionary.make_session()
         with console.status("[bold]Looking up definitions…") as status:
             for i, cand in enumerate(shortlist, 1):
-                dictionary.enrich(cand, session)
+                if not localdict.enrich(cand, lexicon):
+                    dictionary.enrich(cand, session)
                 status.update(f"[bold]Looking up definitions… {i}/{len(shortlist)}")
 
+    conn.close()
     return output.partition(candidates)
 
 

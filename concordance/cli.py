@@ -23,6 +23,7 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
+import psycopg
 import typer
 from rich.console import Console
 
@@ -76,6 +77,11 @@ def run(
         result = run_pipeline(book, cfg, console)
     except (ScannedPDFError, UnsupportedFormatError, FileNotFoundError) as exc:
         console.print(f"[red]✗[/red] {exc}")
+        raise typer.Exit(code=1)
+    except (RuntimeError, psycopg.Error) as exc:
+        console.print(f"[red]✗[/red] cannot connect to Postgres: {exc}")
+        console.print("[dim]the validity gate now needs vocab.wiktionary — "
+                       "set DATABASE_URL in the environment or a .env file[/dim]")
         raise typer.Exit(code=1)
 
     console.print()
@@ -141,7 +147,7 @@ def ingest(
 
         try:
             kept, rejected = process_pipeline(b, cfg, console)
-        except (ScannedPDFError, UnsupportedFormatError, FileNotFoundError) as exc:
+        except (ScannedPDFError, UnsupportedFormatError, FileNotFoundError, RuntimeError, psycopg.Error) as exc:
             console.print(f"[red]✗[/red] {exc}")
             if batch_mode:
                 continue
@@ -182,7 +188,13 @@ def define(
     if not vocab_csv.exists():
         console.print(f"[red]✗[/red] no such file: {vocab_csv}")
         raise typer.Exit(code=1)
-    define_cmd(vocab_csv, console, use_web=web, model_path=str(model) if model else None)
+    try:
+        define_cmd(vocab_csv, console, use_web=web, model_path=str(model) if model else None)
+    except (RuntimeError, psycopg.Error) as exc:
+        console.print(f"[red]✗[/red] cannot connect to Postgres: {exc}")
+        console.print("[dim]the local dictionary lookup needs vocab.wiktionary — "
+                       "set DATABASE_URL in the environment or a .env file[/dim]")
+        raise typer.Exit(code=1)
 
 
 @app.command()

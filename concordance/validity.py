@@ -4,19 +4,25 @@ Separate axes: *existence* (a string is used in the wild) versus *correctness*
 (it is a real, well-formed word). Common misspellings have big footprints, so
 existence alone never saves a word. The discriminators, in order:
 
-  1. curated headword?          -> KEEP  (real word, done)
-  2. dominant higher-freq twin? -> DROP  (misspelling — even if attested)
-  3. attested in the corpus?    -> KEEP  (a rarity with no dominant twin)
-  4. recurs in the book?        -> UNSURE (possible coinage/name -> review)
-  5. otherwise                  -> DROP  (unattested, unformed -> junk)
+  0. in the local Wiktionary dump? -> KEEP  (curated, no "Proper noun" POS
+                                              at all in this dump — see below)
+  1. foreign-language context?     -> DROP/UNSURE (quoted non-English phrase)
+  2. curated headword?             -> KEEP  (real word, done)
+  3. dominant higher-freq twin?    -> DROP  (misspelling — even if attested)
+  4. attested in the corpus?       -> KEEP  (a rarity with no dominant twin)
+  5. recurs in the book?           -> UNSURE (possible coinage/name -> review)
+  6. otherwise                     -> DROP  (unattested, unformed -> junk)
 
-Keep-biased throughout: any single solid vouch keeps the word, and step 4 sends
+Keep-biased throughout: any single solid vouch keeps the word, and step 5 sends
 ambiguous-but-recurring tokens to human review rather than dropping them.
 
-This skeleton uses two offline authorities — the SymSpell 82k wordlist (curated
-membership + near-neighbor frequencies) and wordfreq (corpus presence). The spec
-layers Wiktionary entry-type, WordNet, hunspell, and an LLM adjudicator on top;
-those slot into `_authorities` / the misspelling check without changing callers.
+Step 0 (vocab.wiktionary, ~500k terms already loaded in Postgres) is checked
+before everything else: it's cheap (no network, no per-word cost beyond one
+bulk query), and — unlike every authority in step 2, which are all frequency-
+derived from general web text and so get polluted by real proper nouns that
+happen to have some web footprint (verified: ahasuerus/oisin/fecit are all in
+the 82k wordlist) — this dump was built with no "Proper noun" POS category at
+all, so membership alone is a clean, structural "this is not a name" signal.
 """
 
 from __future__ import annotations
@@ -33,8 +39,9 @@ _CORPUS_PRESENT = 0.0  # wordfreq returns 0.0 for tokens it has never seen
 
 
 class ValidityGate:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, local_dict: dict | None = None):
         self.cfg = cfg
+        self.local_dict = local_dict or {}
         self._sym = self._load_symspell()
         self._wn = self._load_wordnet()
         self._words = self._load_word_corpus()
@@ -126,11 +133,20 @@ class ValidityGate:
             return
         word = cand.lemma
 
-        # 0. A foreign-language context sentence is decisive on its own — whatever
+        # 0. Local Wiktionary dump — cheap, curated, and structurally free of
+        #    proper nouns (see module docstring). Checked before even the
+        #    foreign-context step: a curated confirmation that this is a real,
+        #    documented English word outweighs a crude sentence-language guess.
+        if word in self.local_dict:
+            cand.verdict = Verdict.KEEP
+            cand.validity_sources.append("wiktionary-local")
+            return
+
+        # 1. A foreign-language context sentence is decisive on its own — whatever
         #    dictionary/corpus attestation the token has, if it sits among mostly
         #    non-English words (a quoted Latin/French/Italian phrase) it's a
         #    fragment of that quote, not a word the reader would look up. This is
-        #    what actually defeats step 1's keep-bias for one-off Latin tokens
+        #    what actually defeats step 2's keep-bias for one-off Latin tokens
         #    (cuius, verbo, fecit) that have SOME wordfreq corpus presence.
         rep = cand.representative
         if rep:
@@ -144,7 +160,7 @@ class ValidityGate:
                     cand.reject_reason = RejectReason.FOREIGN_LANGUAGE
                 return
 
-        # 1. Curated headword in ANY authority — checked before the misspelling
+        # 2. Curated headword in ANY authority — checked before the misspelling
         #    verdict so a real archaic word (armiger, abash, cangue) is never
         #    branded a typo just for being absent from one small wordlist.
         if word in self._sym.words:
@@ -160,9 +176,9 @@ class ValidityGate:
             cand.validity_sources.append("dictionary")
             return
 
-        # 2. Misspelling — a dominant higher-frequency near-neighbor, and not a
+        # 3. Misspelling — a dominant higher-frequency near-neighbor, and not a
         #    curated headword above. Author-invented words (alzabo, asimi)
-        #    legitimately fall out here or at step 5; per scope, fictitious
+        #    legitimately fall out here or at step 6; per scope, fictitious
         #    coinages need not be captured. EXCEPTION: a real OCR/typo artifact
         #    is almost always a one-off, so a "misspelling" that recurs as often
         #    as a deliberate coinage would (necropoli, 12x in one book) goes to
@@ -178,24 +194,24 @@ class ValidityGate:
             cand.interesting_reason = f"likely misspelling of '{neighbor}'"
             return
 
-        # 3. Attested in the corpus, no dominant twin -> a rarity worth keeping.
+        # 4. Attested in the corpus, no dominant twin -> a rarity worth keeping.
         if cand.zipf > _CORPUS_PRESENT:
             cand.verdict = Verdict.KEEP
             cand.validity_sources.append("corpus")
             return
 
-        # 4. Unattested but recurs in the book -> ambiguous; send to review
+        # 5. Unattested but recurs in the book -> ambiguous; send to review
         #    rather than silently cut.
         if cand.count >= self.cfg.coinage_min_count:
             cand.verdict = Verdict.UNSURE
             return
 
-        # 5. Unattested, unformed, one-off -> junk.
+        # 6. Unattested, unformed, one-off -> junk.
         cand.verdict = Verdict.DROP
         cand.reject_reason = RejectReason.NOT_A_WORD
 
 
-def apply_validity(candidates: dict[str, Candidate], cfg: Config) -> None:
-    gate = ValidityGate(cfg)
+def apply_validity(candidates: dict[str, Candidate], cfg: Config, local_dict: dict | None = None) -> None:
+    gate = ValidityGate(cfg, local_dict=local_dict)
     for cand in candidates.values():
         gate.judge(cand)

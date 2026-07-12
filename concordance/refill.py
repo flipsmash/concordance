@@ -22,7 +22,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from . import dictionary
+from . import db, dictionary, localdict
 from .model import Candidate, Occurrence, normalize_pos
 from .output import VOCAB_COLUMNS
 
@@ -72,12 +72,17 @@ def refill(path: Path, console: Console | None = None) -> tuple[int, int]:
     if not todo:
         return 0, 0
 
+    conn = db.connect()
+    lexicon = localdict.build_lexicon(conn, {(r.get("word") or "").strip().lower() for r in todo})
+    conn.close()
+
     session = dictionary.make_session()
     filled = 0
     with console.status("[bold]Looking up definitions…") as status:
         for i, row in enumerate(todo, 1):
             cand = _row_to_candidate(row)
-            dictionary.enrich(cand, session)
+            if not localdict.enrich(cand, lexicon):
+                dictionary.enrich(cand, session)
             if cand.definition:
                 _candidate_to_row(row, cand)
                 filled += 1
@@ -112,6 +117,8 @@ def _write_rows(path: Path, rows: list[dict], console: Console) -> Path:
 
 
 def main(argv: list[str] | None = None) -> int:
+    import psycopg
+
     argv = argv if argv is not None else sys.argv[1:]
     if not argv:
         print(__doc__)
@@ -120,7 +127,13 @@ def main(argv: list[str] | None = None) -> int:
     if not path.exists():
         print(f"no such file: {path}")
         return 1
-    refill(path)
+    try:
+        refill(path)
+    except (RuntimeError, psycopg.Error) as exc:
+        print(f"cannot connect to Postgres: {exc}")
+        print("the local dictionary lookup needs vocab.wiktionary — "
+              "set DATABASE_URL in the environment or a .env file")
+        return 1
     return 0
 
 

@@ -21,7 +21,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from . import deepdef, dictionary, validity_score, websearch
+from . import db, deepdef, dictionary, localdict, validity_score, websearch
 from .config import Config
 from .finalize import _read_rows
 from .model import Candidate, Occurrence, normalize_pos
@@ -77,6 +77,10 @@ def define(vocab_path: Path, console: Console | None = None,
     if not undefined:
         return 0, 0
 
+    conn = db.connect()
+    lexicon = localdict.build_lexicon(conn, {(r.get("word") or "").strip().lower() for r in undefined})
+    conn.close()
+
     session = dictionary.make_session()
     key = deepdef.wordnik_key()
     if not key:
@@ -89,7 +93,7 @@ def define(vocab_path: Path, console: Console | None = None,
     with console.status("[bold]Resolving…") as status:
         for i, row in enumerate(undefined, 1):
             cand = _row_to_candidate(row)
-            if deepdef.deep_enrich(cand, session, key):
+            if localdict.enrich(cand, lexicon) or deepdef.deep_enrich(cand, session, key):
                 _fill(row, cand)
                 dict_hits += 1
             else:

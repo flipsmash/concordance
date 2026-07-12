@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from concordance import db as cdb
+from concordance import localdict
 from concordance.dictionary import enrich as dictionary_enrich
 from concordance.model import Candidate, normalize_pos
 
@@ -245,7 +246,8 @@ def accept_rejected(rejected_id: int) -> AcceptedResult:
         lemma, book_id, pos, as_seen, sentence, chapter, reason = row
 
         cand = Candidate(lemma=lemma, pos=pos or "")
-        dictionary_enrich(cand)
+        if not localdict.enrich(cand, localdict.build_lexicon(conn, {lemma.lower()})):
+            dictionary_enrich(cand)
 
         cur.execute(
             f"""INSERT INTO {SCHEMA}.word
