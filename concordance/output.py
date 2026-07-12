@@ -11,7 +11,7 @@ import csv
 import os
 from pathlib import Path
 
-from .model import Candidate, Verdict
+from .model import Candidate, Verdict, normalize_pos
 
 VOCAB_COLUMNS = [
     "word", "as_seen", "definition", "part_of_speech", "ipa",
@@ -43,7 +43,7 @@ def write_vocab(path: Path, kept: list[Candidate]) -> None:
             c.lemma,
             rep.surface if rep else "",
             c.definition,
-            (c.part_of_speech or c.pos).lower(),
+            normalize_pos(c.part_of_speech or c.pos),
             c.ipa,
             rep.sentence if rep else "",
             rep.chapter if rep else "",

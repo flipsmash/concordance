@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 from concordance import db as cdb
 from concordance.dictionary import enrich as dictionary_enrich
-from concordance.model import Candidate
+from concordance.model import Candidate, normalize_pos
 
 app = FastAPI(title="Concordance Review API")
 
@@ -104,7 +104,7 @@ def pos_values() -> list[str]:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             f"""SELECT DISTINCT w.part_of_speech FROM {SCHEMA}.word w
-                WHERE w.active AND w.part_of_speech IS NOT NULL
+                WHERE w.active AND coalesce(w.part_of_speech, '') <> ''
                 ORDER BY 1"""
         )
         return [r[0] for r in cur.fetchall()]
@@ -264,7 +264,7 @@ def accept_rejected(rejected_id: int) -> AcceptedResult:
                     active=true, updated_at=now(),
                     rescued_from_reject=true, rescued_at=now(), rescued_reason=EXCLUDED.rescued_reason
                 RETURNING id""",
-            (lemma, as_seen or lemma, cand.definition, cand.part_of_speech or pos or "",
+            (lemma, as_seen or lemma, cand.definition, normalize_pos(cand.part_of_speech or pos),
              cand.ipa, sentence or "", chapter or "",
              list(cand.synonyms), cand.etymology, cand.definition_source, reason),
         )

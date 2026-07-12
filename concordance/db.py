@@ -26,6 +26,7 @@ import psycopg
 import requests
 
 from .deepdef import _load_dotenv
+from .model import normalize_pos
 
 DEFAULT_SCHEMA = os.environ.get("CONCORDANCE_DB_SCHEMA", "concordance")
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -267,7 +268,7 @@ def sync_master(csv_path: Path, conn: psycopg.Connection,
                             COALESCE(EXCLUDED.first_added, {s}.word.first_added)),
                         updated_at=now()
                     RETURNING id""",
-                (word, r.get("as_seen"), r.get("definition"), r.get("part_of_speech"),
+                (word, r.get("as_seen"), r.get("definition"), normalize_pos(r.get("part_of_speech")),
                  r.get("ipa"), r.get("sentence"), r.get("chapter"), _synonyms(r.get("synonyms", "")),
                  r.get("etymology"), r.get("source"), (r.get("date_added") or "")),
             )
@@ -327,7 +328,7 @@ def sync_book_results(conn, book_title: str, kept: list, rejected: list,
                         updated_at=now()
                     RETURNING id""",
                 (c.lemma, rep.surface if rep else "", c.definition,
-                 (c.part_of_speech or c.pos or "").lower(), c.ipa,
+                 normalize_pos(c.part_of_speech or c.pos), c.ipa,
                  rep.sentence if rep else "", rep.chapter if rep else "",
                  list(c.synonyms), c.etymology,
                  c.definition_source or ", ".join(c.validity_sources)))
@@ -356,6 +357,25 @@ def sync_book_results(conn, book_title: str, kept: list, rejected: list,
 
     conn.commit()
     return stats
+
+
+def normalize_word_pos(conn, schema: str = DEFAULT_SCHEMA) -> dict:
+    """Clean up word.part_of_speech in place: folds abbreviations/case variants
+    (adj, adv, pron, adp, sconj, num, Noun, Adjective, ...) accumulated from
+    older write paths down to the canonical vocabulary via normalize_pos().
+    Idempotent — safe to re-run any time a new inconsistency creeps in."""
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT id, part_of_speech FROM {s}.word")
+        rows = cur.fetchall()
+        changed = 0
+        for wid, pos in rows:
+            new_pos = normalize_pos(pos)
+            if new_pos != (pos or ""):
+                cur.execute(f"UPDATE {s}.word SET part_of_speech = %s WHERE id = %s", (new_pos, wid))
+                changed += 1
+    conn.commit()
+    return {"words": len(rows), "changed": changed}
 
 
 def load_taxonomy(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA,

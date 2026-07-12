@@ -24,7 +24,7 @@ from rich.console import Console
 from . import deepdef, dictionary, validity_score, websearch
 from .config import Config
 from .finalize import _read_rows
-from .model import Candidate, Occurrence
+from .model import Candidate, Occurrence, normalize_pos
 from .output import VOCAB_COLUMNS
 
 _POLITE = 0.5   # seconds between words — Wordnik's free tier rate-limits hard
@@ -47,7 +47,7 @@ def _row_to_candidate(row: dict) -> Candidate:
 def _fill(row: dict, cand: Candidate) -> None:
     row["definition"] = cand.definition
     if cand.part_of_speech:
-        row["part_of_speech"] = cand.part_of_speech.lower()
+        row["part_of_speech"] = normalize_pos(cand.part_of_speech)
     row["source"] = cand.definition_source
 
 

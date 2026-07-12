@@ -63,6 +63,44 @@ class Candidate:
     def count(self) -> int:
         return len(self.occurrences)
 
+
+# Canonical, spelled-out part-of-speech vocabulary. Every write site (dictionary
+# enrichment, the spaCy-tag fallback, hand-edited CSVs, the webapp's rescue
+# path) has its own source of truth for this label, so they've drifted into a
+# mess of abbreviations (adj, adv, pron, adp, sconj, num), spaCy's raw
+# universal-tag casing, and stray Title-Case typos. This is the one place that
+# folds all of it down to one consistent set.
+_POS_ALIASES = {
+    "n": "noun", "noun": "noun", "nouns": "noun",
+    "v": "verb", "verb": "verb", "verbs": "verb",
+    "adj": "adjective", "adjective": "adjective", "adjectives": "adjective",
+    "adv": "adverb", "adverb": "adverb", "adverbs": "adverb",
+    "pron": "pronoun", "pronoun": "pronoun", "pronouns": "pronoun",
+    "adp": "preposition", "prep": "preposition",
+    "preposition": "preposition", "prepositions": "preposition",
+    "conj": "conjunction", "cconj": "conjunction", "sconj": "conjunction",
+    "conjunction": "conjunction", "conjunctions": "conjunction",
+    "intj": "interjection", "interjection": "interjection", "interjections": "interjection",
+    "det": "determiner", "determiner": "determiner", "determiners": "determiner",
+    "num": "numeral", "numeral": "numeral", "numerals": "numeral", "number": "numeral",
+    "aux": "auxiliary", "auxiliary": "auxiliary",
+    "part": "particle", "particle": "particle",
+    "punct": "punctuation", "punctuation": "punctuation",
+    "propn": "proper noun", "proper noun": "proper noun",
+    "sym": "symbol", "symbol": "symbol",
+    "x": "other", "other": "other",
+}
+
+
+def normalize_pos(pos: str | None) -> str:
+    """Fold any spelling/case/abbreviation variant to the canonical label.
+    Blank/unrecognized input stays '' (this project's existing "no value"
+    convention for text fields, not NULL — see quiz_definition etc.)."""
+    if not pos:
+        return ""
+    key = pos.strip().lower()
+    return _POS_ALIASES.get(key, key)
+
     @property
     def representative(self) -> Occurrence | None:
         """A sentence to show the user — the shortest that still has real context."""

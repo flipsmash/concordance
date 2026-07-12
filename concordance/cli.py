@@ -271,6 +271,24 @@ def classify(
 
 
 
+@app.command("normalize-pos")
+def normalize_pos_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Clean up word.part_of_speech: fold abbreviations/case variants (adj,
+    adv, pron, propn, x, Noun, ...) down to one consistent, spelled-out
+    vocabulary. Idempotent — safe to re-run any time."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    stats = db.normalize_word_pos(conn, schema)
+    conn.close()
+    console.print(f"[green]✓[/green] normalize-pos: [bold]{stats['changed']}[/bold]/{stats['words']} words updated")
+
+
 @app.command()
 def archaic(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),

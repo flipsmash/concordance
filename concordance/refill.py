@@ -23,7 +23,7 @@ from pathlib import Path
 from rich.console import Console
 
 from . import dictionary
-from .model import Candidate, Occurrence
+from .model import Candidate, Occurrence, normalize_pos
 from .output import VOCAB_COLUMNS
 
 # Small courtesy pause between lookups so we don't trip rate limits before the
@@ -49,7 +49,7 @@ def _row_to_candidate(row: dict) -> Candidate:
 def _candidate_to_row(row: dict, cand: Candidate) -> dict:
     row["definition"] = cand.definition
     if cand.part_of_speech:
-        row["part_of_speech"] = cand.part_of_speech.lower()
+        row["part_of_speech"] = normalize_pos(cand.part_of_speech)
     if cand.ipa:
         row["ipa"] = cand.ipa
     if cand.synonyms:
