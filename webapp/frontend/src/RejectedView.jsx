@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { usePagedTable } from './usePagedTable'
+import MultiSelect from './MultiSelect'
 
 const API_BASE = ''
 const PAGE_SIZE = 50
@@ -13,14 +14,20 @@ const COLUMNS = [
 ]
 
 function RejectedView() {
-  const [book, setBook] = useState('')
+  const [books, setBooks] = useState([])
   const [bookOptions, setBookOptions] = useState([])
+  const [reasons, setReasons] = useState([])
+  const [reasonOptions, setReasonOptions] = useState([])
   const [addedIds, setAddedIds] = useState({})
 
   useEffect(() => {
     fetch(`${API_BASE}/api/rejected/books`)
       .then((res) => res.json())
       .then(setBookOptions)
+      .catch(() => {})
+    fetch(`${API_BASE}/api/rejected/reasons`)
+      .then((res) => res.json())
+      .then(setReasonOptions)
       .catch(() => {})
   }, [])
 
@@ -32,11 +39,16 @@ function RejectedView() {
     pageSize: PAGE_SIZE,
     defaultSort: 'count',
     defaultDir: 'desc',
-    extraParams: { book },
+    extraParams: { book: books, reason: reasons },
   })
 
-  function handleBookChange(value) {
-    setBook(value)
+  function handleBooksChange(values) {
+    setBooks(values)
+    resetPage()
+  }
+
+  function handleReasonsChange(values) {
+    setReasons(values)
     resetPage()
   }
 
@@ -65,17 +77,8 @@ function RejectedView() {
   return (
     <>
       <div className="header-controls">
-        <label className="pos-filter">
-          Book:{' '}
-          <select value={book} onChange={(e) => handleBookChange(e.target.value)}>
-            <option value="">All</option>
-            {bookOptions.map((b) => (
-              <option key={b} value={b}>
-                {b}
-              </option>
-            ))}
-          </select>
-        </label>
+        <MultiSelect label="Book" options={bookOptions} selected={books} onChange={handleBooksChange} />
+        <MultiSelect label="Reason" options={reasonOptions} selected={reasons} onChange={handleReasonsChange} />
         <span className="count">
           {total.toLocaleString()} rejected term{total === 1 ? '' : 's'}
         </span>

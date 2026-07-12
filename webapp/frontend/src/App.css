@@ -60,6 +60,60 @@ header {
   color: var(--text-h);
 }
 
+.multiselect {
+  position: relative;
+}
+
+.multiselect-trigger {
+  font-size: 13px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-h);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.multiselect-trigger:hover {
+  border-color: var(--accent);
+}
+
+.multiselect-caret {
+  font-size: 10px;
+  color: var(--text);
+}
+
+.multiselect-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 10;
+  min-width: 160px;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+  padding: 6px;
+}
+
+.multiselect-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  padding: 5px 6px;
+  border-radius: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.multiselect-option:hover {
+  background: var(--row-alt);
+}
+
 .count {
   font-size: 13px;
   color: var(--text);

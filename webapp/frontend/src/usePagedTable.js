@@ -19,7 +19,11 @@ export function usePagedTable({ endpoint, pageSize = 50, defaultSort, defaultDir
     setError(null)
     const params = new URLSearchParams({ page: String(page), page_size: String(pageSize), sort, dir })
     for (const [key, value] of Object.entries(extraParams)) {
-      if (value) params.set(key, value)
+      if (Array.isArray(value)) {
+        value.forEach((v) => params.append(key, v))
+      } else if (value) {
+        params.set(key, value)
+      }
     }
     fetch(`${API_BASE}${endpoint}?${params}`)
       .then((res) => {

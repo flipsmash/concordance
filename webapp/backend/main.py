@@ -152,19 +152,27 @@ def list_rejected(
     page_size: int = Query(50, ge=1, le=500),
     sort: Literal["lemma", "book", "reason", "count", "zipf"] = "count",
     dir: Literal["asc", "desc"] = "desc",
-    book: str | None = None,
+    book: list[str] = Query([]),
+    reason: list[str] = Query([]),
 ) -> RejectedPage:
     order_col = REJECTED_SORT_COLUMNS[sort]
     order_dir = "ASC" if dir == "asc" else "DESC"
     offset = (page - 1) * page_size
-    book_filter = " AND b.title = %s" if book else ""
-    params = (book,) if book else ()
+
+    filters, params = [], []
+    if book:
+        filters.append("b.title = ANY(%s)")
+        params.append(book)
+    if reason:
+        filters.append("r.reason = ANY(%s)")
+        params.append(reason)
+    where_extra = "".join(f" AND {f}" for f in filters)
 
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             f"""SELECT count(*) FROM {SCHEMA}.rejected_word r
                 JOIN {SCHEMA}.book b ON b.id = r.book_id
-                WHERE true{book_filter}""",
+                WHERE true{where_extra}""",
             params,
         )
         total = cur.fetchone()[0]
@@ -173,7 +181,7 @@ def list_rejected(
             f"""SELECT r.id, r.lemma, b.title, r.reason, r.detail, r.count, r.zipf
                 FROM {SCHEMA}.rejected_word r
                 JOIN {SCHEMA}.book b ON b.id = r.book_id
-                WHERE true{book_filter}
+                WHERE true{where_extra}
                 ORDER BY {order_col} {order_dir} NULLS LAST, r.lemma ASC
                 LIMIT %s OFFSET %s""",
             (*params, page_size, offset),
@@ -185,6 +193,16 @@ def list_rejected(
         for r in rows
     ]
     return RejectedPage(items=items, total=total, page=page, page_size=page_size)
+
+
+@app.get("/api/rejected/reasons", response_model=list[str])
+def rejected_reasons() -> list[str]:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT DISTINCT r.reason FROM {SCHEMA}.rejected_word r
+                WHERE r.reason IS NOT NULL ORDER BY 1"""
+        )
+        return [r[0] for r in cur.fetchall()]
 
 
 @app.get("/api/rejected/books", response_model=list[str])
