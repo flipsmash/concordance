@@ -17,6 +17,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from concordance import db as cdb
+from concordance.dictionary import enrich as dictionary_enrich
+from concordance.model import Candidate
 
 app = FastAPI(title="Concordance Review API")
 
@@ -116,6 +118,136 @@ def prune_word(word_id: int) -> None:
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="word not found")
         conn.commit()
+
+
+REJECTED_SORT_COLUMNS = {
+    "lemma": "r.lemma",
+    "book": "b.title",
+    "reason": "r.reason",
+    "count": "r.count",
+    "zipf": "r.zipf",
+}
+
+
+class RejectedRow(BaseModel):
+    id: int
+    lemma: str
+    book: str
+    reason: str | None
+    detail: str | None
+    count: int | None
+    zipf: float | None
+
+
+class RejectedPage(BaseModel):
+    items: list[RejectedRow]
+    total: int
+    page: int
+    page_size: int
+
+
+@app.get("/api/rejected", response_model=RejectedPage)
+def list_rejected(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=500),
+    sort: Literal["lemma", "book", "reason", "count", "zipf"] = "count",
+    dir: Literal["asc", "desc"] = "desc",
+    book: str | None = None,
+) -> RejectedPage:
+    order_col = REJECTED_SORT_COLUMNS[sort]
+    order_dir = "ASC" if dir == "asc" else "DESC"
+    offset = (page - 1) * page_size
+    book_filter = " AND b.title = %s" if book else ""
+    params = (book,) if book else ()
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT count(*) FROM {SCHEMA}.rejected_word r
+                JOIN {SCHEMA}.book b ON b.id = r.book_id
+                WHERE true{book_filter}""",
+            params,
+        )
+        total = cur.fetchone()[0]
+
+        cur.execute(
+            f"""SELECT r.id, r.lemma, b.title, r.reason, r.detail, r.count, r.zipf
+                FROM {SCHEMA}.rejected_word r
+                JOIN {SCHEMA}.book b ON b.id = r.book_id
+                WHERE true{book_filter}
+                ORDER BY {order_col} {order_dir} NULLS LAST, r.lemma ASC
+                LIMIT %s OFFSET %s""",
+            (*params, page_size, offset),
+        )
+        rows = cur.fetchall()
+
+    items = [
+        RejectedRow(id=r[0], lemma=r[1], book=r[2], reason=r[3], detail=r[4], count=r[5], zipf=r[6])
+        for r in rows
+    ]
+    return RejectedPage(items=items, total=total, page=page, page_size=page_size)
+
+
+@app.get("/api/rejected/books", response_model=list[str])
+def rejected_books() -> list[str]:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT DISTINCT b.title FROM {SCHEMA}.rejected_word r
+                JOIN {SCHEMA}.book b ON b.id = r.book_id
+                ORDER BY 1"""
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
+class AcceptedResult(BaseModel):
+    id: int
+    lemma: str
+    definition: str | None
+
+
+@app.post("/api/rejected/{rejected_id}/accept", response_model=AcceptedResult)
+def accept_rejected(rejected_id: int) -> AcceptedResult:
+    """Move a rejected candidate into the accepted word list: live dictionary
+    lookup (the pipeline never enriched rejects, so there's no stored
+    definition to reuse), upsert into word/word_book against the same book it
+    was rejected from, then remove the rejected_word row — it's promoted, not
+    duplicated."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"SELECT lemma, book_id FROM {SCHEMA}.rejected_word WHERE id = %s", (rejected_id,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="rejected word not found")
+        lemma, book_id = row
+
+        cand = Candidate(lemma=lemma, pos="")
+        dictionary_enrich(cand)
+
+        cur.execute(
+            f"""INSERT INTO {SCHEMA}.word
+                (lemma, as_seen, definition, part_of_speech, ipa, synonyms,
+                 etymology, definition_source, first_added)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s, CURRENT_DATE)
+                ON CONFLICT (lemma_lc) DO UPDATE SET
+                    definition=COALESCE(NULLIF(EXCLUDED.definition,''), {SCHEMA}.word.definition),
+                    part_of_speech=COALESCE(NULLIF(EXCLUDED.part_of_speech,''), {SCHEMA}.word.part_of_speech),
+                    ipa=COALESCE(NULLIF(EXCLUDED.ipa,''), {SCHEMA}.word.ipa),
+                    etymology=COALESCE(NULLIF(EXCLUDED.etymology,''), {SCHEMA}.word.etymology),
+                    definition_source=COALESCE(NULLIF(EXCLUDED.definition_source,''), {SCHEMA}.word.definition_source),
+                    active=true, updated_at=now()
+                RETURNING id""",
+            (lemma, lemma, cand.definition, cand.part_of_speech, cand.ipa,
+             list(cand.synonyms), cand.etymology, cand.definition_source),
+        )
+        word_id = cur.fetchone()[0]
+
+        cur.execute(
+            f"""INSERT INTO {SCHEMA}.word_book (word_id, book_id) VALUES (%s,%s)
+                ON CONFLICT DO NOTHING""",
+            (word_id, book_id),
+        )
+        cur.execute(f"DELETE FROM {SCHEMA}.rejected_word WHERE id = %s", (rejected_id,))
+        conn.commit()
+
+    return AcceptedResult(id=word_id, lemma=lemma, definition=cand.definition or None)
 
 
 # Serves the built frontend (webapp/frontend/dist, from `npm run build`) so a

@@ -19,6 +19,8 @@ models/
 *.pdf
 *.csv
 archive/
+incoming/
+gutenberg_literature/
 missed_shadow.txt
 
 # Local agent / editor config

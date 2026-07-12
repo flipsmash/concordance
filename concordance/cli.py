@@ -7,11 +7,14 @@ Three verbs:
   concordance finalize <vocab.csv>  after you delete the rows you know / dislike,
                                     promote the survivors to master_vocab.csv and
                                     archive the book's files.
-  concordance ingest <book>         same pipeline as `run`, but writes straight
+  concordance ingest [book]         same pipeline as `run`, but writes straight
                                     to Postgres (kept -> word/word_book, dropped
                                     -> rejected_word per book) — no CSV, no
                                     hand-edit, no finalize. Review/prune the
                                     result afterward in the review web app.
+                                    Omit the argument to process every EPUB/
+                                    PDF/txt file in incoming/ instead of a
+                                    single named file.
 """
 
 from __future__ import annotations
@@ -33,6 +36,21 @@ from .pipeline import run as run_pipeline
 
 app = typer.Typer(add_completion=False, help="Extract interesting vocabulary from a book.")
 console = Console()
+
+INCOMING_DIR = Path("incoming")
+ARCHIVE_DIR = Path("archive")
+_INGEST_SUFFIXES = {".epub", ".pdf", ".txt"}
+
+
+def _parse_incoming_name(path: Path) -> tuple[str, Optional[str]]:
+    """'[Title] -- [Author].ext' -> (title, author). Falls back to the whole
+    stem as title (author=None) if the ' -- ' delimiter isn't present, so an
+    oddly-named file still ingests instead of erroring out."""
+    stem = path.stem
+    if " -- " in stem:
+        title, author = stem.split(" -- ", 1)
+        return title.strip(), author.strip() or None
+    return stem.strip(), None
 
 
 @app.command()
@@ -68,7 +86,7 @@ def run(
 
 @app.command()
 def ingest(
-    book: Path = typer.Argument(..., help="Path to an EPUB, text PDF, or .txt file."),
+    book: Optional[Path] = typer.Argument(None, help="Path to an EPUB, text PDF, or .txt file. Omit to process every file in incoming/."),
     model: Optional[Path] = typer.Option(None, "--model", "-m", help="Path to a .gguf model. Defaults to the 14B; falls back to the stub judge if that file is absent."),
     stub: bool = typer.Option(False, "--stub", help="Force the no-model stub judge even if the default model is present."),
     min_zipf: float = typer.Option(3.5, "--min-zipf", help="Frequency floor; higher keeps rarer words only."),
@@ -76,10 +94,13 @@ def ingest(
     no_lookup: bool = typer.Option(False, "--no-lookup", help="Skip online definition lookups."),
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema to write into."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
-    no_archive: bool = typer.Option(False, "--no-archive", help="Leave the source book file in place instead of moving it to archive/."),
+    no_archive: bool = typer.Option(False, "--no-archive", help="Leave source book files in place instead of moving them to archive/."),
 ) -> None:
     """Run the extraction pipeline and write straight to Postgres — no CSV,
-    no hand-edit, no finalize. Review/prune the result in the review web app."""
+    no hand-edit, no finalize. Review/prune the result in the review web app.
+
+    With no argument, processes every .epub/.pdf/.txt file in incoming/,
+    parsing "[Title] -- [Author]" from each filename to set book.author."""
     cfg = Config(
         min_zipf=min_zipf,
         limit=limit,
@@ -90,11 +111,19 @@ def ingest(
     elif model:
         cfg.model_path = str(model)      # explicit override; else Config's 14B default
 
-    try:
-        kept, rejected = process_pipeline(book, cfg, console)
-    except (ScannedPDFError, UnsupportedFormatError, FileNotFoundError) as exc:
-        console.print(f"[red]✗[/red] {exc}")
-        raise typer.Exit(code=1)
+    if book is not None:
+        books = [book]
+        batch_mode = False
+    else:
+        if not INCOMING_DIR.is_dir():
+            console.print(f"[red]✗[/red] no such directory: {INCOMING_DIR}/")
+            raise typer.Exit(code=1)
+        books = sorted(p for p in INCOMING_DIR.iterdir() if p.suffix.lower() in _INGEST_SUFFIXES)
+        batch_mode = True
+        if not books:
+            console.print(f"[yellow]![/yellow] no .epub/.pdf/.txt files found in {INCOMING_DIR}/")
+            raise typer.Exit(code=0)
+        console.print(f"Found [bold]{len(books)}[/bold] file(s) in {INCOMING_DIR}/.")
 
     try:
         conn = db.connect(database_url)
@@ -103,23 +132,44 @@ def ingest(
         console.print("[dim]set DATABASE_URL in the environment or a .env file[/dim]")
         raise typer.Exit(code=1)
     db.apply_schema(conn, schema)
-    stats = db.sync_book_results(conn, book.stem, kept, rejected, schema)
-    conn.close()
 
+    for i, b in enumerate(books, 1):
+        if batch_mode:
+            console.print()
+            console.rule(f"[bold]{i}/{len(books)} · {b.name}")
+        title, author = _parse_incoming_name(b)
+
+        try:
+            kept, rejected = process_pipeline(b, cfg, console)
+        except (ScannedPDFError, UnsupportedFormatError, FileNotFoundError) as exc:
+            console.print(f"[red]✗[/red] {exc}")
+            if batch_mode:
+                continue
+            conn.close()
+            raise typer.Exit(code=1)
+
+        stats = db.sync_book_results(conn, title, kept, rejected, schema, author=author)
+        console.print(
+            f"[bold]{stats['kept']}[/bold] words kept, {stats['rejected']} rejected "
+            f"→ '{schema}' (title={title!r}, author={author or 'unknown'})"
+        )
+
+        if not no_archive:
+            # batch mode always archives to the top-level archive/ (incoming/
+            # and archive/ are siblings at the project root); single-file mode
+            # keeps `run`'s convention of archiving next to the source file.
+            archive_dir = ARCHIVE_DIR if batch_mode else b.parent / "archive"
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            dest = archive_dir / b.name
+            try:
+                shutil.move(str(b), str(dest))
+                console.print(f"[dim]moved → {archive_dir}/{dest.name}[/dim]")
+            except OSError as exc:
+                console.print(f"[yellow]![/yellow] could not archive {b.name}: {exc}")
+
+    conn.close()
     console.print()
     console.rule("[bold green]Done[/bold green]")
-    console.print(f"[bold]{stats['kept']}[/bold] words kept → '{schema}'.word (+word_book)")
-    console.print(f"[dim]{stats['rejected']} rejected → '{schema}'.rejected_word[/dim]")
-
-    if not no_archive:
-        archive_dir = book.parent / "archive"
-        archive_dir.mkdir(parents=True, exist_ok=True)
-        dest = archive_dir / book.name
-        try:
-            shutil.move(str(book), str(dest))
-            console.print(f"[dim]book moved → archive/{dest.name}[/dim]")
-        except OSError as exc:
-            console.print(f"[yellow]![/yellow] could not archive {book.name}: {exc}")
 
 
 @app.command()

@@ -15,6 +15,31 @@ header {
   padding-bottom: 12px;
 }
 
+.tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.tab {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  border-radius: 6px;
+  padding: 5px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: var(--text-h);
+}
+
+.tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
 .header-controls {
   display: flex;
   align-items: center;
@@ -102,6 +127,10 @@ tbody tr:has(.delete-btn:hover) {
   background: var(--row-danger-hover);
 }
 
+tbody tr:has(.accept-btn:hover) {
+  background: var(--row-accept-hover);
+}
+
 td.lemma {
   font-weight: 600;
   color: var(--text-h);
@@ -111,6 +140,11 @@ td.lemma {
 td.pos {
   white-space: nowrap;
   font-style: italic;
+}
+
+td.reason {
+  white-space: nowrap;
+  cursor: help;
 }
 
 td.difficulty {
@@ -145,6 +179,28 @@ td.empty {
   background: var(--danger);
   color: white;
   border-color: var(--danger-hover);
+}
+
+.accept-btn {
+  border: 1px solid var(--accept);
+  color: var(--accept);
+  background: transparent;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.accept-btn:hover:not(:disabled) {
+  background: var(--accept);
+  color: white;
+  border-color: var(--accept-hover);
+}
+
+.accept-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 footer {

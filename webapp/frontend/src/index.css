@@ -6,8 +6,11 @@
   --row-alt: #faf9fc;
   --row-hover: rgba(170, 59, 255, 0.08);
   --row-danger-hover: rgba(209, 41, 61, 0.12);
+  --row-accept-hover: rgba(29, 145, 84, 0.12);
   --danger: #d1293d;
   --danger-hover: #a91f2f;
+  --accept: #1d9154;
+  --accept-hover: #167042;
   --accent: #aa3bff;
 
   --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
@@ -32,8 +35,11 @@
     --row-alt: #1b1c23;
     --row-hover: rgba(192, 132, 252, 0.14);
     --row-danger-hover: rgba(229, 72, 77, 0.16);
+    --row-accept-hover: rgba(62, 207, 130, 0.16);
     --danger: #e5484d;
     --danger-hover: #ff6369;
+    --accept: #3ecf82;
+    --accept-hover: #63e29c;
     --accent: #c084fc;
   }
 }

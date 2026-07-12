@@ -177,6 +177,7 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
         cur.execute(_SCHEMA_DDL.format(s=s))
         # idempotent column additions (CREATE TABLE IF NOT EXISTS won't alter an
         # existing table, so evolve columns explicitly)
+        cur.execute(f"ALTER TABLE {s}.book ADD COLUMN IF NOT EXISTS author text")
         cur.execute(f"ALTER TABLE {s}.word_difficulty "
                     "ADD COLUMN IF NOT EXISTS archaic_confidence double precision")
         cur.execute(f"ALTER TABLE {s}.word_difficulty "
@@ -278,21 +279,23 @@ def sync_master(csv_path: Path, conn: psycopg.Connection,
 
 
 def sync_book_results(conn, book_title: str, kept: list, rejected: list,
-                       schema: str = DEFAULT_SCHEMA) -> dict:
+                       schema: str = DEFAULT_SCHEMA, author: str | None = None) -> dict:
     """Upsert one book's ingestion results straight into Postgres — no CSV, no
     hand-edit, no `finalize`. KEEP/UNSURE candidates go into word/word_book
     exactly like sync_master; DROPped ones go into rejected_word, one row per
     (book, lemma). Review/pruning happens afterward in the review webapp
     (word.active) rather than before promotion. Idempotent: re-running the
-    same book updates both tables in place."""
+    same book updates both tables in place. `author` is COALESCEd on conflict
+    so re-ingesting a book without a parsed author never blanks a known one."""
     s = _safe_schema(schema)
     stats = {"kept": 0, "rejected": 0}
 
     with conn.cursor() as cur:
         cur.execute(
-            f"""INSERT INTO {s}.book (title) VALUES (%s)
-                ON CONFLICT (title) DO UPDATE SET title=EXCLUDED.title
-                RETURNING id""", (book_title,))
+            f"""INSERT INTO {s}.book (title, author) VALUES (%s, %s)
+                ON CONFLICT (title) DO UPDATE SET title=EXCLUDED.title,
+                    author=COALESCE(EXCLUDED.author, {s}.book.author)
+                RETURNING id""", (book_title, author))
         book_id = cur.fetchone()[0]
 
         for c in kept:
