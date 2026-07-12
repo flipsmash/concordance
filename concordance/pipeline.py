@@ -20,7 +20,11 @@ class Result:
     rejected_path: Path
 
 
-def run(book: str | Path, cfg: Config, console: Console | None = None) -> Result:
+def process(book: str | Path, cfg: Config, console: Console | None = None) -> tuple[list[Candidate], list[Candidate]]:
+    """Extract -> filter -> judge -> enrich a book, returning (kept, rejected).
+    Shared by `run` (writes CSVs for hand-editing) and `ingest` (writes straight
+    to Postgres) — everything through enrichment is identical; only what
+    happens with the result differs."""
     console = console or Console()
     book = Path(book)
 
@@ -61,12 +65,19 @@ def run(book: str | Path, cfg: Config, console: Console | None = None) -> Result
                 dictionary.enrich(cand, session)
                 status.update(f"[bold]Looking up definitions… {i}/{len(shortlist)}")
 
+    return output.partition(candidates)
+
+
+def run(book: str | Path, cfg: Config, console: Console | None = None) -> Result:
+    console = console or Console()
+    book = Path(book)
+    kept, rejected = process(book, cfg, console)
+
     # --- write + snapshot ------------------------------------------------
     # No interactive pass: the shortlist is written whole for the user to hand-edit
     # (delete rows they know / dislike), then `concordance finalize` promotes the
     # survivors. A pristine copy is archived immediately so the original and the
     # cleaned version both persist.
-    kept, rejected = output.partition(candidates)
     stem = book.with_suffix("")
     vocab_path = Path(f"{stem}.vocab.csv")
     rejected_path = Path(f"{stem}.rejected.csv")

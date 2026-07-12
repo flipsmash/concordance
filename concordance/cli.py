@@ -1,16 +1,22 @@
 """Command-line entry point.
 
-Two verbs:
+Three verbs:
   concordance run <book>            extract → filter → judge → enrich a book,
                                     writing <book>.vocab.csv (and a pristine copy
                                     to archive/) for you to hand-edit.
   concordance finalize <vocab.csv>  after you delete the rows you know / dislike,
                                     promote the survivors to master_vocab.csv and
                                     archive the book's files.
+  concordance ingest <book>         same pipeline as `run`, but writes straight
+                                    to Postgres (kept -> word/word_book, dropped
+                                    -> rejected_word per book) — no CSV, no
+                                    hand-edit, no finalize. Review/prune the
+                                    result afterward in the review web app.
 """
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -22,6 +28,7 @@ from .extract import ScannedPDFError, UnsupportedFormatError
 from . import db
 from .deepen import define as define_cmd
 from .finalize import finalize_file
+from .pipeline import process as process_pipeline
 from .pipeline import run as run_pipeline
 
 app = typer.Typer(add_completion=False, help="Extract interesting vocabulary from a book.")
@@ -57,6 +64,62 @@ def run(
     console.rule("[bold green]Done[/bold green]")
     console.print(f"[bold]{len(result.kept)}[/bold] words → {result.vocab_path.name}")
     console.print(f"[dim]{len(result.rejected)} rejected → {result.rejected_path.name}[/dim]")
+
+
+@app.command()
+def ingest(
+    book: Path = typer.Argument(..., help="Path to an EPUB, text PDF, or .txt file."),
+    model: Optional[Path] = typer.Option(None, "--model", "-m", help="Path to a .gguf model. Defaults to the 14B; falls back to the stub judge if that file is absent."),
+    stub: bool = typer.Option(False, "--stub", help="Force the no-model stub judge even if the default model is present."),
+    min_zipf: float = typer.Option(3.5, "--min-zipf", help="Frequency floor; higher keeps rarer words only."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap the shortlist size (0 = no cap)."),
+    no_lookup: bool = typer.Option(False, "--no-lookup", help="Skip online definition lookups."),
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema to write into."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+    no_archive: bool = typer.Option(False, "--no-archive", help="Leave the source book file in place instead of moving it to archive/."),
+) -> None:
+    """Run the extraction pipeline and write straight to Postgres — no CSV,
+    no hand-edit, no finalize. Review/prune the result in the review web app."""
+    cfg = Config(
+        min_zipf=min_zipf,
+        limit=limit,
+        lookup_definitions=not no_lookup,
+    )
+    if stub:
+        cfg.model_path = ""              # explicit opt-out of the model
+    elif model:
+        cfg.model_path = str(model)      # explicit override; else Config's 14B default
+
+    try:
+        kept, rejected = process_pipeline(book, cfg, console)
+    except (ScannedPDFError, UnsupportedFormatError, FileNotFoundError) as exc:
+        console.print(f"[red]✗[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}")
+        console.print("[dim]set DATABASE_URL in the environment or a .env file[/dim]")
+        raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    stats = db.sync_book_results(conn, book.stem, kept, rejected, schema)
+    conn.close()
+
+    console.print()
+    console.rule("[bold green]Done[/bold green]")
+    console.print(f"[bold]{stats['kept']}[/bold] words kept → '{schema}'.word (+word_book)")
+    console.print(f"[dim]{stats['rejected']} rejected → '{schema}'.rejected_word[/dim]")
+
+    if not no_archive:
+        archive_dir = book.parent / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        dest = archive_dir / book.name
+        try:
+            shutil.move(str(book), str(dest))
+            console.print(f"[dim]book moved → archive/{dest.name}[/dim]")
+        except OSError as exc:
+            console.print(f"[yellow]![/yellow] could not archive {book.name}: {exc}")
 
 
 @app.command()

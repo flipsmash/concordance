@@ -148,6 +148,31 @@ Tables live in a dedicated schema (default `concordance`) so they can share a
 database with other projects. `pg_trgm` is enabled when privileges allow, giving a
 trigram index on `lemma` for future fuzzy lookups.
 
+### Ingest straight to the database (`ingest`)
+
+`run` → hand-edit → `finalize` → `sync-db` is the CSV-based path above. Now that
+the review [webapp](#web-app-webapp) handles pruning after the fact
+(marking a term `active = false` instead of deleting a CSV row before
+promotion), a book can skip the CSV step entirely:
+
+```bash
+concordance ingest "some book.epub"                 # same pipeline as `run`
+concordance ingest "some book.epub" --schema concordance
+```
+
+Same extract → filter → judge → enrich pipeline as `run` (same `--model`,
+`--stub`, `--min-zipf`, `--limit`, `--no-lookup` flags), but the result goes
+straight into Postgres instead of a CSV: kept words upsert into
+`word`/`word_book` exactly like `sync-db` does, and everything the pipeline
+dropped goes into **`rejected_word`** — one row per **(book, lemma)**,
+deliberately *not* deduped across books the way `word` is, since the same
+lemma can be rejected for a different reason (or recurrence count) in a
+different book. Nothing is silently lost; you just query the DB instead of
+opening `<book>.rejected.csv`. The source book file is moved into `archive/`
+on success (`--no-archive` to leave it in place); `--database-url` overrides
+`DATABASE_URL`/`.env` same as `sync-db`. Idempotent — re-running the same
+book updates both tables in place rather than duplicating rows.
+
 ## Running the local model (RTX 3060, 12 GB)
 
 The judge talks to `llama.cpp` through the `llama-cpp-python` bindings — no

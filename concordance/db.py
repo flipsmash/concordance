@@ -131,6 +131,26 @@ CREATE TABLE IF NOT EXISTS {s}.word_commons_search (
     download_url text,
     checked_at   timestamptz NOT NULL DEFAULT now()
 );
+
+-- One row per (book, lemma) rejection, deliberately NOT deduped across books
+-- like word/word_book is: the same lemma can be rejected for different
+-- reasons in different books (e.g. the coinage/UNSURE call depends on
+-- per-book recurrence count), so each book's ingestion run keeps its own
+-- verdict rather than merging into a single global history.
+CREATE TABLE IF NOT EXISTS {s}.rejected_word (
+    id          serial PRIMARY KEY,
+    book_id     integer NOT NULL REFERENCES {s}.book(id) ON DELETE CASCADE,
+    lemma       text NOT NULL,
+    lemma_lc    text GENERATED ALWAYS AS (lower(lemma)) STORED,
+    reason      text,          -- frequency_floor | proper_noun | misspelling | not_a_word | not_interesting
+    detail      text,
+    count       integer,
+    zipf        double precision,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (book_id, lemma_lc)
+);
+
+CREATE INDEX IF NOT EXISTS rejected_word_lemma_idx ON {s}.rejected_word (lemma_lc);
 """
 
 
@@ -253,6 +273,66 @@ def sync_master(csv_path: Path, conn: psycopg.Connection,
                         ON CONFLICT DO NOTHING""", (word_id, seen_books[title]))
                 if cur.rowcount:
                     stats["links"] += 1
+    conn.commit()
+    return stats
+
+
+def sync_book_results(conn, book_title: str, kept: list, rejected: list,
+                       schema: str = DEFAULT_SCHEMA) -> dict:
+    """Upsert one book's ingestion results straight into Postgres — no CSV, no
+    hand-edit, no `finalize`. KEEP/UNSURE candidates go into word/word_book
+    exactly like sync_master; DROPped ones go into rejected_word, one row per
+    (book, lemma). Review/pruning happens afterward in the review webapp
+    (word.active) rather than before promotion. Idempotent: re-running the
+    same book updates both tables in place."""
+    s = _safe_schema(schema)
+    stats = {"kept": 0, "rejected": 0}
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""INSERT INTO {s}.book (title) VALUES (%s)
+                ON CONFLICT (title) DO UPDATE SET title=EXCLUDED.title
+                RETURNING id""", (book_title,))
+        book_id = cur.fetchone()[0]
+
+        for c in kept:
+            rep = c.representative
+            cur.execute(
+                f"""INSERT INTO {s}.word
+                    (lemma, as_seen, definition, part_of_speech, ipa, sentence,
+                     chapter, synonyms, etymology, definition_source, first_added)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, CURRENT_DATE)
+                    ON CONFLICT (lemma_lc) DO UPDATE SET
+                        as_seen=EXCLUDED.as_seen, definition=EXCLUDED.definition,
+                        part_of_speech=EXCLUDED.part_of_speech, ipa=EXCLUDED.ipa,
+                        sentence=EXCLUDED.sentence, chapter=EXCLUDED.chapter,
+                        synonyms=EXCLUDED.synonyms, etymology=EXCLUDED.etymology,
+                        definition_source=EXCLUDED.definition_source,
+                        updated_at=now()
+                    RETURNING id""",
+                (c.lemma, rep.surface if rep else "", c.definition,
+                 (c.part_of_speech or c.pos or "").lower(), c.ipa,
+                 rep.sentence if rep else "", rep.chapter if rep else "",
+                 list(c.synonyms), c.etymology,
+                 c.definition_source or ", ".join(c.validity_sources)))
+            word_id = cur.fetchone()[0]
+            stats["kept"] += 1
+            cur.execute(
+                f"""INSERT INTO {s}.word_book (word_id, book_id) VALUES (%s,%s)
+                    ON CONFLICT DO NOTHING""", (word_id, book_id))
+
+        for c in rejected:
+            cur.execute(
+                f"""INSERT INTO {s}.rejected_word
+                    (book_id, lemma, reason, detail, count, zipf)
+                    VALUES (%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (book_id, lemma_lc) DO UPDATE SET
+                        reason=EXCLUDED.reason, detail=EXCLUDED.detail,
+                        count=EXCLUDED.count, zipf=EXCLUDED.zipf""",
+                (book_id, c.lemma, c.reject_reason.value if c.reject_reason else None,
+                 c.interesting_reason or None, c.count, c.zipf))
+            stats["rejected"] += 1
+
     conn.commit()
     return stats
 
