@@ -84,7 +84,14 @@ function AcceptedView() {
           <tbody>
             {items.map((w) => (
               <tr key={w.id}>
-                <td className="lemma">{w.lemma}</td>
+                <td className="lemma">
+                  {w.lemma}
+                  {w.rescued_from_reject && (
+                    <span className="rescued-badge" title="Added back from the Rejected tab">
+                      rescued
+                    </span>
+                  )}
+                </td>
                 <td className="pos">{w.part_of_speech || '—'}</td>
                 <td className="definition">{w.definition || '—'}</td>
                 <td className="difficulty">{w.difficulty != null ? Math.round(w.difficulty) : '—'}</td>

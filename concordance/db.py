@@ -204,6 +204,13 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
         # place (history/audio/etc. intact) but drop out of every downstream view
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS active boolean NOT NULL DEFAULT true")
         cur.execute(f"CREATE INDEX IF NOT EXISTS word_active_idx ON {s}.word (active)")
+        # tracks words the pipeline itself rejected but a human rescued via the
+        # review webapp's Rejected tab — distinct from words the pipeline kept
+        # on its own, so this history survives even though rejected_word
+        # (which had the original reason/detail) is deleted once promoted
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS rescued_from_reject boolean NOT NULL DEFAULT false")
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS rescued_at timestamptz")
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS rescued_reason text")
     trgm = True
     try:
         with conn.cursor() as cur:

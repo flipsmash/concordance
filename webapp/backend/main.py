@@ -52,6 +52,7 @@ class WordRow(BaseModel):
     part_of_speech: str | None
     definition: str | None
     difficulty: float | None
+    rescued_from_reject: bool
 
 
 class WordPage(BaseModel):
@@ -80,7 +81,7 @@ def list_words(
         total = cur.fetchone()[0]
 
         cur.execute(
-            f"""SELECT w.id, w.lemma, w.part_of_speech, w.definition, d.difficulty
+            f"""SELECT w.id, w.lemma, w.part_of_speech, w.definition, d.difficulty, w.rescued_from_reject
                 FROM {SCHEMA}.word w
                 LEFT JOIN {SCHEMA}.word_difficulty d ON d.word_id = w.id
                 WHERE w.active{pos_filter}
@@ -91,7 +92,8 @@ def list_words(
         rows = cur.fetchall()
 
     items = [
-        WordRow(id=r[0], lemma=r[1], part_of_speech=r[2], definition=r[3], difficulty=r[4])
+        WordRow(id=r[0], lemma=r[1], part_of_speech=r[2], definition=r[3], difficulty=r[4],
+                 rescued_from_reject=r[5])
         for r in rows
     ]
     return WordPage(items=items, total=total, page=page, page_size=page_size)
@@ -233,14 +235,14 @@ def accept_rejected(rejected_id: int) -> AcceptedResult:
     removes the rejected_word row — promoted, not duplicated."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            f"SELECT lemma, book_id, pos, as_seen, sentence, chapter "
+            f"SELECT lemma, book_id, pos, as_seen, sentence, chapter, reason "
             f"FROM {SCHEMA}.rejected_word WHERE id = %s",
             (rejected_id,),
         )
         row = cur.fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="rejected word not found")
-        lemma, book_id, pos, as_seen, sentence, chapter = row
+        lemma, book_id, pos, as_seen, sentence, chapter, reason = row
 
         cand = Candidate(lemma=lemma, pos=pos or "")
         dictionary_enrich(cand)
@@ -248,8 +250,9 @@ def accept_rejected(rejected_id: int) -> AcceptedResult:
         cur.execute(
             f"""INSERT INTO {SCHEMA}.word
                 (lemma, as_seen, definition, part_of_speech, ipa, sentence,
-                 chapter, synonyms, etymology, definition_source, first_added)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, CURRENT_DATE)
+                 chapter, synonyms, etymology, definition_source, first_added,
+                 rescued_from_reject, rescued_at, rescued_reason)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, CURRENT_DATE, true, now(), %s)
                 ON CONFLICT (lemma_lc) DO UPDATE SET
                     definition=COALESCE(NULLIF(EXCLUDED.definition,''), {SCHEMA}.word.definition),
                     part_of_speech=COALESCE(NULLIF(EXCLUDED.part_of_speech,''), {SCHEMA}.word.part_of_speech),
@@ -258,11 +261,12 @@ def accept_rejected(rejected_id: int) -> AcceptedResult:
                     chapter=COALESCE(NULLIF(EXCLUDED.chapter,''), {SCHEMA}.word.chapter),
                     etymology=COALESCE(NULLIF(EXCLUDED.etymology,''), {SCHEMA}.word.etymology),
                     definition_source=COALESCE(NULLIF(EXCLUDED.definition_source,''), {SCHEMA}.word.definition_source),
-                    active=true, updated_at=now()
+                    active=true, updated_at=now(),
+                    rescued_from_reject=true, rescued_at=now(), rescued_reason=EXCLUDED.rescued_reason
                 RETURNING id""",
             (lemma, as_seen or lemma, cand.definition, cand.part_of_speech or pos or "",
              cand.ipa, sentence or "", chapter or "",
-             list(cand.synonyms), cand.etymology, cand.definition_source),
+             list(cand.synonyms), cand.etymology, cand.definition_source, reason),
         )
         word_id = cur.fetchone()[0]
 

@@ -191,6 +191,20 @@ td.lemma {
   white-space: nowrap;
 }
 
+.rescued-badge {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--accept);
+  border: 1px solid var(--accept);
+  border-radius: 4px;
+  padding: 1px 5px;
+  vertical-align: middle;
+  cursor: help;
+}
+
 td.pos {
   white-space: nowrap;
   font-style: italic;
