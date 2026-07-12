@@ -178,6 +178,12 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
         # idempotent column additions (CREATE TABLE IF NOT EXISTS won't alter an
         # existing table, so evolve columns explicitly)
         cur.execute(f"ALTER TABLE {s}.book ADD COLUMN IF NOT EXISTS author text")
+        # so "un-rejecting" a word in the review webapp can produce a word row
+        # with the same context a normally-kept word has, not a bare stub
+        cur.execute(f"ALTER TABLE {s}.rejected_word ADD COLUMN IF NOT EXISTS pos text")
+        cur.execute(f"ALTER TABLE {s}.rejected_word ADD COLUMN IF NOT EXISTS as_seen text")
+        cur.execute(f"ALTER TABLE {s}.rejected_word ADD COLUMN IF NOT EXISTS sentence text")
+        cur.execute(f"ALTER TABLE {s}.rejected_word ADD COLUMN IF NOT EXISTS chapter text")
         cur.execute(f"ALTER TABLE {s}.word_difficulty "
                     "ADD COLUMN IF NOT EXISTS archaic_confidence double precision")
         cur.execute(f"ALTER TABLE {s}.word_difficulty "
@@ -325,15 +331,20 @@ def sync_book_results(conn, book_title: str, kept: list, rejected: list,
                     ON CONFLICT DO NOTHING""", (word_id, book_id))
 
         for c in rejected:
+            rep = c.representative
             cur.execute(
                 f"""INSERT INTO {s}.rejected_word
-                    (book_id, lemma, reason, detail, count, zipf)
-                    VALUES (%s,%s,%s,%s,%s,%s)
+                    (book_id, lemma, reason, detail, count, zipf, pos, as_seen, sentence, chapter)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT (book_id, lemma_lc) DO UPDATE SET
                         reason=EXCLUDED.reason, detail=EXCLUDED.detail,
-                        count=EXCLUDED.count, zipf=EXCLUDED.zipf""",
+                        count=EXCLUDED.count, zipf=EXCLUDED.zipf,
+                        pos=EXCLUDED.pos, as_seen=EXCLUDED.as_seen,
+                        sentence=EXCLUDED.sentence, chapter=EXCLUDED.chapter""",
                 (book_id, c.lemma, c.reject_reason.value if c.reject_reason else None,
-                 c.interesting_reason or None, c.count, c.zipf))
+                 c.interesting_reason or None, c.count, c.zipf,
+                 c.pos, rep.surface if rep else None,
+                 rep.sentence if rep else None, rep.chapter if rep else None))
             stats["rejected"] += 1
 
     conn.commit()

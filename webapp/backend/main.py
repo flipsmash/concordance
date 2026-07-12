@@ -206,35 +206,44 @@ class AcceptedResult(BaseModel):
 
 @app.post("/api/rejected/{rejected_id}/accept", response_model=AcceptedResult)
 def accept_rejected(rejected_id: int) -> AcceptedResult:
-    """Move a rejected candidate into the accepted word list: live dictionary
-    lookup (the pipeline never enriched rejects, so there's no stored
-    definition to reuse), upsert into word/word_book against the same book it
-    was rejected from, then remove the rejected_word row — it's promoted, not
-    duplicated."""
+    """Move a rejected candidate into the accepted word list, as a fully-formed
+    incoming term rather than a bare stub: reuses whatever tagger POS/surface
+    form/sentence/chapter context the pipeline captured at reject time (so
+    dictionary sense-picking gets the same POS hint a normal `ingest` gives
+    it), does a live dictionary lookup (rejects are never pre-enriched), then
+    upserts into word/word_book against the same book it was rejected from and
+    removes the rejected_word row — promoted, not duplicated."""
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(f"SELECT lemma, book_id FROM {SCHEMA}.rejected_word WHERE id = %s", (rejected_id,))
+        cur.execute(
+            f"SELECT lemma, book_id, pos, as_seen, sentence, chapter "
+            f"FROM {SCHEMA}.rejected_word WHERE id = %s",
+            (rejected_id,),
+        )
         row = cur.fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="rejected word not found")
-        lemma, book_id = row
+        lemma, book_id, pos, as_seen, sentence, chapter = row
 
-        cand = Candidate(lemma=lemma, pos="")
+        cand = Candidate(lemma=lemma, pos=pos or "")
         dictionary_enrich(cand)
 
         cur.execute(
             f"""INSERT INTO {SCHEMA}.word
-                (lemma, as_seen, definition, part_of_speech, ipa, synonyms,
-                 etymology, definition_source, first_added)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s, CURRENT_DATE)
+                (lemma, as_seen, definition, part_of_speech, ipa, sentence,
+                 chapter, synonyms, etymology, definition_source, first_added)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, CURRENT_DATE)
                 ON CONFLICT (lemma_lc) DO UPDATE SET
                     definition=COALESCE(NULLIF(EXCLUDED.definition,''), {SCHEMA}.word.definition),
                     part_of_speech=COALESCE(NULLIF(EXCLUDED.part_of_speech,''), {SCHEMA}.word.part_of_speech),
                     ipa=COALESCE(NULLIF(EXCLUDED.ipa,''), {SCHEMA}.word.ipa),
+                    sentence=COALESCE(NULLIF(EXCLUDED.sentence,''), {SCHEMA}.word.sentence),
+                    chapter=COALESCE(NULLIF(EXCLUDED.chapter,''), {SCHEMA}.word.chapter),
                     etymology=COALESCE(NULLIF(EXCLUDED.etymology,''), {SCHEMA}.word.etymology),
                     definition_source=COALESCE(NULLIF(EXCLUDED.definition_source,''), {SCHEMA}.word.definition_source),
                     active=true, updated_at=now()
                 RETURNING id""",
-            (lemma, lemma, cand.definition, cand.part_of_speech, cand.ipa,
+            (lemma, as_seen or lemma, cand.definition, cand.part_of_speech or pos or "",
+             cand.ipa, sentence or "", chapter or "",
              list(cand.synonyms), cand.etymology, cand.definition_source),
         )
         word_id = cur.fetchone()[0]
