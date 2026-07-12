@@ -20,6 +20,7 @@ class RejectReason(str, Enum):
     MISSPELLING = "misspelling"           # dominant higher-frequency near-neighbor
     NOT_A_WORD = "not_a_word"             # no authority vouched + no corpus presence
     NUMERIC_OR_SYMBOL = "numeric_or_symbol"
+    FOREIGN_LANGUAGE = "foreign_language"  # sits in a non-English quoted phrase/sentence
     NOT_INTERESTING = "not_interesting"   # real, but the LLM judged it unremarkable
     ALREADY_KNOWN = "already_known"       # user marked it known during review
 
@@ -63,6 +64,13 @@ class Candidate:
     def count(self) -> int:
         return len(self.occurrences)
 
+    @property
+    def representative(self) -> Occurrence | None:
+        """A sentence to show the user — the shortest that still has real context."""
+        usable = [o for o in self.occurrences if len(o.sentence.split()) >= 4]
+        pool = usable or self.occurrences
+        return min(pool, key=lambda o: len(o.sentence)) if pool else None
+
 
 # Canonical, spelled-out part-of-speech vocabulary. Every write site (dictionary
 # enrichment, the spaCy-tag fallback, hand-edited CSVs, the webapp's rescue
@@ -100,10 +108,3 @@ def normalize_pos(pos: str | None) -> str:
         return ""
     key = pos.strip().lower()
     return _POS_ALIASES.get(key, key)
-
-    @property
-    def representative(self) -> Occurrence | None:
-        """A sentence to show the user — the shortest that still has real context."""
-        usable = [o for o in self.occurrences if len(o.sentence.split()) >= 4]
-        pool = usable or self.occurrences
-        return min(pool, key=lambda o: len(o.sentence)) if pool else None

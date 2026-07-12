@@ -27,6 +27,7 @@ from wordfreq import zipf_frequency
 
 from .config import Config
 from .model import Candidate, RejectReason, Verdict
+from .validity_score import _english_fraction, _FOREIGN_ENGLISH_FRACTION, _FOREIGN_MIN_TOKENS
 
 _CORPUS_PRESENT = 0.0  # wordfreq returns 0.0 for tokens it has never seen
 
@@ -70,7 +71,16 @@ class ValidityGate:
                 return None
 
     def _in_wordnet(self, word: str) -> bool:
-        return bool(self._wn and self._wn.synsets(word))
+        """True only if WordNet has a GENERIC sense. A word whose ONLY
+        synsets are "instances" (Rahab, Ahasuerus, Coventry: specific named
+        individuals, not common-noun categories) shouldn't get to vouch for
+        itself as real vocabulary — WordNet catalogues biblical/historical/
+        mythological names as instance entries same as any city or person,
+        which otherwise lets a genuine one-off proper noun sail through."""
+        if not self._wn:
+            return False
+        synsets = self._wn.synsets(word)
+        return any(not s.instance_hypernyms() for s in synsets)
 
     @staticmethod
     def _load_word_corpus() -> frozenset[str]:
@@ -115,6 +125,24 @@ class ValidityGate:
         if cand.verdict is not None:
             return
         word = cand.lemma
+
+        # 0. A foreign-language context sentence is decisive on its own — whatever
+        #    dictionary/corpus attestation the token has, if it sits among mostly
+        #    non-English words (a quoted Latin/French/Italian phrase) it's a
+        #    fragment of that quote, not a word the reader would look up. This is
+        #    what actually defeats step 1's keep-bias for one-off Latin tokens
+        #    (cuius, verbo, fecit) that have SOME wordfreq corpus presence.
+        rep = cand.representative
+        if rep:
+            frac, ntok = _english_fraction(rep.sentence)
+            if ntok >= _FOREIGN_MIN_TOKENS and frac < _FOREIGN_ENGLISH_FRACTION:
+                if cand.count >= self.cfg.coinage_min_count:
+                    cand.verdict = Verdict.UNSURE
+                    cand.interesting_reason = "recurs but sits in a non-English context"
+                else:
+                    cand.verdict = Verdict.DROP
+                    cand.reject_reason = RejectReason.FOREIGN_LANGUAGE
+                return
 
         # 1. Curated headword in ANY authority — checked before the misspelling
         #    verdict so a real archaic word (armiger, abash, cangue) is never

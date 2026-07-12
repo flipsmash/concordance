@@ -65,6 +65,42 @@ def test_oneoff_gibberish_dropped():
     assert c.verdict is Verdict.DROP and c.reject_reason is RejectReason.NOT_A_WORD
 
 
+def test_foreign_context_sentence_drops_oneoff_fragment():
+    # Regression: a real Ulysses run kept "cuius"/"verbo" as words because
+    # wordfreq gives them some nonzero corpus zipf even though they're just
+    # fragments of a quoted Latin liturgical sentence — the validity gate
+    # never looked at the SENTENCE they came from until now.
+    latin_sentence = ("Deus cuius verbo sanctificantur omnia benedictionem "
+                       "tuam effunde super creaturas istas")
+    c = Candidate(lemma="cuius", pos="NOUN",
+                  occurrences=[Occurrence(sentence=latin_sentence, chapter="c", surface="cuius")])
+    c.zipf = zipf_frequency("cuius", "en")
+    ValidityGate(Config()).judge(c)
+    assert c.verdict is Verdict.DROP
+    assert c.reject_reason is RejectReason.FOREIGN_LANGUAGE
+
+
+def test_foreign_context_sentence_recurring_is_unsure_not_dropped():
+    # Keep-biased: if the same "foreign-context" word recurs as often as a
+    # deliberate coinage would, send it to review rather than silently drop —
+    # same leniency already given to the misspelling and unattested paths.
+    latin_sentence = "Deus cuius verbo sanctificantur omnia benedictionem tuam"
+    c = Candidate(lemma="cuius", pos="NOUN",
+                  occurrences=[Occurrence(sentence=latin_sentence, chapter="c", surface="cuius")
+                               for _ in range(5)])
+    c.zipf = zipf_frequency("cuius", "en")
+    ValidityGate(Config()).judge(c)
+    assert c.verdict is Verdict.UNSURE
+
+
+def test_english_sentence_context_unaffected():
+    # A genuine rare English word in a normal English sentence must not trip
+    # the foreign-context check just because it has enough token count.
+    c = _cand("apophenia", zipf=1.6, count=1)
+    ValidityGate(Config()).judge(c)
+    assert c.verdict is Verdict.KEEP
+
+
 # --- frequency floor (§03.4) --------------------------------------------
 
 def test_floor_drops_common_word():
