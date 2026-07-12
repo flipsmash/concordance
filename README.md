@@ -168,10 +168,25 @@ dropped goes into **`rejected_word`** — one row per **(book, lemma)**,
 deliberately *not* deduped across books the way `word` is, since the same
 lemma can be rejected for a different reason (or recurrence count) in a
 different book. Nothing is silently lost; you just query the DB instead of
-opening `<book>.rejected.csv`. The source book file is moved into `archive/`
-on success (`--no-archive` to leave it in place); `--database-url` overrides
-`DATABASE_URL`/`.env` same as `sync-db`. Idempotent — re-running the same
-book updates both tables in place rather than duplicating rows.
+opening `<book>.rejected.csv`. `--database-url` overrides `DATABASE_URL`/`.env`
+same as `sync-db`. Idempotent — re-running the same book updates both tables
+in place rather than duplicating rows. The review webapp's **Rejected** tab
+lets you browse these and "Add" one back (a live dictionary lookup, since
+rejects were never enriched) if the pipeline dropped something worth keeping.
+
+**Batch mode — process everything in `incoming/`:**
+
+```bash
+concordance ingest              # every .epub/.pdf/.txt in incoming/
+```
+
+Name files `[Title] -- [Author].epub` (e.g. `Ulysses -- Joyce, James.txt`) and
+the title/author populate `book.title`/`book.author` directly — no delimiter
+found just uses the whole filename as the title with a blank author, rather
+than erroring out. Each file is moved into `archive/` after processing
+(`--no-archive` to leave them in place); explicit single-file mode
+(`concordance ingest some/book.epub`) still archives next to the source file
+like `run` does, rather than to the top-level `archive/`.
 
 ## Running the local model (RTX 3060, 12 GB)
 
