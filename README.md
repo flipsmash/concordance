@@ -62,6 +62,14 @@ when the model is present. On the RTX 3060 the 14B is both sharper and more
 *consistent* than the 7B at deciding everyday-vs-obscure, which is what keeps
 common words off the list.
 
+Requires a live `DATABASE_URL` (env or `.env`) — the validity gate and
+enrichment both check the local `vocab.wiktionary` dump (~500k terms) first,
+before any of the offline/network fallbacks. It's the cheapest and, since
+that dump carries no "Proper noun" POS category at all, the cleanest
+authority available: unlike SymSpell/WordNet/wordfreq (all frequency-derived
+from general web text, so polluted by real names with any web footprint),
+membership alone means "this isn't a name."
+
 Outputs land next to the book: `book.vocab.csv` and `book.rejected.csv`.
 
 Flags: `--min-zipf` (frequency floor; higher = rarer only), `--limit`,
