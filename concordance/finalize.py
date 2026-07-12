@@ -32,7 +32,7 @@ from .output import VOCAB_COLUMNS
 def _read_rows(path: Path) -> list[dict]:
     """Every non-empty row is a term to add. Tolerant of a spreadsheet-mangled
     header: map by name when the real header survives, else by fixed position."""
-    with path.open(newline="", encoding="utf-8") as f:
+    with path.open(newline="", encoding="utf-8-sig") as f:
         raw = [r for r in csv.reader(f) if any(c.strip() for c in r)]
     if not raw:
         return []

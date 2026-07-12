@@ -23,9 +23,14 @@ REJECTED_COLUMNS = ["word", "reason", "detail", "count", "zipf"]
 def _atomic_write(path: Path, rows: list[list]) -> None:
     """Write a CSV via a sibling temp file + os.replace. On /mnt/c (drvfs) a file
     open in Excel blocks ``open(path, "w")`` with PermissionError, but an atomic
-    rename onto it succeeds — so never open the destination directly."""
+    rename onto it succeeds — so never open the destination directly.
+
+    utf-8-sig (a BOM) rather than plain utf-8: without it Excel opens an
+    accented CSV (maté, gâteaux) using the system codepage instead of UTF-8,
+    rendering correctly-encoded characters as mojibake even though the file
+    itself is fine."""
     tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", newline="", encoding="utf-8") as f:
+    with tmp.open("w", newline="", encoding="utf-8-sig") as f:
         csv.writer(f).writerows(rows)
     os.replace(tmp, path)
 

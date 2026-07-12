@@ -135,9 +135,16 @@ class ValidityGate:
         # 2. Misspelling — a dominant higher-frequency near-neighbor, and not a
         #    curated headword above. Author-invented words (alzabo, asimi)
         #    legitimately fall out here or at step 5; per scope, fictitious
-        #    coinages need not be captured.
+        #    coinages need not be captured. EXCEPTION: a real OCR/typo artifact
+        #    is almost always a one-off, so a "misspelling" that recurs as often
+        #    as a deliberate coinage would (necropoli, 12x in one book) goes to
+        #    review instead of a silent auto-drop.
         neighbor = self._dominant_neighbor(word)
         if neighbor:
+            if cand.count >= self.cfg.coinage_min_count:
+                cand.verdict = Verdict.UNSURE
+                cand.interesting_reason = f"recurs but resembles a misspelling of '{neighbor}'"
+                return
             cand.verdict = Verdict.DROP
             cand.reject_reason = RejectReason.MISSPELLING
             cand.interesting_reason = f"likely misspelling of '{neighbor}'"

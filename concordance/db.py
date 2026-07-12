@@ -200,7 +200,7 @@ def _read_master_rows(path: Path) -> list[dict]:
     """master_vocab.csv is tool-written with a full MASTER_COLUMNS header (it is not
     hand-edited in Excel like the per-book files), so a plain DictReader keeps every
     column — crucially date_added and source_book, which the vocab-only reader drops."""
-    with path.open(newline="", encoding="utf-8") as f:
+    with path.open(newline="", encoding="utf-8-sig") as f:
         return [r for r in csv.DictReader(f) if (r.get("word") or "").strip()]
 
 
@@ -356,9 +356,8 @@ def compute_difficulty(conn, schema: str = DEFAULT_SCHEMA) -> dict:
     """Compute the ex-ante difficulty scalar (+ factor breakdown) for every word."""
     import statistics
     from psycopg.types.json import Json
-    from wordfreq import zipf_frequency
     from . import difficulty as _diff
-    from .validity_score import _morph_root
+    from .validity_score import _morph_root, effective_zipf
     s = _safe_schema(schema)
     with conn.cursor() as cur:
         cur.execute(f"""
@@ -372,7 +371,7 @@ def compute_difficulty(conn, schema: str = DEFAULT_SCHEMA) -> dict:
         rows = cur.fetchall()
         scores = []
         for wid, lemma, peak, archaic, aconf, fields in rows:
-            zipf = zipf_frequency(lemma, "en")
+            zipf = effective_zipf(lemma)
             has_domain = any(f in _diff.DOMAIN_FIELDS for f in fields)
             morph = _morph_root(lemma) is not None
             sc, factors = _diff.score(zipf, peak, archaic or "current", aconf, has_domain, morph)

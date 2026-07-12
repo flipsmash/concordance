@@ -18,7 +18,7 @@ def _vocab_row(word, **over):
 
 
 def _read(path: Path) -> list[dict]:
-    with path.open(newline="", encoding="utf-8") as f:
+    with path.open(newline="", encoding="utf-8-sig") as f:
         return list(csv.DictReader(f))
 
 

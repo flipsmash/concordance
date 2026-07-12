@@ -64,7 +64,7 @@ def _candidate_to_row(row: dict, cand: Candidate) -> dict:
 def refill(path: Path, console: Console | None = None) -> tuple[int, int]:
     """Enrich blank-definition rows in ``path`` in place. Returns (filled, attempted)."""
     console = console or Console()
-    with path.open(newline="", encoding="utf-8") as f:
+    with path.open(newline="", encoding="utf-8-sig") as f:
         rows = list(csv.DictReader(f))
 
     todo = [r for r in rows if not (r.get("definition") or "").strip()]
@@ -94,7 +94,7 @@ def _write_rows(path: Path, rows: list[dict], console: Console) -> Path:
     Windows/drvfs lock — e.g. the CSV is open in Excel), fall back to an
     ``.enriched.csv`` sibling rather than losing a run's worth of lookups."""
     tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", newline="", encoding="utf-8") as f:
+    with tmp.open("w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=VOCAB_COLUMNS)
         w.writeheader()
         w.writerows(rows)

@@ -45,17 +45,37 @@ def _attested(word: str) -> bool:
     return zipf_frequency(word, "en") > 0 or word in _wordset()
 
 
+# How much rarer (in Zipf points) the lemma is allowed to look than the surface
+# form before we distrust the reduction. Real inflections don't trip this: a
+# base is normally at least as common as its inflected form (besmirch 2.00 vs
+# besmirching 1.68; house 5.71 vs houses 4.72) — comfortably inside the margin.
+_LEMMA_RARITY_MARGIN = 0.5
+
+
 def _resolve_lemma(tok) -> str:
     """spaCy's rule lemmatizer sometimes strips a real word down to a non-word
     (afeared -> afeare, overscutched -> overscutche, windring -> windre). Trust a
     *changed* lemma only when it is itself a real word; otherwise keep the author's
-    spelling (which for archaic vocabulary is usually the correct headword)."""
+    spelling (which for archaic vocabulary is usually the correct headword).
+
+    Separately, spaCy sometimes mis-tags an uninflected word as a plural noun
+    and "reduces" it to a rarer cousin that just happens to also be a real word
+    (oftentimes, NNS-tagged -> oftentime, zipf 0.0 vs oftentimes' 3.09;
+    necropolis -> necropoli under the same mistake). Don't trust a lemma that
+    makes the word look dramatically rarer than the surface form the author
+    actually used — a genuine inflection's base never has this problem."""
+    from wordfreq import zipf_frequency
+
     lemma = tok.lemma_.lower().strip()
     surface = tok.text.lower().strip()
     if not lemma:
         return surface
-    if lemma == surface or _attested(lemma):
+    if lemma == surface:
         return lemma
+    if _attested(lemma):
+        if zipf_frequency(lemma, "en") >= zipf_frequency(surface, "en") - _LEMMA_RARITY_MARGIN:
+            return lemma
+        return surface if _attested(surface) else lemma
     return surface if _attested(surface) else lemma
 
 

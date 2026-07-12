@@ -144,6 +144,22 @@ def _morph_root(word: str) -> str | None:
     return None
 
 
+def effective_zipf(word: str, zipf: float | None = None) -> float:
+    """The Zipf frequency to use for rarity/frequency-floor decisions.
+
+    wordfreq undercounts a transparent prefixed/suffixed form relative to its
+    root even though the derivation adds no real difficulty (unbuttoned vs
+    button, overplayed vs play, quickly vs quick) — so when `word` reduces to
+    a known common root via `_morph_root`, use whichever of the two Zipfs is
+    higher rather than the artificially low Zipf of the derived form itself."""
+    word = word.strip().lower()
+    z = zipf_frequency(word, "en") if zipf is None else zipf
+    root = _morph_root(word)
+    if root:
+        z = max(z, zipf_frequency(root, "en"))
+    return z
+
+
 # --- scoring --------------------------------------------------------------
 
 def _english_fraction(sentence: str) -> tuple[float, int]:

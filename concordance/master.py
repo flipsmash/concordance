@@ -48,7 +48,7 @@ def promote_to_master(
     order: list[str] = []
     existing: dict[str, dict] = {}
     if master_path.exists():
-        with master_path.open(newline="", encoding="utf-8") as f:
+        with master_path.open(newline="", encoding="utf-8-sig") as f:
             for r in csv.DictReader(f):
                 key = r["word"].strip().lower()
                 existing[key] = r
@@ -77,7 +77,7 @@ def promote_to_master(
 
 def _write_master(path: Path, rows: list[dict]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", newline="", encoding="utf-8") as f:
+    with tmp.open("w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=MASTER_COLUMNS, extrasaction="ignore")
         w.writeheader()
         for r in rows:

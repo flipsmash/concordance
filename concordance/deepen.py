@@ -135,7 +135,7 @@ def deepdef_stem(vocab_path: Path) -> str:
 
 def _write_vocab(path: Path, rows: list[dict]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", newline="", encoding="utf-8") as f:
+    with tmp.open("w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=VOCAB_COLUMNS, extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
@@ -144,7 +144,7 @@ def _write_vocab(path: Path, rows: list[dict]) -> None:
 
 def _write_report(path: Path, rows: list[dict]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", newline="", encoding="utf-8") as f:
+    with tmp.open("w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=UNDEFINED_COLUMNS, extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
