@@ -96,6 +96,27 @@ def test_recurring_propn_is_dropped():
     assert cands["aragorn"].reject_reason is RejectReason.PROPER_NOUN
 
 
+def test_tagger_mistag_on_common_word_is_not_dropped():
+    # Regression: a real Ulysses run had spaCy's tagger call "tram"/"beggar"/
+    # "alderman"/"sacrament" proper nouns purely on statistical mistagging —
+    # none of them were EVER capitalized in the actual text. The tagger alone
+    # shouldn't be trusted for a well-established dictionary word.
+    for word in ("tram", "beggar", "alderman", "sacrament"):
+        cands = {word: _cand(word, propn=0.9, ent=0.2, count=12, cap=0.0)}
+        strip_proper_nouns(cands, Config())
+        assert cands[word].verdict is None, f"{word} was wrongly dropped as a proper noun"
+
+
+def test_dictionary_word_still_dropped_when_capitalization_is_high():
+    # The Bloom case: a common dictionary word ("bloom") that's ALSO a
+    # character's name must still be caught — by the capitalization ratio,
+    # which the dictionary-word exemption above deliberately doesn't touch.
+    cands = {"bloom": _cand("bloom", propn=0.94, ent=0.24, count=12, cap=0.98)}
+    strip_proper_nouns(cands, Config())
+    assert cands["bloom"].verdict is Verdict.DROP
+    assert cands["bloom"].reject_reason is RejectReason.PROPER_NOUN
+
+
 def test_high_capitalization_ratio_is_dropped():
     cands = {"baker": _cand("baker", propn=0.0, count=5, cap=0.9)}
     strip_proper_nouns(cands, Config())
