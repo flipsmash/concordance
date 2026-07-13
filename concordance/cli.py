@@ -62,6 +62,7 @@ def run(
     min_zipf: float = typer.Option(3.5, "--min-zipf", help="Frequency floor; higher keeps rarer words only."),
     limit: int = typer.Option(0, "--limit", "-l", help="Cap the shortlist size (0 = no cap)."),
     no_lookup: bool = typer.Option(False, "--no-lookup", help="Skip online definition lookups."),
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema to check for already-pruned words."),
 ) -> None:
     """Run the extraction pipeline on a book."""
     cfg = Config(
@@ -74,7 +75,7 @@ def run(
     elif model:
         cfg.model_path = str(model)      # explicit override; else Config's 14B default
     try:
-        result = run_pipeline(book, cfg, console)
+        result = run_pipeline(book, cfg, console, schema=schema)
     except (ScannedPDFError, UnsupportedFormatError, FileNotFoundError) as exc:
         console.print(f"[red]✗[/red] {exc}")
         raise typer.Exit(code=1)
@@ -146,7 +147,7 @@ def ingest(
         title, author = _parse_incoming_name(b)
 
         try:
-            kept, rejected = process_pipeline(b, cfg, console)
+            kept, rejected = process_pipeline(b, cfg, console, schema=schema)
         except (ScannedPDFError, UnsupportedFormatError, FileNotFoundError, RuntimeError, psycopg.Error) as exc:
             console.print(f"[red]✗[/red] {exc}")
             if batch_mode:

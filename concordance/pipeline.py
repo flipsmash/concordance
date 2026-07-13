@@ -9,7 +9,7 @@ from rich.console import Console
 
 from . import clean, db, dictionary, extract, floor, judge, localdict, master, output, propernouns, tokenize, validity
 from .config import Config
-from .model import Candidate, Verdict
+from .model import Candidate, RejectReason, Verdict
 
 
 @dataclass
@@ -20,7 +20,20 @@ class Result:
     rejected_path: Path
 
 
-def process(book: str | Path, cfg: Config, console: Console | None = None) -> tuple[list[Candidate], list[Candidate]]:
+def apply_pruned_exclusions(candidates: dict[str, Candidate], pruned: set[str]) -> int:
+    """Mark every candidate matching a lemma a human has already manually
+    pruned (word.active=false in a previous book) as DROP/ALREADY_KNOWN,
+    before any other stage gets a chance to (re-)decide it. Returns the count
+    excluded. Pure — no DB access — so it's unit-testable on its own."""
+    matches = [c for c in candidates.values() if c.verdict is None and c.lemma in pruned]
+    for c in matches:
+        c.verdict = Verdict.DROP
+        c.reject_reason = RejectReason.ALREADY_KNOWN
+    return len(matches)
+
+
+def process(book: str | Path, cfg: Config, console: Console | None = None,
+            schema: str = db.DEFAULT_SCHEMA) -> tuple[list[Candidate], list[Candidate]]:
     """Extract -> filter -> judge -> enrich a book, returning (kept, rejected).
     Shared by `run` (writes CSVs for hand-editing) and `ingest` (writes straight
     to Postgres) — everything through enrichment is identical; only what
@@ -46,6 +59,15 @@ def process(book: str | Path, cfg: Config, console: Console | None = None) -> tu
     console.print(f"Found [bold]{len(candidates)}[/bold] distinct lemmas.")
 
     lexicon = localdict.build_lexicon(conn, set(candidates.keys()))
+
+    # Checked before anything else, even the frequency floor: a word a human
+    # has already manually pruned (word.active=false) as too common/easy
+    # shouldn't get re-decided — and re-judged, at real LLM cost — from
+    # scratch every time it turns up in a new book.
+    pruned = db.fetch_pruned_lemmas(conn, schema)
+    n_excluded = apply_pruned_exclusions(candidates, pruned)
+    if n_excluded:
+        console.print(f"[dim]{n_excluded} already manually pruned in a previous book — skipped.[/dim]")
 
     # --- deterministic filters -------------------------------------------
     floor.apply_floor(candidates, cfg)
@@ -79,10 +101,11 @@ def process(book: str | Path, cfg: Config, console: Console | None = None) -> tu
     return output.partition(candidates)
 
 
-def run(book: str | Path, cfg: Config, console: Console | None = None) -> Result:
+def run(book: str | Path, cfg: Config, console: Console | None = None,
+        schema: str = db.DEFAULT_SCHEMA) -> Result:
     console = console or Console()
     book = Path(book)
-    kept, rejected = process(book, cfg, console)
+    kept, rejected = process(book, cfg, console, schema=schema)
 
     # --- write + snapshot ------------------------------------------------
     # No interactive pass: the shortlist is written whole for the user to hand-edit

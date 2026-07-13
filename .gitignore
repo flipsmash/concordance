@@ -21,6 +21,7 @@ models/
 archive/
 incoming/
 gutenberg_literature/
+*.zip
 missed_shadow.txt
 
 # Local agent / editor config

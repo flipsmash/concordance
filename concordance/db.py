@@ -359,6 +359,19 @@ def sync_book_results(conn, book_title: str, kept: list, rejected: list,
     return stats
 
 
+def fetch_pruned_lemmas(conn, schema: str = DEFAULT_SCHEMA) -> set[str]:
+    """Lemmas a human has already manually pruned via the review webapp
+    (word.active = false) — checked as the very first thing in ingestion so
+    a word a human has already explicitly judged not worth keeping doesn't
+    get silently re-spent on the (expensive) LLM judge every time it shows
+    up in a new book, and doesn't have its existing row's definition/POS/
+    etc. overwritten by whatever the new book's context happened to produce."""
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT lemma_lc FROM {s}.word WHERE NOT active")
+        return {r[0] for r in cur.fetchall()}
+
+
 def normalize_word_pos(conn, schema: str = DEFAULT_SCHEMA) -> dict:
     """Clean up word.part_of_speech in place: folds abbreviations/case variants
     (adj, adv, pron, adp, sconj, num, Noun, Adjective, ...) accumulated from
