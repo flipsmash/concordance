@@ -20,20 +20,36 @@ class Result:
     rejected_path: Path
 
 
-def apply_pruned_exclusions(candidates: dict[str, Candidate], pruned: set[str]) -> int:
-    """Mark every candidate matching a lemma a human has already manually
-    pruned (word.active=false in a previous book) as DROP/ALREADY_KNOWN,
-    before any other stage gets a chance to (re-)decide it. Returns the count
-    excluded. Pure — no DB access — so it's unit-testable on its own."""
-    matches = [c for c in candidates.values() if c.verdict is None and c.lemma in pruned]
-    for c in matches:
-        c.verdict = Verdict.DROP
-        c.reject_reason = RejectReason.ALREADY_KNOWN
-    return len(matches)
+# A cached verdict (db.fetch_known_verdicts) -> the (verdict, reject_reason) it
+# resolves to. 'keep' becomes a survivor that skips the judge but still gets
+# enriched + linked to the new book; the two drop kinds keep their distinct
+# reasons so the rejected_word row records *why* (human prune vs judge reject).
+_VERDICT_MAP = {
+    "keep":   (Verdict.KEEP, None),
+    "pruned": (Verdict.DROP, RejectReason.ALREADY_KNOWN),
+    "reject": (Verdict.DROP, RejectReason.NOT_INTERESTING),
+}
+
+
+def apply_known_verdicts(candidates: dict[str, Candidate], known: dict[str, str]) -> dict[str, int]:
+    """Pre-mark every candidate whose verdict is already known from earlier
+    books (see db.fetch_known_verdicts) so the LLM judge is skipped for it.
+    Returns per-kind counts. Pure — no DB access — so it's unit-testable."""
+    counts = {"keep": 0, "pruned": 0, "reject": 0}
+    for c in candidates.values():
+        if c.verdict is not None:
+            continue
+        kind = known.get(c.lemma)
+        if kind is None:
+            continue
+        c.verdict, c.reject_reason = _VERDICT_MAP[kind]
+        counts[kind] += 1
+    return counts
 
 
 def process(book: str | Path, cfg: Config, console: Console | None = None,
-            schema: str = db.DEFAULT_SCHEMA) -> tuple[list[Candidate], list[Candidate]]:
+            schema: str = db.DEFAULT_SCHEMA, *, nlp=None, gate=None, judge_obj=None,
+            ) -> tuple[list[Candidate], list[Candidate]]:
     """Extract -> filter -> judge -> enrich a book, returning (kept, rejected).
     Shared by `run` (writes CSVs for hand-editing) and `ingest` (writes straight
     to Postgres) — everything through enrichment is identical; only what
@@ -43,7 +59,12 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
     ~500k terms) — checked first in the validity gate and tried first during
     enrichment, both because it's free (no network) and because unlike every
     other authority here it carries no "Proper noun" POS at all, so it doesn't
-    get to vouch for real names the way the frequency-based checks do."""
+    get to vouch for real names the way the frequency-based checks do.
+
+    `nlp`, `gate`, `judge_obj` may be pre-built and passed in (a batch run builds
+    each once and reuses it across every book, instead of reloading the ~9GB
+    judge model + spaCy + the validity corpora per book); each is lazily built
+    here when omitted, so a one-off single-book call needs nothing extra."""
     console = console or Console()
     book = Path(book)
     conn = db.connect()
@@ -55,31 +76,40 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
     console.print(f"Extracted [bold]{len(chapters)}[/bold] section(s) from {book.name}.")
 
     with console.status("[bold]Tokenizing & lemmatizing…"):
-        candidates = tokenize.tokenize(chapters)
+        candidates = tokenize.tokenize(chapters, nlp=nlp)
     console.print(f"Found [bold]{len(candidates)}[/bold] distinct lemmas.")
 
     lexicon = localdict.build_lexicon(conn, set(candidates.keys()))
 
-    # Checked before anything else, even the frequency floor: a word a human
-    # has already manually pruned (word.active=false) as too common/easy
-    # shouldn't get re-decided — and re-judged, at real LLM cost — from
-    # scratch every time it turns up in a new book.
-    pruned = db.fetch_pruned_lemmas(conn, schema)
-    n_excluded = apply_pruned_exclusions(candidates, pruned)
-    if n_excluded:
-        console.print(f"[dim]{n_excluded} already manually pruned in a previous book — skipped.[/dim]")
-
     # --- deterministic filters -------------------------------------------
     floor.apply_floor(candidates, cfg)
+
+    # Cross-book verdict cache: a word already kept/pruned/judge-rejected in an
+    # earlier book has a known verdict (the judge input is purely lemma-derived),
+    # so pre-mark it here and never spend the LLM on it again. Applied AFTER the
+    # floor so cached rows still carry a real zipf (every cached lemma is
+    # zipf<floor already — it reached the judge before — so the floor never
+    # touches them; it just fills in zipf). Cached-keeps become survivors that
+    # skip the judge but still get enriched + linked to this book below.
+    known = db.fetch_known_verdicts(conn, schema)
+    vc = apply_known_verdicts(candidates, known)
+    if any(vc.values()):
+        console.print(f"[dim]judge skipped for {sum(vc.values())} already-decided word(s) "
+                      f"({vc['keep']} kept, {vc['reject']} rejected, {vc['pruned']} pruned) "
+                      "from earlier books.[/dim]")
+
     propernouns.strip_proper_nouns(candidates, cfg)
     with console.status("[bold]Checking validity…"):
-        validity.apply_validity(candidates, cfg, local_dict=lexicon)
+        validity.apply_validity(candidates, cfg, local_dict=lexicon, gate=gate)
     survivors = [c for c in candidates.values() if c.verdict in (Verdict.KEEP, Verdict.UNSURE)]
     console.print(f"[bold]{len(survivors)}[/bold] candidates survived the floor + validity gate.")
 
     # --- LLM interestingness judge ---------------------------------------
+    # Only genuinely-new lemmas (no cached verdict) reach the model; cached-keeps
+    # keep their KEEP verdict and flow to enrichment/shortlist without a call.
+    newly = [c for c in candidates.values() if c.lemma not in known]
     with console.status("[bold]Judging interestingness…"):
-        judge.get_judge(cfg).judge(list(candidates.values()))
+        (judge_obj or judge.get_judge(cfg)).judge(newly)
     shortlist = [c for c in candidates.values() if c.verdict in (Verdict.KEEP, Verdict.UNSURE)]
     shortlist.sort(key=lambda c: (c.zipf, c.lemma))
     if cfg.limit:

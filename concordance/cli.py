@@ -140,6 +140,16 @@ def ingest(
         raise typer.Exit(code=1)
     db.apply_schema(conn, schema)
 
+    # Build the heavy, book-independent resources ONCE and reuse them across
+    # every book — the ~9GB judge model (~49s to load), the spaCy model, and
+    # the validity gate's SymSpell/WordNet/234k-word corpora. Reloading these
+    # per book was pure per-book overhead (crippling on a large corpus).
+    from . import judge as _judge, tokenize as _tokenize, validity as _validity
+    with console.status("[bold]Loading model + resources…"):
+        nlp = _tokenize.load_nlp()
+        gate = _validity.ValidityGate(cfg)
+        judge_obj = _judge.get_judge(cfg)
+
     for i, b in enumerate(books, 1):
         if batch_mode:
             console.print()
@@ -147,7 +157,8 @@ def ingest(
         title, author = _parse_incoming_name(b)
 
         try:
-            kept, rejected = process_pipeline(b, cfg, console, schema=schema)
+            kept, rejected = process_pipeline(b, cfg, console, schema=schema,
+                                              nlp=nlp, gate=gate, judge_obj=judge_obj)
         except (ScannedPDFError, UnsupportedFormatError, FileNotFoundError, RuntimeError, psycopg.Error) as exc:
             console.print(f"[red]✗[/red] {exc}")
             if batch_mode:

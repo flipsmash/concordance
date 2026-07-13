@@ -359,17 +359,35 @@ def sync_book_results(conn, book_title: str, kept: list, rejected: list,
     return stats
 
 
-def fetch_pruned_lemmas(conn, schema: str = DEFAULT_SCHEMA) -> set[str]:
-    """Lemmas a human has already manually pruned via the review webapp
-    (word.active = false) — checked as the very first thing in ingestion so
-    a word a human has already explicitly judged not worth keeping doesn't
-    get silently re-spent on the (expensive) LLM judge every time it shows
-    up in a new book, and doesn't have its existing row's definition/POS/
-    etc. overwritten by whatever the new book's context happened to produce."""
+def fetch_known_verdicts(conn, schema: str = DEFAULT_SCHEMA) -> dict[str, str]:
+    """Map lemma_lc -> a cached verdict from EARLIER books, so the (expensive)
+    LLM judge is only ever run on lemmas whose verdict isn't already known.
+
+    The judge's input for a word is purely (lemma, its wordfreq band) — no
+    book/sentence/POS context — and it runs at temp 0, so a given lemma's
+    verdict is the same in every book. Re-judging "refectory" from scratch in
+    every book of a shared-vocabulary corpus is pure waste; this is the cache
+    that eliminates it.
+
+      'keep'   -> in `word`, active     (judge kept it; human hasn't pruned)
+      'pruned' -> in `word`, inactive   (human manually pruned via the webapp)
+      'reject' -> in `rejected_word` with reason 'not_interesting'
+                                        (judge itself rejected it before)
+
+    `word` wins over `rejected_word` for a lemma present in both: a promoted
+    row is authoritative and its `active` flag reflects the human's latest
+    call. Re-fetched per book (cheap, indexed) so book N sees the new keeps
+    that books 1..N-1 added earlier in the same batch."""
     s = _safe_schema(schema)
+    verdicts: dict[str, str] = {}
     with conn.cursor() as cur:
-        cur.execute(f"SELECT lemma_lc FROM {s}.word WHERE NOT active")
-        return {r[0] for r in cur.fetchall()}
+        cur.execute(f"SELECT DISTINCT lemma_lc FROM {s}.rejected_word WHERE reason = 'not_interesting'")
+        for (lemma,) in cur.fetchall():
+            verdicts[lemma] = "reject"
+        cur.execute(f"SELECT lemma_lc, active FROM {s}.word")
+        for lemma, active in cur.fetchall():
+            verdicts[lemma] = "keep" if active else "pruned"   # word overrides rejected_word
+    return verdicts
 
 
 def normalize_word_pos(conn, schema: str = DEFAULT_SCHEMA) -> dict:

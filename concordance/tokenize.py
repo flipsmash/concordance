@@ -95,7 +95,10 @@ class _Acc:
         return sum(self.pos_counts.values())
 
 
-def _load_nlp():
+def load_nlp():
+    """Load the spaCy model once. Public so a batch run can build it a single
+    time and hand the same object to every book's tokenize() call, rather than
+    reloading the ~50MB model per book."""
     import spacy
 
     try:
@@ -123,8 +126,8 @@ def _chunks(text: str) -> list[str]:
     return out
 
 
-def tokenize(chapters: list[Chapter]) -> dict[str, Candidate]:
-    nlp = _load_nlp()
+def tokenize(chapters: list[Chapter], nlp=None) -> dict[str, Candidate]:
+    nlp = nlp or load_nlp()
     acc: dict[str, _Acc] = defaultdict(_Acc)
 
     for chapter in chapters:

@@ -211,7 +211,15 @@ class ValidityGate:
         cand.reject_reason = RejectReason.NOT_A_WORD
 
 
-def apply_validity(candidates: dict[str, Candidate], cfg: Config, local_dict: dict | None = None) -> None:
-    gate = ValidityGate(cfg, local_dict=local_dict)
+def apply_validity(candidates: dict[str, Candidate], cfg: Config, local_dict: dict | None = None,
+                   gate: "ValidityGate | None" = None) -> None:
+    """Run the validity gate over every candidate. A batch run can build one
+    gate (which loads SymSpell + WordNet + the 234k-word corpus once) and pass
+    it in for every book; only the per-book `local_dict` (that book's slice of
+    vocab.wiktionary) changes, so it's swapped in per call."""
+    if gate is None:
+        gate = ValidityGate(cfg, local_dict=local_dict)
+    else:
+        gate.local_dict = local_dict or {}
     for cand in candidates.values():
         gate.judge(cand)
