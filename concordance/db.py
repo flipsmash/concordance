@@ -212,6 +212,13 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS rescued_from_reject boolean NOT NULL DEFAULT false")
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS rescued_at timestamptz")
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS rescued_reason text")
+        # persistent audit marker: this word was ever accepted with no dictionary
+        # able to define it (a weaker validity signal than a normal keep — worth
+        # a human glance). Sticky by design: never cleared even if `refill`
+        # later finds a definition, so the history survives.
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS flagged_undefined boolean NOT NULL DEFAULT false")
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS flagged_undefined_at timestamptz")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS word_flagged_undefined_idx ON {s}.word (flagged_undefined)")
     trgm = True
     try:
         with conn.cursor() as cur:
@@ -252,25 +259,43 @@ def sync_master(csv_path: Path, conn: psycopg.Connection,
             word = (r.get("word") or "").strip()
             if not word:
                 continue
+            definition = r.get("definition") or ""
+            is_blank = not definition.strip()
             cur.execute(
                 f"""INSERT INTO {s}.word
                     (lemma, as_seen, definition, part_of_speech, ipa, sentence,
-                     chapter, synonyms, etymology, definition_source, first_added)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, NULLIF(%s,'')::date)
+                     chapter, synonyms, etymology, definition_source, first_added,
+                     flagged_undefined, flagged_undefined_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, NULLIF(%s,'')::date,
+                            %s, CASE WHEN %s THEN now() ELSE NULL END)
                     ON CONFLICT (lemma_lc) DO UPDATE SET
-                        as_seen=EXCLUDED.as_seen, definition=EXCLUDED.definition,
-                        part_of_speech=EXCLUDED.part_of_speech, ipa=EXCLUDED.ipa,
+                        as_seen=EXCLUDED.as_seen,
+                        definition=COALESCE(NULLIF(EXCLUDED.definition,''), {s}.word.definition),
+                        part_of_speech=EXCLUDED.part_of_speech,
+                        ipa=COALESCE(NULLIF(EXCLUDED.ipa,''), {s}.word.ipa),
                         sentence=EXCLUDED.sentence, chapter=EXCLUDED.chapter,
-                        synonyms=EXCLUDED.synonyms, etymology=EXCLUDED.etymology,
-                        definition_source=EXCLUDED.definition_source,
+                        synonyms=CASE WHEN cardinality(EXCLUDED.synonyms) > 0
+                                      THEN EXCLUDED.synonyms ELSE {s}.word.synonyms END,
+                        etymology=COALESCE(NULLIF(EXCLUDED.etymology,''), {s}.word.etymology),
+                        definition_source=COALESCE(NULLIF(EXCLUDED.definition_source,''),
+                                                    {s}.word.definition_source),
                         first_added=LEAST(
                             {s}.word.first_added,
                             COALESCE(EXCLUDED.first_added, {s}.word.first_added)),
+                        flagged_undefined={s}.word.flagged_undefined OR
+                            (COALESCE(NULLIF(EXCLUDED.definition,''), {s}.word.definition, '') = ''),
+                        flagged_undefined_at=CASE
+                            WHEN {s}.word.flagged_undefined THEN {s}.word.flagged_undefined_at
+                            WHEN COALESCE(NULLIF(EXCLUDED.definition,''), {s}.word.definition, '') = ''
+                                THEN now()
+                            ELSE {s}.word.flagged_undefined_at
+                        END,
                         updated_at=now()
                     RETURNING id""",
-                (word, r.get("as_seen"), r.get("definition"), normalize_pos(r.get("part_of_speech")),
+                (word, r.get("as_seen"), definition, normalize_pos(r.get("part_of_speech")),
                  r.get("ipa"), r.get("sentence"), r.get("chapter"), _synonyms(r.get("synonyms", "")),
-                 r.get("etymology"), r.get("source"), (r.get("date_added") or "")),
+                 r.get("etymology"), r.get("source"), (r.get("date_added") or ""),
+                 is_blank, is_blank),
             )
             word_id = cur.fetchone()[0]
             stats["words"] += 1
@@ -314,24 +339,42 @@ def sync_book_results(conn, book_title: str, kept: list, rejected: list,
 
         for c in kept:
             rep = c.representative
+            definition = c.definition or ""
+            is_blank = not definition.strip()
             cur.execute(
                 f"""INSERT INTO {s}.word
                     (lemma, as_seen, definition, part_of_speech, ipa, sentence,
-                     chapter, synonyms, etymology, definition_source, first_added)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, CURRENT_DATE)
+                     chapter, synonyms, etymology, definition_source, first_added,
+                     flagged_undefined, flagged_undefined_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, CURRENT_DATE,
+                            %s, CASE WHEN %s THEN now() ELSE NULL END)
                     ON CONFLICT (lemma_lc) DO UPDATE SET
-                        as_seen=EXCLUDED.as_seen, definition=EXCLUDED.definition,
-                        part_of_speech=EXCLUDED.part_of_speech, ipa=EXCLUDED.ipa,
+                        as_seen=EXCLUDED.as_seen,
+                        definition=COALESCE(NULLIF(EXCLUDED.definition,''), {s}.word.definition),
+                        part_of_speech=EXCLUDED.part_of_speech,
+                        ipa=COALESCE(NULLIF(EXCLUDED.ipa,''), {s}.word.ipa),
                         sentence=EXCLUDED.sentence, chapter=EXCLUDED.chapter,
-                        synonyms=EXCLUDED.synonyms, etymology=EXCLUDED.etymology,
-                        definition_source=EXCLUDED.definition_source,
+                        synonyms=CASE WHEN cardinality(EXCLUDED.synonyms) > 0
+                                      THEN EXCLUDED.synonyms ELSE {s}.word.synonyms END,
+                        etymology=COALESCE(NULLIF(EXCLUDED.etymology,''), {s}.word.etymology),
+                        definition_source=COALESCE(NULLIF(EXCLUDED.definition_source,''),
+                                                    {s}.word.definition_source),
+                        flagged_undefined={s}.word.flagged_undefined OR
+                            (COALESCE(NULLIF(EXCLUDED.definition,''), {s}.word.definition, '') = ''),
+                        flagged_undefined_at=CASE
+                            WHEN {s}.word.flagged_undefined THEN {s}.word.flagged_undefined_at
+                            WHEN COALESCE(NULLIF(EXCLUDED.definition,''), {s}.word.definition, '') = ''
+                                THEN now()
+                            ELSE {s}.word.flagged_undefined_at
+                        END,
                         updated_at=now()
                     RETURNING id""",
-                (c.lemma, rep.surface if rep else "", c.definition,
+                (c.lemma, rep.surface if rep else "", definition,
                  normalize_pos(c.part_of_speech or c.pos), c.ipa,
                  rep.sentence if rep else "", rep.chapter if rep else "",
                  list(c.synonyms), c.etymology,
-                 c.definition_source or ", ".join(c.validity_sources)))
+                 c.definition_source or ", ".join(c.validity_sources),
+                 is_blank, is_blank))
             word_id = cur.fetchone()[0]
             stats["kept"] += 1
             cur.execute(
@@ -355,6 +398,66 @@ def sync_book_results(conn, book_title: str, kept: list, rejected: list,
                  rep.sentence if rep else None, rep.chapter if rep else None))
             stats["rejected"] += 1
 
+    conn.commit()
+    return stats
+
+
+_POS_TO_TAGGER = {"noun": "NOUN", "verb": "VERB", "adjective": "ADJ", "adverb": "ADV"}
+
+
+def refill_definitions(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0,
+                       delay: float = 0.15) -> dict:
+    """DB-native equivalent of `refill.py`'s CSV backfill: retry the same cheap
+    sources (local Wiktionary, then Free Dictionary API / online Wiktionary)
+    for every word whose definition is still blank. Does NOT clear
+    `flagged_undefined` even on success — that flag is a permanent "this one
+    needed a second look" marker, not a live status (see apply_schema)."""
+    import time
+    from . import dictionary, localdict
+    from .model import Candidate, Occurrence
+
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT id, lemma, part_of_speech, sentence, chapter, as_seen
+                FROM {s}.word WHERE coalesce(definition,'') = ''
+                ORDER BY flagged_undefined_at NULLS LAST, lemma""" +
+            (f" LIMIT {int(limit)}" if limit else ""))
+        rows = cur.fetchall()
+
+    stats = {"attempted": len(rows), "filled": 0, "still_missing": 0}
+    if not rows:
+        return stats
+
+    lexicon = localdict.build_lexicon(conn, {lemma.lower() for _, lemma, *_ in rows})
+    session = dictionary.make_session()
+
+    with conn.cursor() as cur:
+        for i, (wid, lemma, pos, sentence, chapter, as_seen) in enumerate(rows, 1):
+            cand = Candidate(lemma=lemma, pos=_POS_TO_TAGGER.get((pos or "").lower(), ""))
+            if sentence:
+                cand.occurrences.append(Occurrence(sentence=sentence, chapter=chapter or "",
+                                                    surface=as_seen or lemma))
+            if not localdict.enrich(cand, lexicon):
+                dictionary.enrich(cand, session)
+            if cand.definition:
+                cur.execute(
+                    f"""UPDATE {s}.word SET
+                            definition=%s,
+                            definition_source=COALESCE(NULLIF(%s,''), definition_source),
+                            ipa=COALESCE(NULLIF(%s,''), ipa),
+                            etymology=COALESCE(NULLIF(%s,''), etymology),
+                            synonyms=CASE WHEN %s THEN %s ELSE synonyms END,
+                            updated_at=now()
+                        WHERE id=%s""",
+                    (cand.definition, cand.definition_source, cand.ipa, cand.etymology,
+                     bool(cand.synonyms), list(cand.synonyms), wid))
+                stats["filled"] += 1
+            else:
+                stats["still_missing"] += 1
+            if i % 200 == 0:
+                conn.commit()
+            time.sleep(delay)
     conn.commit()
     return stats
 

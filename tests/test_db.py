@@ -60,6 +60,60 @@ pg = pytest.mark.skipif(not (_URL and _connectable(_URL)),
 
 
 @pg
+def test_ingest_never_clobbers_a_definition_and_flags_undefined(tmp_path):
+    from concordance.model import Candidate
+
+    schema = "cc_test2"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    # Book 1: "cangue" is successfully defined.
+    defined = Candidate(lemma="cangue", pos="NOUN")
+    defined.definition = "a wooden collar"
+    defined.definition_source = "Local Wiktionary (DB)"
+    db.sync_book_results(conn, "Book One", kept=[defined], rejected=[], schema=schema)
+
+    with conn.cursor() as cur:
+        cur.execute(f"select definition, flagged_undefined from {schema}.word where lemma='cangue'")
+        row = cur.fetchone()
+        assert row == ("a wooden collar", False)
+
+    # Book 2: same word recurs but this time enrichment fails (blank definition)
+    # — the existing definition must survive, not be clobbered to blank.
+    undefined_repeat = Candidate(lemma="cangue", pos="NOUN")
+    db.sync_book_results(conn, "Book Two", kept=[undefined_repeat], rejected=[], schema=schema)
+
+    with conn.cursor() as cur:
+        cur.execute(f"select definition, flagged_undefined from {schema}.word where lemma='cangue'")
+        row = cur.fetchone()
+        assert row == ("a wooden collar", False)   # not clobbered, not flagged (still defined)
+
+    # A brand-new word that comes in with no definition at all must be flagged,
+    # and stay flagged even if refill later fills it in (sticky by design).
+    never_defined = Candidate(lemma="fuligin", pos="NOUN")
+    db.sync_book_results(conn, "Book One", kept=[never_defined], rejected=[], schema=schema)
+
+    with conn.cursor() as cur:
+        cur.execute(f"select definition, flagged_undefined, flagged_undefined_at "
+                    f"from {schema}.word where lemma='fuligin'")
+        d, flagged, flagged_at = cur.fetchone()
+        assert d == "" and flagged is True and flagged_at is not None
+
+    with conn.cursor() as cur:
+        cur.execute(f"update {schema}.word set definition='a fictional black pigment' "
+                    f"where lemma='fuligin'")
+        cur.execute(f"select definition, flagged_undefined from {schema}.word where lemma='fuligin'")
+        assert cur.fetchone() == ("a fictional black pigment", True)   # flag persists
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
 def test_sync_roundtrip_and_idempotent(tmp_path):
     schema = "cc_test"
     conn = db.connect(_URL)

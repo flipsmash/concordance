@@ -412,6 +412,28 @@ def quizzable(
 
 
 @app.command()
+def refill(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap words processed (0 = all)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Backfill blank definitions for already-accepted words (local Wiktionary,
+    then Free Dictionary API / online Wiktionary — same cheap sources `ingest`
+    tries). Words that stay undefined keep their permanent `flagged_undefined`
+    marker regardless; this only ever fills the definition, it never clears it."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    with console.status("[bold]Backfilling definitions…"):
+        stats = db.refill_definitions(conn, schema, limit=limit)
+    conn.close()
+    console.print(f"[green]✓[/green] refill: [bold]{stats['filled']}[/bold]/{stats['attempted']} "
+                  f"filled ({stats['still_missing']} still undefined)")
+
+
+@app.command()
 def commons_search(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
     dump_path: str = typer.Option(None, "--dump-path", help="Path to the kaikki Wiktextract dump "
