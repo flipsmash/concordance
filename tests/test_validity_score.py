@@ -50,6 +50,53 @@ def test_morph_root_peels_affixes():
     assert V._morph_root("recoloring") in ("color", "colore", "recolor", "coloring", "recoloring") or \
            V._morph_root("recoloring") is not None
 
+
+# --- the "un-" floor bug: a transparent prefixed/suffixed form of a common
+# word (unbuttoned, bemused) must not float across the frequency floor purely
+# because wordfreq undercounts the derived form relative to its root --------
+
+def test_morph_root_finds_a_single_peel_root():
+    # unbuttoned resolves to 'buttoned' (single suffix peel), not all the way
+    # to 'button' -- see test_morph_root_does_not_chain_a_second_peel for why
+    # a second peel is deliberately not attempted.
+    assert V._morph_root("unbuttoned") == "buttoned"
+    assert V.effective_zipf("unbuttoned") >= 2.5
+
+
+def test_morph_root_restores_silent_e():
+    # Naively slicing '-ing'/'-ed' off a word whose root drops a silent 'e'
+    # produces a truncated non-word (hoping -> 'hop', mused -> 'mus') that
+    # can coincidentally BE a real, unrelated word -- the root must restore
+    # the 'e' and land on the true root instead.
+    assert V._morph_root("hoping") == "hope"
+    assert V._morph_root("mused") == "muse"
+
+
+def test_morph_root_does_not_chain_a_second_peel():
+    # A second, chained peel is what let a coincidental letter-match
+    # manufacture an unrelated real word:
+    #   reseed -[peel 'ed']-> resee -[peel 're']-> 'see'            (wrong)
+    #   uncomely -[peel 'un']-> comely -[peel 'ly']-> 'come'        (wrong)
+    #   impaled -[peel 'd']-> impale -[peel 'im']-> 'pale'          (wrong)
+    #   bemused -[peel 'be']-> mused -[peel 'ed']-> 'mus'           (wrong)
+    # Each of these was reachable when a second peel was attempted onto an
+    # already-peeled intermediate; single-peel-only makes all four
+    # unreachable, and 'pale'/'mus' in particular used to inflate a genuine
+    # rarity's effective_zipf enough to cross the frequency floor and drop
+    # it before the validity gate or judge ever saw it.
+    assert V._morph_root("reseed") != "see"
+    assert V._morph_root("uncomely") != "come"
+    assert V._morph_root("impaled") != "pale"
+    assert V.effective_zipf("impaled") < 3.5          # must not cross the floor
+    assert V._morph_root("bemused") != "mus"
+    assert V.effective_zipf("bemused") < 3.5           # must not cross the floor
+
+
+def test_morph_root_leaves_genuine_rarities_alone():
+    for w in ("cangue", "bartizan", "fuligin", "abacination"):
+        assert V._morph_root(w) is None
+
+
 def test_dominant_neighbor_ignores_proper_names():
     # 'tarrie' has name neighbours (carrie/barrie) — those must not count unless
     # they are real WordNet words; a genuine common neighbour may still register.

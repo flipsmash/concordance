@@ -126,22 +126,49 @@ def _dominant_neighbor(word: str) -> tuple[str, float] | None:
 
 
 def _morph_root(word: str) -> str | None:
-    """A known root reachable by peeling one prefix and/or one suffix."""
+    """The most common known root reachable by peeling a SINGLE prefix or a
+    SINGLE suffix off `word` — e.g. unbuttoned -> buttoned, bemused -> mused.
+
+    Deliberately single-affix only. An earlier version also chained a second
+    peel onto the first (unbutton -> button), which is needed for a handful of
+    genuine double-derivatives but, empirically, generates far more damage
+    than value: any second peel can land on a real word that is unrelated to
+    `word` by pure coincidence (impaled -[peel 'd']-> impale -[peel 'im']->
+    'pale', bemused -[peel 'be']-> mused -[peel 'ed']-> 'mus'), and because
+    effective_zipf() takes the MAX of word's own zipf and the root's, a
+    coincidental hit that outranks the true root silently INFLATES a genuine
+    rarity's effective frequency — which can push it over the floor and drop
+    it before it ever reaches the validity gate or judge, with no backstop.
+    A single peel that finds nothing, by contrast, just leaves `word` at its
+    own (low) zipf — it proceeds to the floor/validity/judge as before, which
+    is the safe direction per this project's keep-bias rule: false drops are
+    forbidden, false survivals are cheap (the judge alone rejects roughly
+    half of what reaches it in practice).
+
+    Silent-e restoration: naively slicing a suffix off a word whose root ends
+    in a dropped 'e' produces a truncated non-word (hoping -[peel 'ing']->
+    'hop', not 'hope'; mused -[peel 'ed']-> 'mus', not 'muse'), and 'hop'/
+    'mus' both happen to be real, unrelated words that would otherwise win.
+    So every suffix peel also tries appending 'e' back and keeps whichever
+    the `known()` gate accepts."""
     def known(w):
         return len(w) >= 3 and (zipf_frequency(w, "en") >= 2.0 or w in _wordset() or _in_wordnet(w))
 
-    cands = {word}
+    cands = set()
     for suf in _SUFFIXES:
         if word.endswith(suf) and len(word) - len(suf) >= 3:
-            cands.add(word[: -len(suf)])
-    for base in list(cands):
-        for pre in _PREFIXES:
-            if base.startswith(pre) and len(base) - len(pre) >= 3:
-                cands.add(base[len(pre):])
-    for c in cands:
-        if c != word and known(c):
-            return c
-    return None
+            stem = word[: -len(suf)]
+            cands.add(stem)
+            cands.add(stem + "e")
+    for pre in _PREFIXES:
+        if word.startswith(pre) and len(word) - len(pre) >= 3:
+            cands.add(word[len(pre):])
+    best = max(
+        (c for c in cands if c != word and known(c)),
+        key=lambda c: (zipf_frequency(c, "en"), -len(c), c),
+        default=None,
+    )
+    return best
 
 
 def effective_zipf(word: str, zipf: float | None = None) -> float:
