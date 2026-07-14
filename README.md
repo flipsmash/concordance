@@ -2,7 +2,8 @@
 
 Extract interesting vocabulary from books you read (EPUB, text PDF, `.txt`) using
 a **local** LLM — no paid API. Rare words are surfaced, common ones and junk are
-filtered, and you get a CSV of the words worth keeping.
+filtered, and the result lands straight in Postgres, ready to review in the
+[web app](#web-app-webapp).
 
 The design is deliberately **keep-biased**: a genuine rarity should survive to
 your review even at the cost of a little noise, never the reverse. See the
@@ -13,26 +14,16 @@ requirements & architecture spec for the full rationale.
 ```
 extract → clean → tokenize → frequency-floor → cross-book verdict cache
         → strip-proper-nouns → validity-gate → LLM-judge → dictionary-lookup
-        → CSV → (define) → (finalize)
+        → Postgres (ingest) → (refill) → (deepen)
 ```
 
 - **frequency floor** — a stop-word-style cut of common words (never a rarity *ceiling*)
-- **cross-book verdict cache** — a lemma already kept/pruned/judge-rejected in an earlier book (in this run or a prior `ingest`) is pre-marked from `word`/`rejected_word` and never re-judged: the LLM judge's input is purely `(lemma, frequency band)`, so at temp 0 its verdict on a given lemma is always the same. This is what keeps per-book judge time from scaling with corpus size — cost tracks *distinct new rare words*, which saturates fast on a shared-vocabulary corpus.
+- **cross-book verdict cache** — a lemma already kept/pruned/judge-rejected in an earlier book is pre-marked from `word`/`rejected_word` and never re-judged: the LLM judge's input is purely `(lemma, frequency band)`, so at temp 0 its verdict on a given lemma is always the same. This is what keeps per-book judge time from scaling with corpus size — cost tracks *distinct new rare words*, which saturates fast on a shared-vocabulary corpus.
 - **validity gate** — multi-source, keep-biased. A word is a real word if *any* authority vouches for it — the local `vocab.wiktionary` DB dump (~500k terms, checked first because it's free and carries no "Proper noun" POS to get confused by), then the SymSpell 82k wordlist, **WordNet**, or **NLTK's 234k dictionary corpus** (which carries the archaic vocabulary — *destrier, bartizan, cangue* — that trips up single-dictionary checks). A foreign-language-context check runs early too. Only then is misspelling considered, by *relative* near-neighbor frequency (with a recurrence escape hatch — a "misspelling" that keeps showing up is probably a real coinage). NLTK's `wordnet` and `words` data download automatically on first run.
 - **LLM judge** — a local model decides what's worth learning (stubbed until you point it at a model). To keep a weak local model honest it emits a *minimal* per-word verdict (`{"w","k"}`, no free-text reason) so it doesn't truncate its output and silently drop words; any word it omits is re-queried for up to three passes before the keep-biased fallback, so junk can't flood the list by omission. A corpus frequency hint (common / uncommon / rare) steadies its rarity sense but is never a hard cut. Frequency alone can't do this job — *tendril* is rarer than *refectory* yet everyone knows it — which is exactly why the judgment is the model's, not the floor's.
-- **dictionary lookup** — the local Wiktionary dump first, then free keyless network sources: Free Dictionary API, then Wiktionary online (which actually carries the rare/archaic words). Fills definition, part of speech, IPA, synonyms, and etymology. Bulk lookups retry with exponential backoff and honour `Retry-After`, so a run of a thousand words doesn't get silently emptied by rate limiting.
-- **review** — you mark each word known / unknown; only unknowns are saved (or, for `ingest`, prune afterward in the [web app](#web-app-webapp))
-- nothing is ever silently dropped — every cut is logged to `*.rejected.csv` (or `rejected_word`, for `ingest`)
-
-### Backfilling definitions
-
-If a run's definitions came back sparse (an old build, or the lookup host was
-throttling), refill them without redoing the expensive judge pass — it only
-touches rows whose `definition` is still blank and is safe to rerun:
-
-```bash
-python -m concordance.refill "book.vocab.csv"
-```
+- **dictionary lookup** — the local Wiktionary dump first, then free keyless network sources: Free Dictionary API, then Wiktionary online (which actually carries the rare/archaic words). Fills definition, part of speech, IPA, synonyms, and etymology. Bulk lookups retry with exponential backoff and honour `Retry-After`, so a run of a thousand words doesn't get silently emptied by rate limiting. Whatever's still blank after ingest gets a second, slower pass from `refill`/`deepen` (below).
+- **review** — prune too-common/easy terms afterward in the [web app](#web-app-webapp) (a soft delete — `word.active = false` — nothing is destroyed)
+- nothing is ever silently dropped — every cut is logged to `rejected_word`, one row per (book, lemma)
 
 ## Install
 
@@ -42,154 +33,48 @@ pip install -e .
 python -m spacy download en_core_web_sm
 ```
 
-## Use
-
-```bash
-# default: judges with the 14B at models/Qwen2.5-14B-Instruct-Q4_K_M.gguf
-concordance run "some book.epub"
-
-# cap the shortlist size
-concordance run "some book.epub" --limit 200
-
-# point at a different model (e.g. the faster 7B for a big book)
-concordance run "some book.epub" --model models/Qwen2.5-7B-Instruct-Q4_K_M.gguf
-
-# no model at all — stub judge keeps everything past the validity gate
-concordance run samples/passage.txt --stub
-```
-
-The judge defaults to the 14B (see setup below); if that file is missing it
-falls back to the stub judge automatically, and `--stub` forces the stub even
-when the model is present. On the RTX 3060 the 14B is both sharper and more
-*consistent* than the 7B at deciding everyday-vs-obscure, which is what keeps
-common words off the list.
-
-Requires a live `DATABASE_URL` (env or `.env`) — the validity gate and
-enrichment both check the local `vocab.wiktionary` dump (~500k terms) first,
-before any of the offline/network fallbacks. It's the cheapest and, since
-that dump carries no "Proper noun" POS category at all, the cleanest
-authority available: unlike SymSpell/WordNet/wordfreq (all frequency-derived
-from general web text, so polluted by real names with any web footprint),
-membership alone means "this isn't a name."
-
-Outputs land next to the book: `book.vocab.csv` and `book.rejected.csv`.
-
-Flags: `--min-zipf` (frequency floor; higher = rarer only), `--limit`,
-`--no-lookup`, `--model`, `--stub`, `--schema` (which schema's `word`/
-`rejected_word` to check against the verdict cache — see below).
-
-### Resolving undefined words (`define`)
-
-The archaic / nonce tail (e.g. Shakespeare's *ungenitured*, *scrimer*) is often
-absent from the free dictionaries. `define` reaches further, touching only rows
-still missing a definition:
-
-```bash
-concordance define "some book.vocab.csv"
-```
-
-1. It looks each undefined word up in **Wordnik** (Century Dictionary + Webster's,
-   which carry archaic vocabulary) and **yourdictionary.com**, and writes any
-   definition it finds back into the CSV.
-2. Whatever still can't be defined gets a **validity estimate** written to a
-   sibling `<book>.undefined.csv`: a 0–1 score, a label (`likely-valid` /
-   `uncertain` / `likely-artifact`), explanatory notes, and a suggested
-   correction — so you can tell a real rare word (*cobloaf*, *overscutched*) from
-   an OCR/old-spelling artifact (*bareheade* → bareheaded) or nonsense. Signals
-   are deterministic and explainable: Google Books Ngram, wordfreq, WordNet/NLTK
-   wordlists, morphology, and a SymSpell near-neighbour check.
-
-Wordnik needs a free API key. Put it in a git-ignored `.env` at the project root:
-
-```
-WORDNIK_API_KEY=your_key_here
-```
-
-(or export `WORDNIK_API_KEY`). Without it, `define` uses yourdictionary only.
-
-### Review by editing → master list → archive
-
-Review is just editing the CSV. `run` writes the whole candidate list to
-`<book>.vocab.csv` (and immediately drops a pristine copy at
-`archive/<book>.vocab.original.csv`, so the untouched list is preserved before
-you touch it). Open the working copy and **delete the rows** for words you
-already know or that are false positives — whatever survives is approved. Then:
-
-```bash
-concordance finalize "some book.vocab.csv"   # add -y to skip the confirm
-```
-
-It shows the surviving count for a one-line `y/N` confirm, then:
-
-- appends every surviving term to **`master_vocab.csv`** at the project root,
-  carrying its definition/POS/IPA/etymology plus **`date_added`** and
-  **`source_book`**. The master keeps **one row per word** — if a word you already
-  banked turns up in a later book, that book is added to its `source_book` cell
-  rather than duplicating the row.
-- moves the per-book files (your cleaned `.vocab.csv`, `.rejected.csv`, and the
-  source `.epub`/`.pdf`) into **`archive/`** — which now holds both the original
-  and your cleaned version — leaving the working directory to just the books
-  still in flight.
-
-### Sync the master list to PostgreSQL (`sync-db`)
-
-The CSVs stay the working format, but the cross-book `master_vocab.csv` can be
-mirrored into Postgres for a future web app:
-
-```bash
-concordance sync-db                      # loads ./master_vocab.csv
-concordance sync-db --schema concordance # tables live in their own schema
-```
-
-Set the connection in a git-ignored `.env` (or the environment):
+Requires a live `DATABASE_URL` (env or a git-ignored `.env`):
 
 ```
 DATABASE_URL=postgresql://user:pass@host:5432/dbname
 ```
 
-It creates a small normalised schema and upserts idempotently (re-run any time):
+The validity gate and enrichment both check the local `vocab.wiktionary` dump
+(~500k terms) first, before any of the offline/network fallbacks. It's the
+cheapest and, since that dump carries no "Proper noun" POS category at all,
+the cleanest authority available: unlike SymSpell/WordNet/wordfreq (all
+frequency-derived from general web text, so polluted by real names with any
+web footprint), membership alone means "this isn't a name."
 
-- **`word`** — one row per lemma (definition, POS, IPA, sentence, etymology,
-  `synonyms text[]`, `first_added`, source), unique on `lower(lemma)`.
-- **`book`** — the source books.
-- **`word_book`** — the many-to-many that unpacks the CSV's `source_book` list, so
-  a word surfaced by two books is linked to both.
-
-Tables live in a dedicated schema (default `concordance`) so they can share a
-database with other projects. `pg_trgm` is enabled when privileges allow, giving a
-trigram index on `lemma` for future fuzzy lookups.
-
-### Ingest straight to the database (`ingest`)
-
-`run` → hand-edit → `finalize` → `sync-db` is the CSV-based path above. Now that
-the review [webapp](#web-app-webapp) handles pruning after the fact
-(marking a term `active = false` instead of deleting a CSV row before
-promotion), a book can skip the CSV step entirely:
+## Ingest a book (`ingest`)
 
 ```bash
-concordance ingest "some book.epub"                 # same pipeline as `run`
+concordance ingest "some book.epub"
 concordance ingest "some book.epub" --schema concordance
 ```
 
-Same extract → filter → judge → enrich pipeline as `run` (same `--model`,
-`--stub`, `--min-zipf`, `--limit`, `--no-lookup` flags), but the result goes
-straight into Postgres instead of a CSV: kept words upsert into
-`word`/`word_book` exactly like `sync-db` does, and everything the pipeline
-dropped goes into **`rejected_word`** — one row per **(book, lemma)**,
-deliberately *not* deduped across books the way `word` is, since the same
-lemma can be rejected for a different reason (or recurrence count) in a
-different book. Nothing is silently lost; you just query the DB instead of
-opening `<book>.rejected.csv`. `--database-url` overrides `DATABASE_URL`/`.env`
-same as `sync-db`. Idempotent — re-running the same book updates both tables
-in place rather than duplicating rows. The review webapp's **Rejected** tab
-lets you browse these and "Add" one back (a live dictionary lookup, since
-rejects were never enriched) if the pipeline dropped something worth keeping;
-a word rescued this way is flagged (`rescued_from_reject`, with the original
-reject reason and timestamp) so it stays traceable after the fact. A word
-already marked pruned (`active = false`) via the review webapp, or
+Runs the full extract → filter → judge → enrich pipeline and writes straight
+into Postgres — no CSV, no hand-edit, no promotion step. Kept words upsert
+into `word`/`word_book`; everything the pipeline dropped goes into
+**`rejected_word`** — one row per **(book, lemma)**, deliberately *not*
+deduped across books the way `word` is, since the same lemma can be rejected
+for a different reason (or recurrence count) in a different book. Nothing is
+silently lost; you query the DB instead of opening a CSV. Idempotent —
+re-running the same book updates both tables in place rather than duplicating
+rows, and never clobbers a field (definition, IPA, etymology, ...) that
+already has content with a blank value from a re-run.
+
+Review happens afterward in the **[web app](#web-app-webapp)**: its
+**Accepted** tab lets you prune too-common/easy terms (a one-click soft
+delete — `active = false`); its **Rejected** tab lets you browse what the
+pipeline dropped and "Add" one back if it dropped something worth keeping
+(flagged `rescued_from_reject` so the rescue stays traceable).
+
+A word already marked pruned (`active = false`) via the web app, or
 judge-rejected in an earlier book, is recognized before it ever reaches the
-floor/validity gate/judge — see the verdict cache above — so review decisions
-are never silently re-litigated or wasted as repeat LLM calls.
+floor/validity gate/judge — see the cross-book verdict cache above — so
+review decisions are never silently re-litigated or wasted as repeat LLM
+calls.
 
 **Batch mode — process everything in `incoming/`:**
 
@@ -203,15 +88,60 @@ found just uses the whole filename as the title with a blank author, rather
 than erroring out. Each file is moved into `archive/` after processing
 (`--no-archive` to leave them in place); explicit single-file mode
 (`concordance ingest some/book.epub`) still archives next to the source file
-like `run` does, rather than to the top-level `archive/`. The judge model,
-spaCy, and the validity gate's dictionaries are loaded **once** for the whole
-batch (not once per book), so a long batch pays that cost a single time.
+rather than to the top-level `archive/`. The judge model, spaCy, and the
+validity gate's dictionaries are loaded **once** for the whole batch (not
+once per book), so a long batch pays that cost a single time.
+
+Flags: `--min-zipf` (frequency floor; higher = rarer only), `--limit`,
+`--no-lookup`, `--model`, `--stub`, `--schema`, `--database-url`,
+`--no-archive` (batch mode only).
+
+## Backfilling definitions (`refill`, `deepen`)
+
+A word can be *kept* (a real word, worth learning) without ever getting a
+definition — `ingest`'s enrichment sources sometimes miss genuinely rare or
+archaic vocabulary. Rather than silently sitting blank forever, every such
+word is durably marked `word.flagged_undefined` (+ `_at`) the moment it's
+accepted with no definition — **sticky by design**: the marker is never
+cleared, even once a definition is later found, because the point is a
+permanent "this one needed a second look" audit trail for your own manual
+validity review, not a live status flag.
+
+```bash
+concordance refill              # cheap sources, same ones ingest already tried
+concordance deepen              # slower/deeper sources + a validity estimate
+concordance deepen --web        # + web-search/LLM last resort (needs a model)
+```
+
+- **`refill`** re-tries the local Wiktionary dump and the free online
+  dictionaries (Free Dictionary API, Wiktionary) for every word whose
+  `definition` is still blank — useful when the miss was transient (a rate
+  limit, a network blip) rather than the word genuinely being undefinable.
+- **`deepen`** runs after `refill` and reaches further: **Wordnik** (Century
+  Dictionary + Webster's, which carry archaic vocabulary — needs a free
+  `WORDNIK_API_KEY` in `.env`, falls back to yourdictionary-only without it)
+  and **yourdictionary.com**. Whatever *still* can't be defined gets a
+  deterministic, explainable **validity estimate** written to `word.validity_label`
+  (`likely-valid` / `uncertain` / `likely-artifact`), `validity_score` (0–1),
+  `validity_notes`, and `suggested_correction` — signals are Google Books
+  Ngram, wordfreq, WordNet/NLTK wordlists, morphology, and a SymSpell
+  near-neighbour check, the same scoring used for the CSV-era `<book>.undefined.csv`
+  report. **In practice, most currently-flagged words score `likely-artifact`**
+  — OCR misreads, archaic-spelling variants no modern dictionary carries as a
+  headword, and foreign-language fragments that slipped past the keep-biased
+  validity gate on some other authority's say-so. Cross-reference
+  `flagged_undefined = true AND validity_label = 'likely-artifact'` for your
+  prune review queue.
+- Neither command ever overwrites an existing definition — both only touch
+  rows where `definition` is still blank.
+
+Both commands accept `--schema`, `--limit`, `--database-url`.
 
 ## Enrichment & scoring (`classify`, `archaic`, `ngram`, `difficulty`, `quizdef`, `quizzable`)
 
-A second pass of DB-only commands (no book/model pipeline; each just reads and
-updates rows in the schema from `ingest`/`sync-db`), meant to run in this order
-after words exist:
+A further pass of DB-only commands (no book/model pipeline; each just reads
+and updates rows in the schema `ingest` populated), meant to run in this
+order after words exist:
 
 ```bash
 concordance load-taxonomy   # once: load the USAS category tables
@@ -303,11 +233,14 @@ Want it snappier for big books? Swap in `Qwen2.5-7B-Instruct` or
 **3. Run it.**
 
 ```bash
-concordance run "some book.epub" --model models/Qwen2.5-14B-Instruct-Q4_K_M.gguf
+concordance ingest "some book.epub" --model models/Qwen2.5-14B-Instruct-Q4_K_M.gguf
 ```
 
-`Config.n_gpu_layers = -1` offloads as many layers to the GPU as the VRAM
-allows; drop it if you hit out-of-memory.
+The judge defaults to the 14B; if that file is missing it falls back to the
+stub judge automatically (which keeps every survivor, letting the pipeline
+run end-to-end without a model), and `--stub` forces the stub even when the
+model is present. `Config.n_gpu_layers = -1` offloads as many layers to the
+GPU as the VRAM allows; drop it if you hit out-of-memory.
 
 ## Web app (`webapp/`)
 
@@ -376,10 +309,18 @@ Useful commands: `systemctl --user status concordance-web concordance-tunnel`,
 
 Every stage is real and runs end-to-end; the LLM judge is wired but stubbed
 until you supply a `.gguf`. Beyond the base extract → judge → enrich pipeline:
-a live-DB `ingest` path with a cross-book verdict cache, a public review
-webapp, USAS domain tagging, an ex-ante difficulty scalar, quiz-safe
-definitions + a quizzable flag, and a pronunciation-audio pipeline (real
-recordings first, IPA-guided synthesis otherwise) are all in place. Deferred
-by choice: other languages, Anki export, scanned-PDF OCR, a curated
-names/gazetteer list to close the one known gap in proper-noun filtering
-(every validity authority is itself somewhat name-polluted).
+a cross-book verdict cache, a public review webapp, USAS domain tagging, an
+ex-ante difficulty scalar, quiz-safe definitions + a quizzable flag, a
+pronunciation-audio pipeline (real recordings first, IPA-guided synthesis
+otherwise), and a two-stage definition backfill (`refill`/`deepen`, the
+latter also scoring the genuinely-undefinable tail for validity) are all in
+place. Deferred by choice: other languages, Anki export, scanned-PDF OCR, a
+curated names/gazetteer list to close the one known gap in proper-noun
+filtering (every validity authority is itself somewhat name-polluted).
+
+CSV-based ingestion (`run` → hand-edit → `finalize` → `sync-db`) still works
+but is no longer the primary workflow — `ingest` writing straight to Postgres,
+reviewed in the web app, is. The CSV commands (`run`, `finalize`, `sync-db`,
+`define`, and the standalone `python -m concordance.refill`) remain in the
+codebase for anyone with an existing CSV-based project, but aren't documented
+here; see git history for their usage if needed.
