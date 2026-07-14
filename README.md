@@ -200,6 +200,46 @@ hours unattended, which would starve the fast Azure calls if interleaved.
 `audio-guess` results are tagged `source='azure_guess'` (vs. `'azure'` for
 IPA-guided) so the app can flag them as unverified.
 
+## Semantic distance (`train-fasttext`, `embed`)
+
+Two independent per-word vectors, for visualizing word relationships and — a
+later feature this doesn't build — generating quiz distractors. Neither is a
+precomputed all-pairs distance matrix (already 200M+ pairs at 20k+ words, and
+only growing); both are queried on demand via a pgvector HNSW index, so
+finding a word's nearest neighbors is O(log N), not O(N²).
+
+```bash
+concordance train-fasttext          # once (or after a big ingest batch): train on archive/
+concordance embed                   # definition_vector for words missing one
+concordance embed --signal fasttext # fasttext_vector instead (needs the trained model)
+concordance embed --signal both     # both in one pass
+```
+
+- **Definition embedding** (`sentence-transformers`, `BAAI/bge-small-en-v1.5`)
+  embeds each word's dictionary *gloss* — modern English text — rather than
+  the rare headword itself, falling back to `synonyms` then the book
+  example `sentence` when a definition is missing. This is what makes rare/
+  archaic vocabulary tractable at all: the word is rare, its definition
+  usually isn't. In practice this reaches ~100% coverage (the `sentence`
+  fallback catches almost everything a real definition doesn't).
+- **FastText subword vectors** are trained from scratch on this project's own
+  `archive/` corpus via `train-fasttext` (not a generic pretrained binary),
+  so its character n-grams are learned from the same archaic/literary
+  English these words come from. Because it composes a vector from
+  subwords, it produces one for *every* lemma regardless of definition
+  coverage — genuinely 100%, including words no dictionary could define.
+- These capture different things on purpose — meaning vs. spelling — and are
+  stored/queried independently (`word_embedding.definition_vector` /
+  `.fasttext_vector`), not fused into one score. `train-fasttext` is a
+  holistic pass (must see the whole corpus at once — rerun periodically as
+  the archive grows); `embed` is the familiar incremental maintenance pass.
+
+The review webapp's backend exposes this as `/api/words/search` (word
+picker) and `/api/words/{id}/neighbors` (`signal=definition|fasttext`, with
+optional POS/quizzable/difficulty-band/USAS-domain filters and synonym
+exclusion) — query infrastructure for a future visualization UI and future
+distractor generation, not those features themselves.
+
 ## Running the local model (RTX 3060, 12 GB)
 
 The judge talks to `llama.cpp` through the `llama-cpp-python` bindings — no
@@ -312,8 +352,11 @@ until you supply a `.gguf`. Beyond the base extract → judge → enrich pipelin
 a cross-book verdict cache, a public review webapp, USAS domain tagging, an
 ex-ante difficulty scalar, quiz-safe definitions + a quizzable flag, a
 pronunciation-audio pipeline (real recordings first, IPA-guided synthesis
-otherwise), and a two-stage definition backfill (`refill`/`deepen`, the
-latter also scoring the genuinely-undefinable tail for validity) are all in
+otherwise), a two-stage definition backfill (`refill`/`deepen`, the latter
+also scoring the genuinely-undefinable tail for validity), and semantic-
+distance vectors (definition-embedding + corpus-trained FastText, queried
+via a pgvector HNSW index — infrastructure for future visualization and
+quiz-distractor generation, not those features themselves yet) are all in
 place. Deferred by choice: other languages, Anki export, scanned-PDF OCR, a
 curated names/gazetteer list to close the one known gap in proper-noun
 filtering (every validity authority is itself somewhat name-polluted).
