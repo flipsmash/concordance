@@ -11,16 +11,18 @@ requirements & architecture spec for the full rationale.
 ## Pipeline
 
 ```
-extract → clean → tokenize → frequency-floor → strip-proper-nouns
-        → validity-gate → LLM-judge → dictionary-lookup → CSV → (define) → (finalize)
+extract → clean → tokenize → frequency-floor → cross-book verdict cache
+        → strip-proper-nouns → validity-gate → LLM-judge → dictionary-lookup
+        → CSV → (define) → (finalize)
 ```
 
 - **frequency floor** — a stop-word-style cut of common words (never a rarity *ceiling*)
-- **validity gate** — multi-source, keep-biased. A word is a real word if *any* authority vouches for it — the SymSpell 82k wordlist, **WordNet**, or **NLTK's 234k dictionary corpus** (which carries the archaic vocabulary — *destrier, bartizan, cangue* — that trips up single-dictionary checks). Only then is misspelling considered, by *relative* near-neighbor frequency. NLTK's `wordnet` and `words` data download automatically on first run.
+- **cross-book verdict cache** — a lemma already kept/pruned/judge-rejected in an earlier book (in this run or a prior `ingest`) is pre-marked from `word`/`rejected_word` and never re-judged: the LLM judge's input is purely `(lemma, frequency band)`, so at temp 0 its verdict on a given lemma is always the same. This is what keeps per-book judge time from scaling with corpus size — cost tracks *distinct new rare words*, which saturates fast on a shared-vocabulary corpus.
+- **validity gate** — multi-source, keep-biased. A word is a real word if *any* authority vouches for it — the local `vocab.wiktionary` DB dump (~500k terms, checked first because it's free and carries no "Proper noun" POS to get confused by), then the SymSpell 82k wordlist, **WordNet**, or **NLTK's 234k dictionary corpus** (which carries the archaic vocabulary — *destrier, bartizan, cangue* — that trips up single-dictionary checks). A foreign-language-context check runs early too. Only then is misspelling considered, by *relative* near-neighbor frequency (with a recurrence escape hatch — a "misspelling" that keeps showing up is probably a real coinage). NLTK's `wordnet` and `words` data download automatically on first run.
 - **LLM judge** — a local model decides what's worth learning (stubbed until you point it at a model). To keep a weak local model honest it emits a *minimal* per-word verdict (`{"w","k"}`, no free-text reason) so it doesn't truncate its output and silently drop words; any word it omits is re-queried for up to three passes before the keep-biased fallback, so junk can't flood the list by omission. A corpus frequency hint (common / uncommon / rare) steadies its rarity sense but is never a hard cut. Frequency alone can't do this job — *tendril* is rarer than *refectory* yet everyone knows it — which is exactly why the judgment is the model's, not the floor's.
-- **dictionary lookup** — free, keyless sources: Free Dictionary API first, then Wiktionary (which actually carries the rare/archaic words). Fills definition, part of speech, IPA, synonyms, and etymology. Bulk lookups retry with exponential backoff and honour `Retry-After`, so a run of a thousand words doesn't get silently emptied by rate limiting.
-- **review** — you mark each word known / unknown; only unknowns are saved
-- nothing is ever silently dropped — every cut is logged to `*.rejected.csv`
+- **dictionary lookup** — the local Wiktionary dump first, then free keyless network sources: Free Dictionary API, then Wiktionary online (which actually carries the rare/archaic words). Fills definition, part of speech, IPA, synonyms, and etymology. Bulk lookups retry with exponential backoff and honour `Retry-After`, so a run of a thousand words doesn't get silently emptied by rate limiting.
+- **review** — you mark each word known / unknown; only unknowns are saved (or, for `ingest`, prune afterward in the [web app](#web-app-webapp))
+- nothing is ever silently dropped — every cut is logged to `*.rejected.csv` (or `rejected_word`, for `ingest`)
 
 ### Backfilling definitions
 
@@ -73,7 +75,8 @@ membership alone means "this isn't a name."
 Outputs land next to the book: `book.vocab.csv` and `book.rejected.csv`.
 
 Flags: `--min-zipf` (frequency floor; higher = rarer only), `--limit`,
-`--no-lookup`, `--model`, `--stub`.
+`--no-lookup`, `--model`, `--stub`, `--schema` (which schema's `word`/
+`rejected_word` to check against the verdict cache — see below).
 
 ### Resolving undefined words (`define`)
 
@@ -180,7 +183,13 @@ opening `<book>.rejected.csv`. `--database-url` overrides `DATABASE_URL`/`.env`
 same as `sync-db`. Idempotent — re-running the same book updates both tables
 in place rather than duplicating rows. The review webapp's **Rejected** tab
 lets you browse these and "Add" one back (a live dictionary lookup, since
-rejects were never enriched) if the pipeline dropped something worth keeping.
+rejects were never enriched) if the pipeline dropped something worth keeping;
+a word rescued this way is flagged (`rescued_from_reject`, with the original
+reject reason and timestamp) so it stays traceable after the fact. A word
+already marked pruned (`active = false`) via the review webapp, or
+judge-rejected in an earlier book, is recognized before it ever reaches the
+floor/validity gate/judge — see the verdict cache above — so review decisions
+are never silently re-litigated or wasted as repeat LLM calls.
 
 **Batch mode — process everything in `incoming/`:**
 
@@ -194,7 +203,72 @@ found just uses the whole filename as the title with a blank author, rather
 than erroring out. Each file is moved into `archive/` after processing
 (`--no-archive` to leave them in place); explicit single-file mode
 (`concordance ingest some/book.epub`) still archives next to the source file
-like `run` does, rather than to the top-level `archive/`.
+like `run` does, rather than to the top-level `archive/`. The judge model,
+spaCy, and the validity gate's dictionaries are loaded **once** for the whole
+batch (not once per book), so a long batch pays that cost a single time.
+
+## Enrichment & scoring (`classify`, `archaic`, `ngram`, `difficulty`, `quizdef`, `quizzable`)
+
+A second pass of DB-only commands (no book/model pipeline; each just reads and
+updates rows in the schema from `ingest`/`sync-db`), meant to run in this order
+after words exist:
+
+```bash
+concordance load-taxonomy   # once: load the USAS category tables
+concordance classify        # tag every word with 1-3 USAS domain codes
+concordance normalize-pos   # fold part_of_speech into one clean vocabulary
+concordance ngram           # cache Google Books Ngram rarity/recency per word
+concordance archaic         # set current/dated/archaic/obsolete + confidence
+concordance difficulty      # 0-100 ex-ante difficulty scalar + factor breakdown
+concordance quizdef         # quiz-safe definitions (rewrite ones that leak the word)
+concordance quizzable       # flag variant/inferable-derivative words as unquizzable
+```
+
+- **`classify`** — assigns each word 1-3 USAS category codes (word + POS +
+  definition + sentence), using the WordNet-Domains mapping as a candidate
+  hint the model prunes/confirms against context rather than a hard seed.
+  `--only-missing` / `--batch` to backfill incrementally.
+- **`archaic`** — an ordinal (current < dated < archaic < obsolete) with a
+  0-1 confidence: a register label in the definition or the Wiktionary dump is
+  high-confidence; a Google-Books recency decline alone is real but noisy
+  (can't distinguish "faded" from "always uncommon"), so it's low-confidence
+  and queued for later review rather than trusted outright.
+  Needs `ngram` to have run first.
+- **`ngram`** — fetches + caches peak/recent frequency and recency ratio per
+  word from Google Books Ngram; feeds both `archaic` and `difficulty`.
+- **`difficulty`** — blends rarity (dominant), archaic confidence, USAS domain
+  specificity, and morphological transparency into a single 0-100 scalar,
+  storing the factor breakdown alongside it (a principled ex-ante estimate,
+  not yet a fitted/IRT model — that comes once quiz response data exists).
+- **`quizdef`** — ~37% of definitions leak the target word's root ("audaciously"
+  → "in an audacious manner"), making recall quizzing trivial; this builds a
+  separate `quiz_definition` per word — passed through as-is if already clean,
+  LLM-paraphrased (then machine-verified leak-free) if not, redacted as a last
+  resort.
+- **`quizzable`** — flags words whose only difference from an already-known
+  base form is grammatical (plurals, inflections) or a transparently inferable
+  derivative, so quizzing doesn't waste a card on something not actually new.
+
+### Pronunciation audio (`wordnik-pron`, `ipa`, `commons-search`, `commons-download`, `audio`, `audio-guess`)
+
+Real human recordings where they exist, IPA-guided synthesis otherwise —
+never a blind spelling-to-speech guess unless nothing else is available:
+
+```bash
+concordance wordnik-pron      # fetch raw Wordnik transcriptions (ARPAbet/AHD-5/IPA)
+concordance ipa               # backfill+validate word.ipa from kaikki, then Wordnik
+concordance commons-search    # find real Commons recordings kaikki's dump missed
+concordance commons-download  # download the recordings commons-search confirmed
+concordance audio             # Commons recording if present, else Azure IPA-guided TTS
+concordance audio-guess       # last resort: Azure guesses from spelling alone
+```
+
+Run `ipa` before `audio` — synthesis quality depends on the transcription it's
+given. `commons-search`/`commons-download`/`audio` are deliberately separate
+commands rather than one pass: Commons rate-limits hard and is meant to run for
+hours unattended, which would starve the fast Azure calls if interleaved.
+`audio-guess` results are tagged `source='azure_guess'` (vs. `'azure'` for
+IPA-guided) so the app can flag them as unverified.
 
 ## Running the local model (RTX 3060, 12 GB)
 
@@ -242,6 +316,14 @@ table for pruning too-common/easy terms out of the vocab bank. Deleting a term
 doesn't hard-delete it — it flips `word.active` to false, so every downstream
 feature (quizzing, stats) just needs to filter on `active = true`, and history
 (audio, ngram data, etc.) stays intact.
+
+- **Accepted tab** — term/POS/definition/difficulty table, filterable by POS,
+  one-click delete (no confirm) that sets `active = false`; whole-row hover
+  highlight so a delete click can't land on the wrong term.
+- **Rejected tab** — browse `rejected_word`, filterable by book and by reason
+  (both multi-select), with an "Add" button that rescues a word back in (live
+  dictionary lookup, since rejects were never enriched) and flags it
+  `rescued_from_reject` for after-the-fact tracking.
 
 ```bash
 # first time only
@@ -292,6 +374,12 @@ Useful commands: `systemctl --user status concordance-web concordance-tunnel`,
 
 ## Status
 
-Walking skeleton — every stage is real and runs end-to-end; the LLM judge is
-wired but stubbed until you supply a `.gguf`. Deferred by choice: cross-book
-memory, other languages, Anki export, scanned-PDF OCR.
+Every stage is real and runs end-to-end; the LLM judge is wired but stubbed
+until you supply a `.gguf`. Beyond the base extract → judge → enrich pipeline:
+a live-DB `ingest` path with a cross-book verdict cache, a public review
+webapp, USAS domain tagging, an ex-ante difficulty scalar, quiz-safe
+definitions + a quizzable flag, and a pronunciation-audio pipeline (real
+recordings first, IPA-guided synthesis otherwise) are all in place. Deferred
+by choice: other languages, Anki export, scanned-PDF OCR, a curated
+names/gazetteer list to close the one known gap in proper-noun filtering
+(every validity authority is itself somewhat name-polluted).
