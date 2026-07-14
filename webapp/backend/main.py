@@ -283,6 +283,142 @@ def accept_rejected(rejected_id: int) -> AcceptedResult:
     return AcceptedResult(id=word_id, lemma=lemma, definition=cand.definition or None)
 
 
+class WordSearchResult(BaseModel):
+    id: int
+    lemma: str
+
+
+@app.get("/api/words/search", response_model=list[WordSearchResult])
+def search_words(q: str = Query(..., min_length=1), limit: int = Query(20, ge=1, le=50)) -> list[WordSearchResult]:
+    """Trigram-similarity lemma search (pg_trgm, already indexed) — the word
+    picker for exploring the semantic-distance neighbors of a chosen word."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT id, lemma FROM {SCHEMA}.word
+                WHERE active AND similarity(lemma, %s) > 0.1
+                ORDER BY similarity(lemma, %s) DESC LIMIT %s""",
+            (q, q, limit),
+        )
+        return [WordSearchResult(id=r[0], lemma=r[1]) for r in cur.fetchall()]
+
+
+class Neighbor(BaseModel):
+    id: int
+    lemma: str
+    definition: str | None
+    part_of_speech: str | None
+    distance: float
+    shared_usas_field: str | None
+
+
+class NeighborsResponse(BaseModel):
+    word: WordSearchResult
+    signal: str
+    neighbors: list[Neighbor]
+
+
+_SIGNAL_COLUMNS = {"definition": "definition_vector", "fasttext": "fasttext_vector"}
+
+
+@app.get("/api/words/{word_id}/neighbors", response_model=NeighborsResponse)
+def word_neighbors(
+    word_id: int,
+    signal: Literal["definition", "fasttext"] = "definition",
+    k: int = Query(10, ge=1, le=50),
+    pos: str | None = None,
+    quizzable_only: bool = False,
+    difficulty_min: float | None = None,
+    difficulty_max: float | None = None,
+    same_domain_only: bool = False,
+    exclude_synonyms: bool = True,
+) -> NeighborsResponse:
+    """Nearest neighbors of a word by cosine distance on its embedding vector
+    (hnsw ANN index — see db.py's word_embedding table), not an all-pairs
+    precompute. `signal` picks which vector: 'definition' (meaning, via a
+    sentence embedding of the dictionary gloss) or 'fasttext' (word-form
+    subwords, works even with no definition). `same_domain_only`/
+    `shared_usas_field` are a cheap join against the existing USAS category
+    tree — explainability/filtering only, not part of the distance math.
+    This is query-time infrastructure for future visualization and distractor
+    generation, not the distractor-selection heuristic itself."""
+    vec_col = _SIGNAL_COLUMNS[signal]
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"SELECT lemma, synonyms FROM {SCHEMA}.word WHERE id = %s AND active", (word_id,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="word not found")
+        lemma, synonyms = row
+
+        cur.execute(
+            f"SELECT 1 FROM {SCHEMA}.word_embedding WHERE word_id = %s AND {vec_col} IS NOT NULL",
+            (word_id,),
+        )
+        if cur.fetchone() is None:
+            raise HTTPException(status_code=404, detail=f"no {signal} embedding for this word yet")
+
+        # Always fetched (not just under same_domain_only): also powers the
+        # shared_usas_field explainability annotation on every neighbor below.
+        cur.execute(
+            f"""SELECT DISTINCT left(c.code, 1) FROM {SCHEMA}.word_category wc
+                JOIN {SCHEMA}.category c ON c.id = wc.category_id
+                WHERE wc.word_id = %s""",
+            (word_id,),
+        )
+        target_fields = [r[0] for r in cur.fetchall()]
+        if same_domain_only and not target_fields:
+            return NeighborsResponse(word=WordSearchResult(id=word_id, lemma=lemma), signal=signal, neighbors=[])
+
+        filters = [f"e2.{vec_col} IS NOT NULL", "w2.active", "w2.id != %s"]
+        params: list = [word_id]
+        if pos:
+            filters.append("w2.part_of_speech = %s")
+            params.append(pos)
+        if quizzable_only:
+            filters.append("wd.quizzable = true")
+        if difficulty_min is not None:
+            filters.append("wd.difficulty >= %s")
+            params.append(difficulty_min)
+        if difficulty_max is not None:
+            filters.append("wd.difficulty <= %s")
+            params.append(difficulty_max)
+        if exclude_synonyms and synonyms:
+            filters.append("NOT (lower(w2.lemma) = ANY(%s))")
+            params.append([s.lower() for s in synonyms])
+        if same_domain_only:
+            filters.append(
+                f"""EXISTS (SELECT 1 FROM {SCHEMA}.word_category wc2
+                            JOIN {SCHEMA}.category c2 ON c2.id = wc2.category_id
+                            WHERE wc2.word_id = w2.id AND left(c2.code, 1) = ANY(%s))"""
+            )
+            params.append(target_fields)
+        where = " AND ".join(filters)
+
+        cur.execute(
+            f"""SELECT w2.id, w2.lemma, w2.definition, w2.part_of_speech,
+                       e2.{vec_col} <=> (SELECT {vec_col} FROM {SCHEMA}.word_embedding WHERE word_id = %s) AS distance,
+                       (SELECT array_agg(DISTINCT left(c.code, 1)) FROM {SCHEMA}.word_category wc
+                        JOIN {SCHEMA}.category c ON c.id = wc.category_id WHERE wc.word_id = w2.id) AS fields
+                FROM {SCHEMA}.word_embedding e2
+                JOIN {SCHEMA}.word w2 ON w2.id = e2.word_id
+                LEFT JOIN {SCHEMA}.word_difficulty wd ON wd.word_id = w2.id
+                WHERE {where}
+                ORDER BY distance
+                LIMIT %s""",
+            (word_id, *params, k),
+        )
+        rows = cur.fetchall()
+
+    target_field_set = set(target_fields)
+    neighbors = []
+    for wid, wlemma, definition, pos_, distance, fields in rows:
+        shared = next(iter(target_field_set & set(fields or [])), None)
+        neighbors.append(Neighbor(id=wid, lemma=wlemma, definition=definition, part_of_speech=pos_,
+                                   distance=distance, shared_usas_field=shared))
+
+    return NeighborsResponse(word=WordSearchResult(id=word_id, lemma=lemma), signal=signal, neighbors=neighbors)
+
+
 # Serves the built frontend (webapp/frontend/dist, from `npm run build`) so a
 # single port can be exposed publicly. Registered last so it never shadows an
 # /api/* route above; absent in plain local dev, where the Vite dev server is

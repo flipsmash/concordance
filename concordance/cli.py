@@ -461,6 +461,75 @@ def deepen(
                   f"defined ({stats['still_undefined']} scored for validity, still undefined)")
 
 
+_FASTTEXT_MODEL_PATH = Path("models/fasttext_corpus.bin")
+
+
+@app.command("train-fasttext")
+def train_fasttext_cmd(
+    archive_dir: Path = typer.Option(Path("archive"), "--archive-dir", help="Directory of already-ingested book files to train on."),
+    model_path: Path = typer.Option(_FASTTEXT_MODEL_PATH, "--model-path", help="Where to write the trained model."),
+    refresh: bool = typer.Option(False, "--refresh", help="Retrain even if a model already exists at model-path."),
+) -> None:
+    """(Re)train the FastText subword model on every archived book's text —
+    a holistic pass over the whole corpus, not incremental, so this is run
+    occasionally (e.g. after a large ingest batch), not per-book. Powers
+    `concordance embed --signal fasttext`, which needs this model to exist."""
+    from . import embed as _embed
+
+    if model_path.exists() and not refresh:
+        console.print(f"[yellow]![/yellow] {model_path} already exists — use --refresh to retrain.")
+        raise typer.Exit(code=0)
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    corpus_path = model_path.with_suffix(".corpus.txt")
+    with console.status("[bold]Building training corpus from archive/…"):
+        n_files = _embed.build_fasttext_corpus(archive_dir, corpus_path)
+    console.print(f"[dim]corpus built from {n_files} archived file(s) → {corpus_path.name}[/dim]")
+    with console.status("[bold]Training FastText model…"):
+        _embed.train_fasttext(corpus_path, model_path)
+    console.print(f"[green]✓[/green] trained → {model_path}")
+
+
+@app.command()
+def embed(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    signal: str = typer.Option("definition", "--signal", help="'definition', 'fasttext', or 'both'."),
+    fasttext_model: Path = typer.Option(_FASTTEXT_MODEL_PATH, "--fasttext-model", help="Trained model from train-fasttext."),
+    refresh: bool = typer.Option(False, "--refresh", help="Recompute all (default: only words missing a vector)."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap words processed (0 = all)."),
+    batch: int = typer.Option(64, "--batch", help="Definition-embedding batch size."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Compute per-word semantic-distance vectors into word_embedding: a
+    sentence-embedding of each word's definition (meaning), and/or a FastText
+    subword vector of the word form itself (works even with no definition —
+    run `train-fasttext` first). Neither is an all-pairs distance matrix —
+    both are queried on demand via a pgvector HNSW index, so this scales as
+    the corpus grows instead of recomputing everything each time."""
+    if signal not in ("definition", "fasttext", "both"):
+        console.print("[red]✗[/red] --signal must be 'definition', 'fasttext', or 'both'"); raise typer.Exit(code=1)
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+
+    if signal in ("definition", "both"):
+        with console.status("[bold]Embedding definitions…"):
+            stats = db.compute_definition_embeddings(conn, schema, only_missing=not refresh,
+                                                      limit=limit, batch=batch)
+        console.print(f"[green]✓[/green] definition: [bold]{stats['embedded']}[/bold]/{stats['words']} "
+                      f"embedded ({stats['skipped_no_text']} skipped, no text)")
+    if signal in ("fasttext", "both"):
+        if not fasttext_model.exists():
+            console.print(f"[red]✗[/red] {fasttext_model} not found — run `concordance train-fasttext` first.")
+            raise typer.Exit(code=1)
+        with console.status("[bold]Embedding word forms (FastText)…"):
+            stats = db.compute_fasttext_embeddings(conn, schema, model_path=str(fasttext_model),
+                                                   only_missing=not refresh, limit=limit)
+        console.print(f"[green]✓[/green] fasttext: [bold]{stats['embedded']}[/bold]/{stats['words']} embedded")
+    conn.close()
+
+
 @app.command()
 def commons_search(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
