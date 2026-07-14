@@ -434,6 +434,34 @@ def refill(
 
 
 @app.command()
+def deepen(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    web: bool = typer.Option(False, "--web", help="Last resort: web-search + grounded LLM extraction."),
+    model: Optional[Path] = typer.Option(None, "--model", "-m", help="Model for --web extraction (defaults to the 14B)."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap words processed (0 = all)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Run after `refill`: reach further (Wordnik, yourdictionary, optionally
+    --web) for words still undefined. Whatever STILL can't be defined gets a
+    validity estimate (real word vs OCR/variant/foreign/nonsense) written to
+    word.validity_* — pair with the flagged_undefined marker to find prune
+    candidates: flagged AND validity_label='likely-artifact' is the review
+    queue. Needs WORDNIK_API_KEY in .env for the Wordnik source; falls back to
+    yourdictionary-only without it."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    with console.status("[bold]Resolving the undefined tail…"):
+        stats = db.deepen_definitions(conn, schema, use_web=web,
+                                      model_path=str(model) if model else None, limit=limit)
+    conn.close()
+    console.print(f"[green]✓[/green] deepen: [bold]{stats['defined']}[/bold]/{stats['attempted']} "
+                  f"defined ({stats['still_undefined']} scored for validity, still undefined)")
+
+
+@app.command()
 def commons_search(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
     dump_path: str = typer.Option(None, "--dump-path", help="Path to the kaikki Wiktextract dump "

@@ -219,6 +219,15 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS flagged_undefined boolean NOT NULL DEFAULT false")
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS flagged_undefined_at timestamptz")
         cur.execute(f"CREATE INDEX IF NOT EXISTS word_flagged_undefined_idx ON {s}.word (flagged_undefined)")
+        # `deepen` writes these for a word that STILL has no definition after
+        # every dictionary source (local + Free Dictionary/Wiktionary + Wordnik/
+        # yourdictionary) has been tried — the DB-native version of deepen.py's
+        # <book>.undefined.csv report, since ingest has no CSV to write one to.
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS validity_label text")
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS validity_score double precision")
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS validity_notes text")
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS suggested_correction text")
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS validity_checked_at timestamptz")
     trgm = True
     try:
         with conn.cursor() as cur:
@@ -455,6 +464,89 @@ def refill_definitions(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0,
                 stats["filled"] += 1
             else:
                 stats["still_missing"] += 1
+            if i % 200 == 0:
+                conn.commit()
+            time.sleep(delay)
+    conn.commit()
+    return stats
+
+
+def deepen_definitions(conn, schema: str = DEFAULT_SCHEMA, use_web: bool = False,
+                       model_path: str | None = None, limit: int = 0,
+                       delay: float = 0.5) -> dict:
+    """DB-native equivalent of deepen.py's `define`: for words still blank after
+    `refill_definitions`, try the deeper/slower sources (Wordnik, yourdictionary,
+    optionally web-search + LLM extraction). Whatever still can't be defined gets
+    a validity_score.estimate() written to word.validity_* — the DB-native
+    version of deepen.py's <book>.undefined.csv report — so a word that's both
+    flagged_undefined AND scored likely-artifact is an obvious prune candidate,
+    not silent noise in the accepted list. Never clears flagged_undefined, same
+    as refill_definitions."""
+    import time
+    from . import deepdef, dictionary, localdict, validity_score
+    from .config import Config
+    from .model import Candidate, Occurrence
+
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT id, lemma, part_of_speech, sentence, chapter, as_seen
+                FROM {s}.word WHERE coalesce(definition,'') = ''
+                ORDER BY flagged_undefined_at NULLS LAST, lemma""" +
+            (f" LIMIT {int(limit)}" if limit else ""))
+        rows = cur.fetchall()
+
+    stats = {"attempted": len(rows), "defined": 0, "still_undefined": 0}
+    if not rows:
+        return stats
+
+    lexicon = localdict.build_lexicon(conn, {lemma.lower() for _, lemma, *_ in rows})
+    session = dictionary.make_session()
+    key = deepdef.wordnik_key()
+
+    llm = None
+    if use_web:
+        cfg = Config()
+        mp = model_path or cfg.model_path
+        if mp and Path(mp).exists():
+            from llama_cpp import Llama
+            llm = Llama(model_path=mp, n_gpu_layers=cfg.n_gpu_layers, n_ctx=cfg.n_ctx, verbose=False)
+
+    with conn.cursor() as cur:
+        for i, (wid, lemma, pos, sentence, chapter, as_seen) in enumerate(rows, 1):
+            cand = Candidate(lemma=lemma, pos=(pos or "NOUN").upper())
+            if sentence:
+                cand.occurrences.append(Occurrence(sentence=sentence, chapter=chapter or "",
+                                                    surface=as_seen or lemma))
+            found = localdict.enrich(cand, lexicon) or deepdef.deep_enrich(cand, session, key)
+            est = None
+            if not found:
+                est = validity_score.estimate(lemma, session=session, sentence=sentence or "")
+                if llm is not None and est.label != "likely-artifact":
+                    from . import websearch
+                    found = websearch.define_via_web(cand, llm)
+
+            if found:
+                cur.execute(
+                    f"""UPDATE {s}.word SET
+                            definition=%s,
+                            definition_source=COALESCE(NULLIF(%s,''), definition_source),
+                            ipa=COALESCE(NULLIF(%s,''), ipa),
+                            etymology=COALESCE(NULLIF(%s,''), etymology),
+                            synonyms=CASE WHEN %s THEN %s ELSE synonyms END,
+                            updated_at=now()
+                        WHERE id=%s""",
+                    (cand.definition, cand.definition_source, cand.ipa, cand.etymology,
+                     bool(cand.synonyms), list(cand.synonyms), wid))
+                stats["defined"] += 1
+            else:
+                cur.execute(
+                    f"""UPDATE {s}.word SET
+                            validity_label=%s, validity_score=%s, validity_notes=%s,
+                            suggested_correction=%s, validity_checked_at=now()
+                        WHERE id=%s""",
+                    (est.label, est.score, est.notes, est.suggestion or None, wid))
+                stats["still_undefined"] += 1
             if i % 200 == 0:
                 conn.commit()
             time.sleep(delay)
