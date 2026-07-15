@@ -9,7 +9,7 @@ from rich.console import Console
 
 from . import clean, db, dictionary, extract, floor, judge, localdict, master, output, propernouns, tokenize, validity
 from .config import Config
-from .model import Candidate, RejectReason, Verdict
+from .model import Candidate, RejectReason, Verdict, junk_pos_reason
 
 
 @dataclass
@@ -22,19 +22,27 @@ class Result:
 
 # A cached verdict (db.fetch_known_verdicts) -> the (verdict, reject_reason) it
 # resolves to. 'keep' becomes a survivor that skips the judge but still gets
-# enriched + linked to the new book; the two drop kinds keep their distinct
-# reasons so the rejected_word row records *why* (human prune vs judge reject).
+# enriched + linked to the new book; each drop kind keeps its own reason so
+# the rejected_word row records *why* (human prune, the judge, or the
+# post-enrichment junk-POS gate — see model.junk_pos_reason).
 _VERDICT_MAP = {
-    "keep":   (Verdict.KEEP, None),
-    "pruned": (Verdict.DROP, RejectReason.ALREADY_KNOWN),
-    "reject": (Verdict.DROP, RejectReason.NOT_INTERESTING),
+    "keep":              (Verdict.KEEP, None),
+    "pruned":            (Verdict.DROP, RejectReason.ALREADY_KNOWN),
+    "not_interesting":   (Verdict.DROP, RejectReason.NOT_INTERESTING),
+    "numeric_or_symbol": (Verdict.DROP, RejectReason.NUMERIC_OR_SYMBOL),
+    "proper_noun":       (Verdict.DROP, RejectReason.PROPER_NOUN),
 }
+# The three rejected_word-sourced kinds, collapsed into one "reject" bucket
+# for the summary count below — kept distinct from 'keep'/'pruned', which
+# come from word.active rather than a rejected_word reason.
+_REJECT_KINDS = {"not_interesting", "numeric_or_symbol", "proper_noun"}
 
 
 def apply_known_verdicts(candidates: dict[str, Candidate], known: dict[str, str]) -> dict[str, int]:
     """Pre-mark every candidate whose verdict is already known from earlier
     books (see db.fetch_known_verdicts) so the LLM judge is skipped for it.
-    Returns per-kind counts. Pure — no DB access — so it's unit-testable."""
+    Returns {"keep", "pruned", "reject"} counts (every reject kind summed
+    under "reject"). Pure — no DB access — so it's unit-testable."""
     counts = {"keep": 0, "pruned": 0, "reject": 0}
     for c in candidates.values():
         if c.verdict is not None:
@@ -43,7 +51,7 @@ def apply_known_verdicts(candidates: dict[str, Candidate], known: dict[str, str]
         if kind is None:
             continue
         c.verdict, c.reject_reason = _VERDICT_MAP[kind]
-        counts[kind] += 1
+        counts["reject" if kind in _REJECT_KINDS else kind] += 1
     return counts
 
 
@@ -126,6 +134,36 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
                 if not localdict.enrich(cand, lexicon):
                     dictionary.enrich(cand, session)
                 status.update(f"[bold]Looking up definitions… {i}/{len(shortlist)}")
+
+        # A dictionary hit can reveal, only now, that a survivor is a symbol
+        # (ISO code / roman-numeral page) or a proper noun the extraction-time
+        # filter missed — see model.junk_pos_reason, the single choke point
+        # every enrichment call site checks. Catch it before the kept/rejected
+        # split so it never reaches word.csv / the word table.
+        #
+        # Skipped for cache-sourced candidates (already `known` — an
+        # established KEEP from an earlier book, per apply_known_verdicts
+        # above): enrichment re-runs on them too since it isn't cached, and if
+        # THIS book's independent dictionary call happens to resolve a
+        # different/worse sense than the one that got the word accepted,
+        # that's enrichment's own non-determinism, not new evidence to
+        # un-accept an already-established word over. Un-cast-ing a word back
+        # out is a deliberate human/retroactive-cleanup action, not something
+        # a single book's enrichment pass should trigger silently.
+        cast_out = 0
+        for cand in shortlist:
+            if cand.lemma in known:
+                continue
+            reason = junk_pos_reason(cand.part_of_speech)
+            if reason:
+                cand.verdict = Verdict.DROP
+                cand.reject_reason = reason
+                cand.interesting_reason = (
+                    f"dictionary lookup resolved this as {cand.part_of_speech!r} — cast out")
+                cast_out += 1
+        if cast_out:
+            console.print(f"[dim]{cast_out} more cast out post-enrichment "
+                           "(symbol/proper-noun-only dictionary sense).[/dim]")
 
     conn.close()
     return output.partition(candidates)

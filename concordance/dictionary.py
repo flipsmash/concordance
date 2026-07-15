@@ -27,7 +27,7 @@ import time
 
 import requests
 
-from .model import Candidate
+from .model import Candidate, is_junk_pos
 
 _FREEDICT = "https://api.dictionaryapi.dev/api/v2/entries/en/{word}"
 _WIKTIONARY = "https://en.wiktionary.org/api/rest_v1/page/definition/{word}"
@@ -88,6 +88,8 @@ def enrich(cand: Candidate, session: requests.Session | None = None) -> None:
 
 
 def _from_freedict(cand: Candidate, session: requests.Session) -> bool:
+    from .audio import looks_like_english_ipa  # lazy: avoids dictionary<->deepdef<->audio import cycle
+
     resp = _get(session, _FREEDICT.format(word=cand.lemma))
     if resp is None or resp.status_code != 200:
         return False
@@ -96,8 +98,13 @@ def _from_freedict(cand: Candidate, session: requests.Session) -> bool:
     except (ValueError, IndexError, KeyError):
         return False
 
+    # Free Dictionary sometimes cross-references a foreign cognate's entry and
+    # brings its transcription along (e.g. "faquir" -> French /fa.kiʁ/) — same
+    # failure mode audio.py's English-language sanity check already guards
+    # against for the backfill path, applied here too so it never enters clean.
     phonetics = [p.get("text", "") for p in entry.get("phonetics", []) if p.get("text")]
-    cand.ipa = phonetics[0] if phonetics else ""
+    valid_phonetics = [p for p in phonetics if looks_like_english_ipa(p)]
+    cand.ipa = valid_phonetics[0] if valid_phonetics else ""
     if entry.get("origin"):          # Free Dictionary occasionally carries etymology here
         cand.etymology = entry["origin"].strip()
 
@@ -146,6 +153,8 @@ def _augment_from_raw(cand: Candidate, session: requests.Session) -> None:
     """Best-effort etymology + IPA from Wiktionary's plaintext extract. Silent on
     miss — the REST definition endpoint drops both sections, so this fills them in
     from a single extra call we make only for the shortlisted words."""
+    from .audio import looks_like_english_ipa  # lazy: avoids dictionary<->deepdef<->audio import cycle
+
     resp = _get(session, _WIKT_RAW, params={
         "action": "query", "format": "json", "titles": cand.lemma,
         "prop": "extracts", "explaintext": 1, "redirects": 1,
@@ -163,7 +172,7 @@ def _augment_from_raw(cand: Candidate, session: requests.Session) -> None:
             cand.etymology = ety
     if not cand.ipa:
         ipa = _parse_ipa(text)
-        if ipa:
+        if ipa and looks_like_english_ipa(ipa):
             cand.ipa = ipa
 
 
@@ -210,15 +219,24 @@ def _parse_etymology(text: str) -> str:
 
 def _pick_sense(cand: Candidate, senses: list[tuple[str, str, list]]) -> tuple[str, str, list]:
     """Choose the sense matching the book's sentence. The LLM sense-picker wires
-    in here; until then, prefer a sense whose POS matches the tagger, else first."""
-    if len(senses) == 1:
-        return senses[0]
+    in here; until then, prefer a sense whose POS matches the tagger, else first.
+
+    A "symbol"/"proper noun" sense (see model.is_junk_pos) is only ever picked
+    when it's truly the word's SOLE resolvable sense — never over a legitimate
+    alternative just because the API happened to list it first. Without this,
+    a word that's both a real English word and, incidentally, someone's name
+    (or collides with an ISO code) could have the wrong sense selected purely
+    by response ordering and get cast out entirely by the post-enrichment gate
+    that checks this result, instead of just mis-displaying its definition."""
+    real = [s for s in senses if not is_junk_pos(s[0])] or senses
+    if len(real) == 1:
+        return real[0]
     tagged = _COARSE_POS.get(cand.pos)
     if tagged:
-        for s in senses:
+        for s in real:
             if s[0].lower().startswith(tagged):
                 return s
-    return senses[0]
+    return real[0]
 
 
 _COARSE_POS = {"NOUN": "noun", "VERB": "verb", "ADJ": "adjective", "ADV": "adverb"}

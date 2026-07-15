@@ -449,10 +449,18 @@ def refill_definitions(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0,
     sources (local Wiktionary, then Free Dictionary API / online Wiktionary)
     for every word whose definition is still blank. Does NOT clear
     `flagged_undefined` even on success — that flag is a permanent "this one
-    needed a second look" marker, not a live status (see apply_schema)."""
+    needed a second look" marker, not a live status (see apply_schema).
+
+    If the resolved sense is a symbol/proper noun (see model.junk_pos_reason —
+    the same gate ingest's pipeline.process() applies), the word is cast out
+    (active=false) instead of being filled in: these are words that were
+    ACCEPTED with no definition at all, so this is the first real evidence of
+    what they actually are, and blank-defined-but-active is exactly the state
+    this gate exists to eliminate — leaving it blank here would just leave the
+    word sitting in the accepted list unexplained forever."""
     import time
     from . import dictionary, localdict
-    from .model import Candidate, Occurrence
+    from .model import Candidate, Occurrence, junk_pos_reason
 
     s = _safe_schema(schema)
     with conn.cursor() as cur:
@@ -463,7 +471,7 @@ def refill_definitions(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0,
             (f" LIMIT {int(limit)}" if limit else ""))
         rows = cur.fetchall()
 
-    stats = {"attempted": len(rows), "filled": 0, "still_missing": 0}
+    stats = {"attempted": len(rows), "filled": 0, "still_missing": 0, "cast_out": 0}
     if not rows:
         return stats
 
@@ -478,18 +486,30 @@ def refill_definitions(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0,
                                                     surface=as_seen or lemma))
             if not localdict.enrich(cand, lexicon):
                 dictionary.enrich(cand, session)
-            if cand.definition:
+            reason = junk_pos_reason(cand.part_of_speech)
+            if reason:
                 cur.execute(
                     f"""UPDATE {s}.word SET
                             definition=%s,
                             definition_source=COALESCE(NULLIF(%s,''), definition_source),
+                            part_of_speech=%s, active=false, updated_at=now()
+                        WHERE id=%s""",
+                    (cand.definition, cand.definition_source,
+                     normalize_pos(cand.part_of_speech), wid))
+                stats["cast_out"] += 1
+            elif cand.definition:
+                cur.execute(
+                    f"""UPDATE {s}.word SET
+                            definition=%s,
+                            definition_source=COALESCE(NULLIF(%s,''), definition_source),
+                            part_of_speech=COALESCE(NULLIF(%s,''), part_of_speech),
                             ipa=COALESCE(NULLIF(%s,''), ipa),
                             etymology=COALESCE(NULLIF(%s,''), etymology),
                             synonyms=CASE WHEN %s THEN %s ELSE synonyms END,
                             updated_at=now()
                         WHERE id=%s""",
-                    (cand.definition, cand.definition_source, cand.ipa, cand.etymology,
-                     bool(cand.synonyms), list(cand.synonyms), wid))
+                    (cand.definition, cand.definition_source, normalize_pos(cand.part_of_speech),
+                     cand.ipa, cand.etymology, bool(cand.synonyms), list(cand.synonyms), wid))
                 stats["filled"] += 1
             else:
                 stats["still_missing"] += 1
@@ -510,11 +530,16 @@ def deepen_definitions(conn, schema: str = DEFAULT_SCHEMA, use_web: bool = False
     version of deepen.py's <book>.undefined.csv report — so a word that's both
     flagged_undefined AND scored likely-artifact is an obvious prune candidate,
     not silent noise in the accepted list. Never clears flagged_undefined, same
-    as refill_definitions."""
+    as refill_definitions.
+
+    Same junk-POS gate as refill_definitions (see model.junk_pos_reason): a
+    symbol/proper-noun-only resolution casts the word out (active=false)
+    rather than filling in a definition that would just leave it sitting in
+    the accepted list unexplained."""
     import time
     from . import deepdef, dictionary, localdict, validity_score
     from .config import Config
-    from .model import Candidate, Occurrence
+    from .model import Candidate, Occurrence, junk_pos_reason
 
     s = _safe_schema(schema)
     with conn.cursor() as cur:
@@ -525,7 +550,7 @@ def deepen_definitions(conn, schema: str = DEFAULT_SCHEMA, use_web: bool = False
             (f" LIMIT {int(limit)}" if limit else ""))
         rows = cur.fetchall()
 
-    stats = {"attempted": len(rows), "defined": 0, "still_undefined": 0}
+    stats = {"attempted": len(rows), "defined": 0, "still_undefined": 0, "cast_out": 0}
     if not rows:
         return stats
 
@@ -555,18 +580,30 @@ def deepen_definitions(conn, schema: str = DEFAULT_SCHEMA, use_web: bool = False
                     from . import websearch
                     found = websearch.define_via_web(cand, llm)
 
-            if found:
+            reason = junk_pos_reason(cand.part_of_speech) if found else None
+            if reason:
                 cur.execute(
                     f"""UPDATE {s}.word SET
                             definition=%s,
                             definition_source=COALESCE(NULLIF(%s,''), definition_source),
+                            part_of_speech=%s, active=false, updated_at=now()
+                        WHERE id=%s""",
+                    (cand.definition, cand.definition_source,
+                     normalize_pos(cand.part_of_speech), wid))
+                stats["cast_out"] += 1
+            elif found:
+                cur.execute(
+                    f"""UPDATE {s}.word SET
+                            definition=%s,
+                            definition_source=COALESCE(NULLIF(%s,''), definition_source),
+                            part_of_speech=COALESCE(NULLIF(%s,''), part_of_speech),
                             ipa=COALESCE(NULLIF(%s,''), ipa),
                             etymology=COALESCE(NULLIF(%s,''), etymology),
                             synonyms=CASE WHEN %s THEN %s ELSE synonyms END,
                             updated_at=now()
                         WHERE id=%s""",
-                    (cand.definition, cand.definition_source, cand.ipa, cand.etymology,
-                     bool(cand.synonyms), list(cand.synonyms), wid))
+                    (cand.definition, cand.definition_source, normalize_pos(cand.part_of_speech),
+                     cand.ipa, cand.etymology, bool(cand.synonyms), list(cand.synonyms), wid))
                 stats["defined"] += 1
             else:
                 cur.execute(
@@ -595,8 +632,13 @@ def fetch_known_verdicts(conn, schema: str = DEFAULT_SCHEMA) -> dict[str, str]:
 
       'keep'   -> in `word`, active     (judge kept it; human hasn't pruned)
       'pruned' -> in `word`, inactive   (human manually pruned via the webapp)
-      'reject' -> in `rejected_word` with reason 'not_interesting'
-                                        (judge itself rejected it before)
+      'reject' -> in `rejected_word` with reason 'not_interesting', 'numeric_or_symbol',
+                                        or 'proper_noun' (judge, or the post-
+                                        enrichment junk-POS gate, rejected it
+                                        before — both are purely lemma-derived,
+                                        like the judge verdict, so caching them
+                                        is exactly as safe: see pipeline.py's
+                                        junk_pos_reason gate)
 
     `word` wins over `rejected_word` for a lemma present in both: a promoted
     row is authoritative and its `active` flag reflects the human's latest
@@ -605,9 +647,13 @@ def fetch_known_verdicts(conn, schema: str = DEFAULT_SCHEMA) -> dict[str, str]:
     s = _safe_schema(schema)
     verdicts: dict[str, str] = {}
     with conn.cursor() as cur:
-        cur.execute(f"SELECT DISTINCT lemma_lc FROM {s}.rejected_word WHERE reason = 'not_interesting'")
-        for (lemma,) in cur.fetchall():
-            verdicts[lemma] = "reject"
+        # The specific reason (not a generic "reject") so pipeline.py's
+        # _VERDICT_MAP can restore the true original reason on a cached hit
+        # instead of relabeling every cached reject as not_interesting.
+        cur.execute(f"""SELECT lemma_lc, reason FROM {s}.rejected_word
+                        WHERE reason IN ('not_interesting', 'numeric_or_symbol', 'proper_noun')""")
+        for lemma, reason in cur.fetchall():
+            verdicts[lemma] = reason
         cur.execute(f"SELECT lemma_lc, active FROM {s}.word")
         for lemma, active in cur.fetchall():
             verdicts[lemma] = "keep" if active else "pruned"   # word overrides rejected_word
@@ -926,7 +972,9 @@ def fetch_wordnik_pronunciations(conn, schema: str = DEFAULT_SCHEMA, only_missin
     no IPA conversion here. Rate-limited (~1 word per several seconds observed on
     the free tier) but that cost is paid once: wordnik_checked_at gates re-fetch,
     so converting to IPA later is a separate, fast, freely-iterable pass that never
-    re-triggers this fetch."""
+    re-triggers this fetch. only_missing also skips inactive words and anything
+    that already has a valid ipa — those wouldn't gain anything from a Wordnik
+    round trip, and at several seconds/word skipping them saves real hours."""
     import time
     from collections import Counter
     from . import deepdef
@@ -935,7 +983,8 @@ def fetch_wordnik_pronunciations(conn, schema: str = DEFAULT_SCHEMA, only_missin
     if not key:
         return {"error": "no WORDNIK_API_KEY in .env"}
 
-    where = f" WHERE wordnik_checked_at IS NULL" if only_missing else ""
+    where = (f" WHERE wordnik_checked_at IS NULL AND active"
+             f" AND (ipa IS NULL OR ipa = '')") if only_missing else ""
     with conn.cursor() as cur:
         cur.execute(f"SELECT id, lemma FROM {s}.word{where}" + (f" LIMIT {int(limit)}" if limit else ""))
         rows = cur.fetchall()
@@ -1032,7 +1081,11 @@ def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None
     Wiktextract dump; (2) Wordnik's raw pronunciation (already fetched by
     `wordnik-pron`), converted via the matching notation converter — direct
     IPA as-is, ARPAbet or AHD respellings through their own deterministic
-    converters (gcide-diacritical has no converter yet, lowest yield, skipped).
+    converters (gcide-diacritical has no converter yet, lowest yield, skipped);
+    (3) the local vocab.wiktionary dump's us_pronunciation column — low yield
+    (it's the same Wiktionary data kaikki's dump already draws from, just a
+    different snapshot, so it only rescues the handful of words where the two
+    dumps disagree) but free, since the DB connection is already open.
     Also NULLs out any existing transcription that fails the English-language
     sanity check (the pre-existing ad hoc scrape occasionally grabbed a
     cross-referenced foreign cognate's IPA instead of the word's own — e.g.
@@ -1041,7 +1094,7 @@ def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None
     candidates, so a re-run after everything's resolved does no dump parsing
     at all and is a no-op."""
     from collections import Counter
-    from . import ahd, arpabet, audio, wiktextract
+    from . import ahd, arpabet, audio, localdict, wiktextract
     s = _safe_schema(schema)
 
     with conn.cursor() as cur:
@@ -1061,6 +1114,7 @@ def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None
     dump_path = dump_path or wiktextract.DEFAULT_DUMP_PATH
     lexicon = wiktextract.build_lexicon(
         dump_path, lemmas, progress_cb=lambda n: print(f"  ...{n} lines scanned"))
+    local_lexicon = localdict.build_lexicon(conn, lemmas)
 
     def wordnik_ipa(raw, rtype):
         if not raw:
@@ -1075,15 +1129,23 @@ def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None
             return None  # gcide-diacritical: no converter yet
         return converted if converted and audio.looks_like_english_ipa(converted) else None
 
+    def local_wiktionary_ipa(lemma):
+        for _pos, _definition, ipa, *_rest in local_lexicon.get(lemma, []):
+            if ipa and audio.looks_like_english_ipa(ipa):
+                return ipa
+        return None
+
     with conn.cursor() as cur:
         for wid, lemma, existing_ipa, wn_raw, wn_type in candidates:
             had_valid_existing = is_valid(existing_ipa)
-            entry = lexicon.get(lemma.strip().lower(), {})
+            lemma_lc = lemma.strip().lower()
+            entry = lexicon.get(lemma_lc, {})
             kaikki_ipa = wiktextract.best_ipa(entry.get("ipa", []))
             if kaikki_ipa and not audio.looks_like_english_ipa(kaikki_ipa):
                 kaikki_ipa = None
-            replacement = kaikki_ipa or wordnik_ipa(wn_raw, wn_type)
-            source = "kaikki" if kaikki_ipa else ("wordnik" if replacement else None)
+            wn_ipa = wordnik_ipa(wn_raw, wn_type)
+            replacement = kaikki_ipa or wn_ipa or local_wiktionary_ipa(lemma_lc)
+            source = "kaikki" if kaikki_ipa else ("wordnik" if wn_ipa else ("local_wiktionary" if replacement else None))
 
             if had_valid_existing and not replacement:
                 dist["already_valid"] += 1  # nothing to do, no change

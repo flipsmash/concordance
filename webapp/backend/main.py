@@ -18,8 +18,9 @@ from pydantic import BaseModel
 
 from concordance import db as cdb
 from concordance import localdict
+from concordance import usas_domains
 from concordance.dictionary import enrich as dictionary_enrich
-from concordance.model import Candidate, normalize_pos
+from concordance.model import Candidate, junk_pos_reason, normalize_pos
 
 app = FastAPI(title="Concordance Review API")
 
@@ -249,6 +250,18 @@ def accept_rejected(rejected_id: int) -> AcceptedResult:
         if not localdict.enrich(cand, localdict.build_lexicon(conn, {lemma.lower()})):
             dictionary_enrich(cand)
 
+        # The dictionary's only resolvable sense for this lemma is a symbol/
+        # proper noun (see model.junk_pos_reason, the same gate ingest and
+        # the refill/deepen backfills apply) — refuse the rescue rather than
+        # silently promoting the exact junk this gate exists to keep out.
+        reason = junk_pos_reason(cand.part_of_speech)
+        if reason:
+            raise HTTPException(
+                status_code=422,
+                detail=f"cannot rescue {lemma!r}: dictionary resolves it as "
+                       f"{normalize_pos(cand.part_of_speech)!r} ({reason.value})",
+            )
+
         cur.execute(
             f"""INSERT INTO {SCHEMA}.word
                 (lemma, as_seen, definition, part_of_speech, ipa, sentence,
@@ -417,6 +430,189 @@ def word_neighbors(
                                    distance=distance, shared_usas_field=shared))
 
     return NeighborsResponse(word=WordSearchResult(id=word_id, lemma=lemma), signal=signal, neighbors=neighbors)
+
+
+class GraphNode(BaseModel):
+    id: int
+    lemma: str
+    definition: str | None
+    part_of_speech: str | None
+    ring: int                   # 0 = center, 1 = first hop, 2 = second hop
+    zipf: float                 # wordfreq.zipf_frequency(lemma, "en") — frontend maps to radius
+    usas_code: str | None       # specific top-level code, e.g. "S" — for tooltip text
+    usas_name: str | None       # specific name, e.g. "SOCIAL ACTIONS..." — for tooltip text
+    color_bucket: str | None    # one of usas_domains.DOMAIN_BUCKETS' keys, or None -> render gray
+
+
+class GraphEdge(BaseModel):
+    source: int
+    target: int
+    distance: float
+
+
+class GraphResponse(BaseModel):
+    center: WordSearchResult
+    signal: str
+    nodes: list[GraphNode]
+    edges: list[GraphEdge]
+
+
+class LegendEntry(BaseModel):
+    bucket: str
+    name: str
+
+
+@app.get("/api/graph/legend", response_model=list[LegendEntry])
+def graph_legend() -> list[LegendEntry]:
+    """The 6 macro-domain buckets a graph node's color can be — independent of
+    any search, so the frontend can show a complete legend immediately (color
+    is never the sole identity carrier; a gray "Uncategorized" swatch is a
+    client-side-only addition, not a real USAS bucket, so it isn't listed here)."""
+    return [LegendEntry(**e) for e in usas_domains.legend_entries()]
+
+
+@app.get("/api/words/{word_id}/graph", response_model=GraphResponse)
+def word_graph(
+    word_id: int,
+    signal: Literal["definition", "fasttext"] = "definition",
+    k1: int = Query(8, ge=3, le=15, description="Center word's direct neighbor count."),
+    k2: int = Query(6, ge=0, le=15, description="Each first-hop node's own neighbor count."),
+    max_nodes: int = Query(70, ge=10, le=90),
+    exclude_synonyms: bool = True,
+) -> GraphResponse:
+    """A multi-hop similarity network around one word: its top-k1 neighbors,
+    then each of those gets its own smaller neighbor set too (cross-links kept
+    as edges, not duplicate nodes), capped at max_nodes so it reads as an
+    actual web rather than a star. Bounded round trips regardless of k1/k2 —
+    one query for the center, one for ring-1, one batched query (a LATERAL
+    join per ring-1 seed) for all of ring-2 at once, one batched USAS lookup
+    over the final node set. Node color is a coarse macro-domain bucket (see
+    usas_domains.py); node size is driven by live wordfreq zipf rather than
+    the sparse word_difficulty.difficulty column, so every node gets a size
+    with no backfill dependency."""
+    vec_col = _SIGNAL_COLUMNS[signal]
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"SELECT lemma, synonyms, definition, part_of_speech FROM {SCHEMA}.word WHERE id = %s AND active",
+            (word_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="word not found")
+        center_lemma, synonyms, center_definition, center_pos = row
+
+        cur.execute(
+            f"SELECT 1 FROM {SCHEMA}.word_embedding WHERE word_id = %s AND {vec_col} IS NOT NULL",
+            (word_id,),
+        )
+        if cur.fetchone() is None:
+            raise HTTPException(status_code=404, detail=f"no {signal} embedding for this word yet")
+
+        # --- ring 1: center's own top-k1 neighbors (same shape as /neighbors) ---
+        filters = [f"e2.{vec_col} IS NOT NULL", "w2.active", "w2.id != %s"]
+        params: list = [word_id]
+        if exclude_synonyms and synonyms:
+            filters.append("NOT (lower(w2.lemma) = ANY(%s))")
+            params.append([s.lower() for s in synonyms])
+        where = " AND ".join(filters)
+
+        cur.execute(
+            f"""SELECT w2.id, w2.lemma, w2.definition, w2.part_of_speech,
+                       e2.{vec_col} <=> (SELECT {vec_col} FROM {SCHEMA}.word_embedding WHERE word_id = %s) AS distance
+                FROM {SCHEMA}.word_embedding e2
+                JOIN {SCHEMA}.word w2 ON w2.id = e2.word_id
+                WHERE {where}
+                ORDER BY distance
+                LIMIT %s""",
+            (word_id, *params, k1),
+        )
+        ring1_rows = cur.fetchall()
+
+        # --- ring 2: one batched query, a LATERAL per ring-1 seed, no vector
+        # values ever leave Postgres (each seed's own vector is looked up via
+        # a join on its word_id, not passed in from Python) ---
+        ring2_rows = []
+        seed_ids = [r[0] for r in ring1_rows]
+        if k2 and seed_ids:
+            cur.execute(
+                f"""SELECT seed.word_id AS seed_id, nb.id, nb.lemma, nb.definition, nb.part_of_speech, nb.distance
+                    FROM unnest(%s::int[]) AS seed(word_id)
+                    JOIN {SCHEMA}.word_embedding e1 ON e1.word_id = seed.word_id
+                    CROSS JOIN LATERAL (
+                        SELECT w2.id, w2.lemma, w2.definition, w2.part_of_speech,
+                               e2.{vec_col} <=> e1.{vec_col} AS distance
+                        FROM {SCHEMA}.word_embedding e2
+                        JOIN {SCHEMA}.word w2 ON w2.id = e2.word_id
+                        WHERE e2.{vec_col} IS NOT NULL AND w2.active
+                          AND w2.id != seed.word_id AND w2.id != %s
+                        ORDER BY e2.{vec_col} <=> e1.{vec_col}
+                        LIMIT %s
+                    ) nb""",
+                (seed_ids, word_id, k2),
+            )
+            ring2_rows = cur.fetchall()
+
+        # --- dedup nodes/edges in Python; first-seen ring wins ---
+        nodes: dict[int, dict] = {word_id: {"id": word_id, "lemma": center_lemma, "definition": center_definition,
+                                             "part_of_speech": center_pos, "ring": 0}}
+        edges: dict[tuple[int, int], float] = {}
+
+        def add_edge(a: int, b: int, distance: float) -> None:
+            key = (a, b) if a < b else (b, a)
+            if key not in edges or distance < edges[key]:
+                edges[key] = distance
+
+        for wid, wlemma, definition, pos_, distance in ring1_rows:
+            nodes.setdefault(wid, {"id": wid, "lemma": wlemma, "definition": definition,
+                                    "part_of_speech": pos_, "ring": 1})
+            add_edge(word_id, wid, distance)
+
+        # ring-2-only additions get trimmed first if we're over budget — sort
+        # globally by distance so the closest second-hop words survive.
+        ring2_new = [r for r in ring2_rows if r[1] not in nodes]
+        ring2_new.sort(key=lambda r: r[5])
+        budget_left = max_nodes - len(nodes)
+        keep_ids = {r[1] for r in ring2_new[: max(budget_left, 0)]}
+
+        for seed_id, wid, wlemma, definition, pos_, distance in ring2_rows:
+            if wid in nodes:
+                add_edge(seed_id, wid, distance)  # cross-link to an existing node, no new node
+            elif wid in keep_ids:
+                nodes.setdefault(wid, {"id": wid, "lemma": wlemma, "definition": definition,
+                                        "part_of_speech": pos_, "ring": 2})
+                add_edge(seed_id, wid, distance)
+
+        # --- batched USAS lookup: one top-level field per node (unlike
+        # /neighbors, which aggregates every field a word has for shared-domain
+        # explainability, a single node color needs exactly one pick) ---
+        node_ids = list(nodes.keys())
+        usas_by_word: dict[int, tuple[str, str]] = {}
+        if node_ids:
+            cur.execute(
+                f"""SELECT DISTINCT ON (wc.word_id) wc.word_id, left(c.code, 1), c.name
+                    FROM {SCHEMA}.word_category wc
+                    JOIN {SCHEMA}.category c ON c.id = wc.category_id
+                    WHERE wc.word_id = ANY(%s)
+                    ORDER BY wc.word_id, wc.is_primary DESC, wc.confidence DESC NULLS LAST, c.code ASC""",
+                (node_ids,),
+            )
+            usas_by_word = {wid: (code, name) for wid, code, name in cur.fetchall()}
+
+    from wordfreq import zipf_frequency
+
+    result_nodes = []
+    for wid, n in nodes.items():
+        code, name = usas_by_word.get(wid, (None, None))
+        result_nodes.append(GraphNode(
+            id=wid, lemma=n["lemma"], definition=n["definition"], part_of_speech=n["part_of_speech"],
+            ring=n["ring"], zipf=zipf_frequency(n["lemma"], "en"),
+            usas_code=code, usas_name=name, color_bucket=usas_domains.bucket_for(code),
+        ))
+    result_edges = [GraphEdge(source=a, target=b, distance=d) for (a, b), d in edges.items()]
+
+    return GraphResponse(center=WordSearchResult(id=word_id, lemma=center_lemma), signal=signal,
+                          nodes=result_nodes, edges=result_edges)
 
 
 # Serves the built frontend (webapp/frontend/dist, from `npm run build`) so a

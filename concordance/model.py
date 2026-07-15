@@ -108,3 +108,28 @@ def normalize_pos(pos: str | None) -> str:
         return ""
     key = pos.strip().lower()
     return _POS_ALIASES.get(key, key)
+
+
+# Categories a dictionary lookup can resolve a candidate to that are never
+# real vocabulary for this project's purposes, regardless of what earlier
+# pipeline stages decided — a "symbol" hit (ISO language codes, roman-numeral
+# alt-case-form pages) or "proper noun" hit (the dictionary itself confirming
+# a leaked name) is grounds to cast the word out. This is the single choke
+# point for that check: every code path that acts on an enrichment-resolved
+# POS (initial ingest, the refill/deepen backfills, and the webapp's rescue
+# endpoint) should call `junk_pos_reason`/`is_junk_pos` rather than
+# reimplementing the category list.
+JUNK_POS_REASON: dict[str, RejectReason] = {
+    "symbol": RejectReason.NUMERIC_OR_SYMBOL,
+    "proper noun": RejectReason.PROPER_NOUN,
+}
+
+
+def is_junk_pos(pos: str | None) -> bool:
+    return normalize_pos(pos) in JUNK_POS_REASON
+
+
+def junk_pos_reason(pos: str | None) -> RejectReason | None:
+    """The RejectReason to use if `pos` (any spelling/case) is never real
+    vocabulary here, else None."""
+    return JUNK_POS_REASON.get(normalize_pos(pos))

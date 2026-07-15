@@ -430,7 +430,8 @@ def refill(
         stats = db.refill_definitions(conn, schema, limit=limit)
     conn.close()
     console.print(f"[green]✓[/green] refill: [bold]{stats['filled']}[/bold]/{stats['attempted']} "
-                  f"filled ({stats['still_missing']} still undefined)")
+                  f"filled ({stats['still_missing']} still undefined, "
+                  f"{stats.get('cast_out', 0)} cast out as symbol/proper-noun-only)")
 
 
 @app.command()
@@ -458,7 +459,8 @@ def deepen(
                                       model_path=str(model) if model else None, limit=limit)
     conn.close()
     console.print(f"[green]✓[/green] deepen: [bold]{stats['defined']}[/bold]/{stats['attempted']} "
-                  f"defined ({stats['still_undefined']} scored for validity, still undefined)")
+                  f"defined ({stats['still_undefined']} scored for validity, still undefined, "
+                  f"{stats.get('cast_out', 0)} cast out as symbol/proper-noun-only)")
 
 
 _FASTTEXT_MODEL_PATH = Path("models/fasttext_corpus.bin")
@@ -603,15 +605,191 @@ def ipa(
     except FileNotFoundError as exc:
         console.print(f"[red]✗[/red] {exc}"); raise typer.Exit(code=1)
     conn.close()
-    backfilled = stats.get("backfilled_kaikki", 0) + stats.get("backfilled_wordnik", 0)
-    corrected = stats.get("corrected_kaikki", 0) + stats.get("corrected_wordnik", 0)
+    backfilled = (stats.get("backfilled_kaikki", 0) + stats.get("backfilled_wordnik", 0)
+                  + stats.get("backfilled_local_wiktionary", 0))
+    corrected = (stats.get("corrected_kaikki", 0) + stats.get("corrected_wordnik", 0)
+                 + stats.get("corrected_local_wiktionary", 0))
     console.print(f"[green]✓[/green] ipa: {stats.get('total',0)} words — "
                   f"[bold]{stats.get('already_valid',0)}[/bold] already valid, "
                   f"{backfilled} backfilled ({stats.get('backfilled_kaikki',0)} kaikki, "
-                  f"{stats.get('backfilled_wordnik',0)} wordnik), "
+                  f"{stats.get('backfilled_wordnik',0)} wordnik, "
+                  f"{stats.get('backfilled_local_wiktionary',0)} local wiktionary), "
                   f"{corrected} corrected, "
                   f"{stats.get('cleared_no_replacement',0)} cleared (no valid source found), "
                   f"{stats.get('unresolved',0)} still unresolved")
+
+
+@app.command()
+def maintain(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    model: Optional[Path] = typer.Option(None, "--model", "-m",
+                                          help="Model for classify/quizdef/deepen --web (defaults to the 14B)."),
+    dump_path: str = typer.Option(None, "--dump-path", help="Path to the kaikki Wiktextract dump "
+                                   "(default: data/wiktextract-en.jsonl.gz)."),
+    fasttext_model: Path = typer.Option(_FASTTEXT_MODEL_PATH, "--fasttext-model",
+                                         help="Trained model from train-fasttext, for the embed step."),
+    deepen_web: bool = typer.Option(False, "--deepen-web",
+                                     help="Let the deepen step fall back to web-search + LLM extraction."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of words processed, per step (0 = all)."),
+    skip_refill: bool = typer.Option(False, "--skip-refill"),
+    skip_deepen: bool = typer.Option(False, "--skip-deepen"),
+    skip_classify: bool = typer.Option(False, "--skip-classify"),
+    skip_normalize_pos: bool = typer.Option(False, "--skip-normalize-pos"),
+    skip_ngram: bool = typer.Option(False, "--skip-ngram"),
+    skip_archaic: bool = typer.Option(False, "--skip-archaic"),
+    skip_difficulty: bool = typer.Option(False, "--skip-difficulty"),
+    skip_quizdef: bool = typer.Option(False, "--skip-quizdef"),
+    skip_quizzable: bool = typer.Option(False, "--skip-quizzable"),
+    skip_wordnik: bool = typer.Option(False, "--skip-wordnik", help="Skip the wordnik-pron fetch step."),
+    skip_ipa: bool = typer.Option(False, "--skip-ipa", help="Skip the ipa backfill step."),
+    skip_embed: bool = typer.Option(False, "--skip-embed"),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Run the full post-ingest maintenance chain in dependency order: refill
+    -> deepen -> classify -> normalize-pos -> ngram -> archaic -> difficulty ->
+    quizdef -> quizzable -> wordnik-pron -> ipa -> embed. This is the whole
+    documented sequence from the README's "Backfilling definitions" /
+    "Enrichment & scoring" / "Pronunciation audio" / "Semantic distance"
+    sections, chained into one command instead of twelve to remember and
+    re-order by hand. `load-taxonomy` and `train-fasttext` are deliberately
+    excluded — both are one-time/occasional holistic setup, not per-batch
+    maintenance (see their own docstrings); Commons/Azure audio steps stay
+    separate too, since Commons rate-limits hard and is meant to run for hours
+    unattended on its own.
+
+    Every step runs incrementally (only-missing / blank-only / not-refetch),
+    including forcing classify's only_missing (its own default is False) — so
+    a re-run after everything's caught up is fast. The FIRST run against a
+    corpus with a real backlog is not: classify and quizdef load a local LLM
+    and call it per word, so catching up ~19k words there is the dominant
+    cost, likely hours. That cost is paid once; every later run only touches
+    the new batch's words. Use the --skip-* flags to defer the slow steps to
+    run separately/overnight instead."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    cfg = Config()
+    if model:
+        cfg.model_path = str(model)
+
+    if not skip_refill:
+        with console.status("[bold]Backfilling definitions (refill)…"):
+            stats = db.refill_definitions(conn, schema, limit=limit)
+        console.print(f"[green]✓[/green] refill: [bold]{stats['filled']}[/bold]/{stats['attempted']} "
+                      f"filled ({stats['still_missing']} still undefined, "
+                      f"{stats.get('cast_out', 0)} cast out as symbol/proper-noun-only)")
+    else:
+        console.print("[dim]refill skipped.[/dim]")
+
+    if not skip_deepen:
+        with console.status("[bold]Resolving the undefined tail (deepen)…"):
+            stats = db.deepen_definitions(conn, schema, use_web=deepen_web,
+                                          model_path=str(model) if model else None, limit=limit)
+        console.print(f"[green]✓[/green] deepen: [bold]{stats['defined']}[/bold]/{stats['attempted']} "
+                      f"defined ({stats['still_undefined']} scored for validity, still undefined, "
+                      f"{stats.get('cast_out', 0)} cast out as symbol/proper-noun-only)")
+    else:
+        console.print("[dim]deepen skipped.[/dim]")
+
+    if not skip_classify:
+        from .classify import classify_and_store
+        with console.status("[bold]Classifying USAS domains…"):
+            stats = classify_and_store(conn, schema, cfg, limit, only_missing=True, batch=None)
+        console.print(f"[green]✓[/green] classify: [bold]{stats['classified']}[/bold]/{stats['words']} words "
+                      f"-> {stats['assignments']} category assignments")
+    else:
+        console.print("[dim]classify skipped.[/dim]")
+
+    if not skip_normalize_pos:
+        stats = db.normalize_word_pos(conn, schema)
+        console.print(f"[green]✓[/green] normalize-pos: [bold]{stats['changed']}[/bold]/{stats['words']} words updated")
+    else:
+        console.print("[dim]normalize-pos skipped.[/dim]")
+
+    if not skip_ngram:
+        stats = db.fetch_ngrams(conn, schema, only_missing=True, limit=limit)
+        console.print(f"[green]✓[/green] ngram: fetched [bold]{stats['fetched']}[/bold]/{stats['words']} "
+                      f"({stats['in_corpus']} in corpus, {stats['failed']} failed)")
+    else:
+        console.print("[dim]ngram skipped.[/dim]")
+
+    if not skip_archaic:
+        dist = db.compute_archaic(conn, schema)
+        total = sum(dist.values())
+        parts = ", ".join(f"{k} {v}" for k, v in sorted(dist.items()))
+        console.print(f"[green]✓[/green] archaic flags set on [bold]{total}[/bold] words — {parts}")
+    else:
+        console.print("[dim]archaic skipped.[/dim]")
+
+    if not skip_difficulty:
+        stats = db.compute_difficulty(conn, schema)
+        console.print(f"[green]✓[/green] difficulty set on [bold]{stats['words']}[/bold] words "
+                      f"(mean {stats['mean']}, median {stats['median']})")
+    else:
+        console.print("[dim]difficulty skipped.[/dim]")
+
+    if not skip_quizdef:
+        with console.status("[bold]Building quiz-safe definitions…"):
+            stats = db.compute_quiz_definitions(conn, schema, cfg, only_missing=True, limit=limit)
+        console.print(f"[green]✓[/green] quiz defs: [bold]{stats['words']}[/bold] words "
+                      f"({stats['clean']} clean, {stats['rewritten']} rewritten, {stats['redacted']} redacted)")
+    else:
+        console.print("[dim]quizdef skipped.[/dim]")
+
+    if not skip_quizzable:
+        dist = db.compute_quizzable(conn, schema)
+        console.print(f"[green]✓[/green] quizzable: [bold]{dist.get('quizzable',0)}[/bold] quizzable, "
+                      f"{dist.get('excluded',0)} excluded")
+    else:
+        console.print("[dim]quizzable skipped.[/dim]")
+
+    if not skip_wordnik:
+        stats = db.fetch_wordnik_pronunciations(conn, schema, only_missing=True, limit=limit)
+        if "error" in stats:
+            console.print(f"[red]✗[/red] wordnik-pron: {stats['error']}")
+        else:
+            console.print(f"[green]✓[/green] wordnik-pron: [bold]{stats.get('words',0)}[/bold] checked — " +
+                          ", ".join(f"{v} {k}" for k, v in stats.items() if k != "words"))
+    else:
+        console.print("[dim]wordnik-pron skipped.[/dim]")
+
+    if not skip_ipa:
+        try:
+            stats = db.compute_ipa(conn, schema, dump_path=dump_path, only_missing=True, limit=limit)
+        except FileNotFoundError as exc:
+            console.print(f"[red]✗[/red] ipa: {exc}")
+        else:
+            backfilled = (stats.get("backfilled_kaikki", 0) + stats.get("backfilled_wordnik", 0)
+                          + stats.get("backfilled_local_wiktionary", 0))
+            corrected = (stats.get("corrected_kaikki", 0) + stats.get("corrected_wordnik", 0)
+                         + stats.get("corrected_local_wiktionary", 0))
+            console.print(f"[green]✓[/green] ipa: {stats.get('total',0)} words — "
+                          f"[bold]{stats.get('already_valid',0)}[/bold] already valid, "
+                          f"{backfilled} backfilled, {corrected} corrected, "
+                          f"{stats.get('cleared_no_replacement',0)} cleared (no valid source found), "
+                          f"{stats.get('unresolved',0)} still unresolved")
+    else:
+        console.print("[dim]ipa skipped.[/dim]")
+
+    if not skip_embed:
+        with console.status("[bold]Embedding definitions…"):
+            stats = db.compute_definition_embeddings(conn, schema, only_missing=True, limit=limit)
+        console.print(f"[green]✓[/green] definition embed: [bold]{stats['embedded']}[/bold]/{stats['words']} "
+                      f"embedded ({stats['skipped_no_text']} skipped, no text)")
+        if fasttext_model.exists():
+            with console.status("[bold]Embedding word forms (FastText)…"):
+                stats = db.compute_fasttext_embeddings(conn, schema, model_path=str(fasttext_model),
+                                                       only_missing=True, limit=limit)
+            console.print(f"[green]✓[/green] fasttext embed: [bold]{stats['embedded']}[/bold]/{stats['words']} embedded")
+        else:
+            console.print(f"[dim]fasttext embed skipped — {fasttext_model} not found "
+                          "(run `concordance train-fasttext` first).[/dim]")
+    else:
+        console.print("[dim]embed skipped.[/dim]")
+
+    conn.close()
 
 
 @app.command()
