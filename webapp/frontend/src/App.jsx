@@ -1,7 +1,11 @@
-import { useState } from 'react'
+import { Suspense, lazy, useState } from 'react'
 import './App.css'
 import AcceptedView from './AcceptedView'
 import RejectedView from './RejectedView'
+
+// Lazy-loaded: pulls in react-force-graph-2d's canvas/d3-force bundle only
+// when the Graph tab is actually opened, so Accepted/Rejected stay unaffected.
+const GraphView = lazy(() => import('./GraphView'))
 
 function App() {
   const [tab, setTab] = useState('accepted')
@@ -25,10 +29,23 @@ function App() {
           >
             Rejected
           </button>
+          <button
+            type="button"
+            className={tab === 'graph' ? 'tab active' : 'tab'}
+            onClick={() => setTab('graph')}
+          >
+            Graph
+          </button>
         </div>
       </header>
 
-      {tab === 'accepted' ? <AcceptedView /> : <RejectedView />}
+      {tab === 'accepted' && <AcceptedView />}
+      {tab === 'rejected' && <RejectedView />}
+      {tab === 'graph' && (
+        <Suspense fallback={<div>Loading…</div>}>
+          <GraphView />
+        </Suspense>
+      )}
     </div>
   )
 }
