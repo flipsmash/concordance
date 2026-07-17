@@ -649,10 +649,16 @@ def deepen_definitions(conn, schema: str = DEFAULT_SCHEMA, use_web: bool = False
                         WHERE id=%s""",
                     (est.label, est.score, est.notes, est.suggestion or None, wid))
                 stats["still_undefined"] += 1
-            if i % 200 == 0:
-                conn.commit()
+            # Committed every word, not batched every 200: each iteration's
+            # slow network call (Wordnik/yourdictionary, rate-limited) can
+            # itself take longer than the whole old batch interval, so a
+            # 200-row batch left one transaction open for tens of minutes at
+            # a time -- long enough to block a webapp restart's schema-check
+            # ALTER TABLE, which needs an ACCESS EXCLUSIVE lock on this same
+            # table and would otherwise queue behind it. Per-word commits cap
+            # any held lock at one row's write.
+            conn.commit()
             time.sleep(delay)
-    conn.commit()
     return stats
 
 
