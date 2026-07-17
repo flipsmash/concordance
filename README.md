@@ -179,26 +179,32 @@ concordance quizzable       # flag variant/inferable-derivative words as unquizz
   base form is grammatical (plurals, inflections) or a transparently inferable
   derivative, so quizzing doesn't waste a card on something not actually new.
 
-### Pronunciation audio (`wordnik-pron`, `ipa`, `commons-search`, `commons-download`, `audio`, `audio-guess`)
+### Pronunciation audio (`maintain`, `wordnik-pron`, `ipa`, `commons-search`, `commons-download`, `audio`, `audio-guess`)
 
 Real human recordings where they exist, IPA-guided synthesis otherwise —
 never a blind spelling-to-speech guess unless nothing else is available:
 
 ```bash
+concordance maintain          # wordnik-pron + ipa in one pass — run after every ingest batch
 concordance wordnik-pron      # fetch raw Wordnik transcriptions (ARPAbet/AHD-5/IPA)
-concordance ipa               # backfill+validate word.ipa from kaikki, then Wordnik
+concordance ipa               # backfill+validate word.ipa from kaikki, then Wordnik, then local Wiktionary
 concordance commons-search    # find real Commons recordings kaikki's dump missed
 concordance commons-download  # download the recordings commons-search confirmed
 concordance audio             # Commons recording if present, else Azure IPA-guided TTS
 concordance audio-guess       # last resort: Azure guesses from spelling alone
 ```
 
-Run `ipa` before `audio` — synthesis quality depends on the transcription it's
-given. `commons-search`/`commons-download`/`audio` are deliberately separate
-commands rather than one pass: Commons rate-limits hard and is meant to run for
-hours unattended, which would starve the fast Azure calls if interleaved.
-`audio-guess` results are tagged `source='azure_guess'` (vs. `'azure'` for
-IPA-guided) so the app can flag them as unverified.
+`maintain` exists because `wordnik-pron` and `ipa` can't be folded into `ingest`
+itself: `wordnik-pron` is rate-limited (~1 word/several seconds on the free
+tier) and `ipa`'s primary source is a 2.7GB dump scan, so both stay batch
+passes rather than per-word ingest-time lookups — `maintain` is what makes
+running them after a batch a habit instead of something to remember. Run it
+(or at least `ipa`) before `audio` — synthesis quality depends on the
+transcription it's given. `commons-search`/`commons-download`/`audio` are
+deliberately separate commands rather than one pass: Commons rate-limits hard
+and is meant to run for hours unattended, which would starve the fast Azure
+calls if interleaved. `audio-guess` results are tagged `source='azure_guess'`
+(vs. `'azure'` for IPA-guided) so the app can flag them as unverified.
 
 ## Semantic distance (`train-fasttext`, `embed`)
 
@@ -345,10 +351,24 @@ systemctl --user restart concordance-web.service
 Useful commands: `systemctl --user status concordance-web concordance-tunnel`,
 `journalctl --user -u concordance-web -u concordance-tunnel -f`.
 
+**If `systemctl --user` fails with "Failed to connect to bus":** WSLg mounts
+its own tmpfs (for `wayland-0`/`pulse` sharing) directly on top of
+`/run/user/1000` at some point during/after boot, hiding the real per-user
+runtime dir that already has the D-Bus session socket bound into it — the
+socket is still alive at the kernel level, just unreachable by path. A
+system-level watcher unit, `fix-run-user-runtime-dir.service` (installed at
+`/etc/systemd/system/`, script at `/usr/local/sbin/fix-run-user-runtime-dir.sh`,
+enabled for boot), polls every 15s and unmounts just the `/run/user/1000`
+shadow layer whenever it appears — `/mnt/wslg/run/user/1000` is left alone so
+WSLg itself keeps working. Neither file lives in this repo (machine-specific,
+like the tunnel config). Check it's running with `systemctl status
+fix-run-user-runtime-dir.service`.
+
 ## Status
 
-Every stage is real and runs end-to-end; the LLM judge is wired but stubbed
-until you supply a `.gguf`. Beyond the base extract → judge → enrich pipeline:
+Every stage is real and runs end-to-end; the LLM judge is live, running the
+14B model against every ingest (not the no-model stub — see the fallback
+note above). Beyond the base extract → judge → enrich pipeline:
 a cross-book verdict cache, a public review webapp, USAS domain tagging, an
 ex-ante difficulty scalar, quiz-safe definitions + a quizzable flag, a
 pronunciation-audio pipeline (real recordings first, IPA-guided synthesis
