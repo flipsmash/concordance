@@ -865,5 +865,45 @@ def audio_guess(
                   f"{stats.get('candidates',0)} synthesized (unverified), {stats.get('failed',0)} failed")
 
 
+@app.command("create-admin")
+def create_admin(
+    username: str = typer.Argument(..., help="Login username for the new admin account."),
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """One-off: seed an admin-flagged users row for the webapp's own login (separate
+    from Cloudflare Access). Prompts for a password via getpass, never as an argument
+    — passing it on the command line would land it in shell history."""
+    import getpass
+
+    from webapp.backend import auth
+
+    password = getpass.getpass("Password: ")
+    if len(password) < 8:
+        console.print("[red]✗[/red] password must be at least 8 characters"); raise typer.Exit(code=1)
+    if password != getpass.getpass("Confirm password: "):
+        console.print("[red]✗[/red] passwords didn't match"); raise typer.Exit(code=1)
+
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    s = db._safe_schema(schema)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO {s}.users (username, password_hash, is_admin) VALUES (%s,%s,true)",
+                (username, auth.hash_password(password)),
+            )
+        conn.commit()
+    except psycopg.errors.UniqueViolation:
+        conn.rollback()
+        console.print(f"[red]✗[/red] username {username!r} already exists"); raise typer.Exit(code=1)
+    finally:
+        conn.close()
+    console.print(f"[green]✓[/green] admin account [bold]{username}[/bold] created")
+
+
 if __name__ == "__main__":
     app()

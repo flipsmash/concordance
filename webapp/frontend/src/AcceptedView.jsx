@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
+import InviteButton from './InviteButton'
 import { usePagedTable } from './usePagedTable'
 
 const API_BASE = ''
@@ -64,6 +66,7 @@ function AcceptedView() {
         <span className="count">
           {total.toLocaleString()} active term{total === 1 ? '' : 's'}
         </span>
+        <InviteButton />
       </div>
 
       {error && <div className="error-banner">{error}</div>}
@@ -85,7 +88,7 @@ function AcceptedView() {
             {items.map((w) => (
               <tr key={w.id}>
                 <td className="lemma">
-                  {w.lemma}
+                  <Link to={`/words/${w.id}`}>{w.lemma}</Link>
                   {w.rescued_from_reject && (
                     <span className="rescued-badge" title="Added back from the Rejected tab">
                       rescued

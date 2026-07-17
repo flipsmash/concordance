@@ -8,19 +8,26 @@ later feature (quizzing, stats) just needs to filter on active=true.
 
 from __future__ import annotations
 
+import secrets
 from contextlib import contextmanager
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.responses import Response
+from starlette.types import Scope
 
 from concordance import db as cdb
 from concordance import localdict
 from concordance import usas_domains
 from concordance.dictionary import enrich as dictionary_enrich
 from concordance.model import Candidate, junk_pos_reason, normalize_pos
+from webapp.backend import auth
 
 app = FastAPI(title="Concordance Review API")
 
@@ -42,10 +49,176 @@ def get_conn():
         conn.close()
 
 
+# --- auth dependencies -------------------------------------------------------
+# require_viewer/require_admin both accept EITHER an app session or a verified
+# Cloudflare Access JWT -- an app session is the reliable mechanism for the
+# admin's own browser (Brian logs in once; see the plan's "Admin auth model"),
+# while CF Access verification lets an Access-authenticated request through
+# even with no app session, so the existing admin UI keeps working with zero
+# new login step for paths Cloudflare Access still gates.
+
+def get_current_user(request: Request) -> dict | None:
+    token = request.cookies.get(auth.SESSION_COOKIE_NAME)
+    if not token:
+        return None
+    with get_conn() as conn:
+        return auth.get_session_user(conn, SCHEMA, token)
+
+
+def require_user(user: dict | None = Depends(get_current_user)) -> dict:
+    if user is None:
+        raise HTTPException(status_code=401, detail="login required")
+    return user
+
+
+def require_viewer(request: Request, user: dict | None = Depends(get_current_user)) -> dict:
+    if user is not None:
+        return user
+    if auth.verify_cf_access(request) is not None:
+        return {"id": None, "username": None, "is_admin": False}
+    raise HTTPException(status_code=401, detail="login required")
+
+
+def require_admin(request: Request, user: dict | None = Depends(get_current_user)) -> dict:
+    if user is not None and user["is_admin"]:
+        return user
+    if auth.verify_cf_access(request) is not None:
+        return {"id": None, "username": None, "is_admin": True}
+    raise HTTPException(status_code=403, detail="admin access required")
+
+
 @app.on_event("startup")
 def on_startup() -> None:
     with get_conn() as conn:
         cdb.apply_schema(conn, SCHEMA)
+
+
+class UserOut(BaseModel):
+    id: int | None
+    username: str | None
+    is_admin: bool
+
+
+class MeResponse(BaseModel):
+    user: UserOut | None
+
+
+class RegisterRequest(BaseModel):
+    token: str
+    username: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+def _set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        auth.SESSION_COOKIE_NAME, token, httponly=True, secure=True, samesite="lax",
+        max_age=int(auth.SESSION_LIFETIME.total_seconds()), path="/",
+    )
+
+
+@app.post("/api/auth/register", response_model=MeResponse)
+def register(body: RegisterRequest, response: Response) -> MeResponse:
+    """Consumes a one-time invite token (see /api/admin/invites) and creates a
+    non-admin account. No email verification -- there's no email sending in
+    this app -- so the invite token itself is the only gate on who can sign up."""
+    if len(body.password) < 8:
+        raise HTTPException(status_code=400, detail="password must be at least 8 characters")
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT id FROM {SCHEMA}.invite_tokens
+                WHERE token = %s AND used_at IS NULL AND expires_at > now()""",
+            (body.token,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=400, detail="invite link is invalid or expired")
+        invite_id = row[0]
+
+        cur.execute(f"SELECT 1 FROM {SCHEMA}.users WHERE username_lc = lower(%s)", (body.username,))
+        if cur.fetchone() is not None:
+            raise HTTPException(status_code=409, detail="username taken")
+
+        cur.execute(
+            f"INSERT INTO {SCHEMA}.users (username, password_hash) VALUES (%s,%s) RETURNING id",
+            (body.username, auth.hash_password(body.password)),
+        )
+        user_id = cur.fetchone()[0]
+        cur.execute(
+            f"UPDATE {SCHEMA}.invite_tokens SET used_at = now(), used_by_user_id = %s WHERE id = %s",
+            (user_id, invite_id),
+        )
+        conn.commit()
+
+        token, _ = auth.create_session(conn, SCHEMA, user_id)
+
+    _set_session_cookie(response, token)
+    return MeResponse(user=UserOut(id=user_id, username=body.username, is_admin=False))
+
+
+@app.post("/api/auth/login", response_model=MeResponse)
+def login(body: LoginRequest, response: Response) -> MeResponse:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"SELECT id, username, password_hash, is_admin FROM {SCHEMA}.users WHERE username_lc = lower(%s)",
+            (body.username,),
+        )
+        row = cur.fetchone()
+        # Generic failure message either way -- don't reveal whether the
+        # username exists.
+        if row is None or not auth.verify_password(body.password, row[2]):
+            raise HTTPException(status_code=401, detail="invalid username or password")
+        user_id, username, _, is_admin = row
+
+        cur.execute(f"UPDATE {SCHEMA}.users SET last_login_at = now() WHERE id = %s", (user_id,))
+        conn.commit()
+        token, _ = auth.create_session(conn, SCHEMA, user_id)
+
+    _set_session_cookie(response, token)
+    return MeResponse(user=UserOut(id=user_id, username=username, is_admin=is_admin))
+
+
+@app.post("/api/auth/logout", status_code=204)
+def logout(request: Request, response: Response, _: dict = Depends(require_viewer)) -> None:
+    token = request.cookies.get(auth.SESSION_COOKIE_NAME)
+    if token:
+        with get_conn() as conn:
+            auth.destroy_session(conn, SCHEMA, token)
+    response.delete_cookie(auth.SESSION_COOKIE_NAME, path="/")
+
+
+@app.get("/api/auth/me", response_model=MeResponse)
+def me(user: dict | None = Depends(get_current_user)) -> MeResponse:
+    return MeResponse(user=UserOut(**user) if user else None)
+
+
+class InviteRequest(BaseModel):
+    label: str | None = None
+    expires_in_days: int = 7
+
+
+class InviteResponse(BaseModel):
+    token: str
+    expires_at: datetime
+    register_path: str
+
+
+@app.post("/api/admin/invites", response_model=InviteResponse)
+def create_invite(body: InviteRequest, _: dict = Depends(require_admin)) -> InviteResponse:
+    token = secrets.token_urlsafe(24)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=body.expires_in_days)
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"INSERT INTO {SCHEMA}.invite_tokens (token, label, expires_at) VALUES (%s,%s,%s)",
+            (token, body.label, expires_at),
+        )
+        conn.commit()
+    return InviteResponse(token=token, expires_at=expires_at, register_path=f"/register?token={token}")
 
 
 class WordRow(BaseModel):
@@ -71,6 +244,7 @@ def list_words(
     sort: Literal["lemma", "part_of_speech", "definition", "difficulty"] = "difficulty",
     dir: Literal["asc", "desc"] = "asc",
     pos: str | None = None,
+    _: dict = Depends(require_admin),
 ) -> WordPage:
     order_col = SORT_COLUMNS[sort]
     order_dir = "ASC" if dir == "asc" else "DESC"
@@ -102,7 +276,7 @@ def list_words(
 
 
 @app.get("/api/pos-values", response_model=list[str])
-def pos_values() -> list[str]:
+def pos_values(_: dict = Depends(require_admin)) -> list[str]:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             f"""SELECT DISTINCT w.part_of_speech FROM {SCHEMA}.word w
@@ -113,7 +287,7 @@ def pos_values() -> list[str]:
 
 
 @app.delete("/api/words/{word_id}", status_code=204)
-def prune_word(word_id: int) -> None:
+def prune_word(word_id: int, _: dict = Depends(require_admin)) -> None:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             f"UPDATE {SCHEMA}.word SET active = false, updated_at = now() WHERE id = %s",
@@ -158,6 +332,7 @@ def list_rejected(
     dir: Literal["asc", "desc"] = "desc",
     book: list[str] = Query([]),
     reason: list[str] = Query([]),
+    _: dict = Depends(require_admin),
 ) -> RejectedPage:
     order_col = REJECTED_SORT_COLUMNS[sort]
     order_dir = "ASC" if dir == "asc" else "DESC"
@@ -200,7 +375,7 @@ def list_rejected(
 
 
 @app.get("/api/rejected/reasons", response_model=list[str])
-def rejected_reasons() -> list[str]:
+def rejected_reasons(_: dict = Depends(require_admin)) -> list[str]:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             f"""SELECT DISTINCT r.reason FROM {SCHEMA}.rejected_word r
@@ -210,7 +385,7 @@ def rejected_reasons() -> list[str]:
 
 
 @app.get("/api/rejected/books", response_model=list[str])
-def rejected_books() -> list[str]:
+def rejected_books(_: dict = Depends(require_admin)) -> list[str]:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             f"""SELECT DISTINCT b.title FROM {SCHEMA}.rejected_word r
@@ -227,7 +402,7 @@ class AcceptedResult(BaseModel):
 
 
 @app.post("/api/rejected/{rejected_id}/accept", response_model=AcceptedResult)
-def accept_rejected(rejected_id: int) -> AcceptedResult:
+def accept_rejected(rejected_id: int, _: dict = Depends(require_admin)) -> AcceptedResult:
     """Move a rejected candidate into the accepted word list, as a fully-formed
     incoming term rather than a bare stub: reuses whatever tagger POS/surface
     form/sentence/chapter context the pipeline captured at reject time (so
@@ -302,7 +477,10 @@ class WordSearchResult(BaseModel):
 
 
 @app.get("/api/words/search", response_model=list[WordSearchResult])
-def search_words(q: str = Query(..., min_length=1), limit: int = Query(20, ge=1, le=50)) -> list[WordSearchResult]:
+def search_words(
+    q: str = Query(..., min_length=1), limit: int = Query(20, ge=1, le=50),
+    _: dict = Depends(require_viewer),
+) -> list[WordSearchResult]:
     """Trigram-similarity lemma search (pg_trgm, already indexed) — the word
     picker for exploring the semantic-distance neighbors of a chosen word."""
     with get_conn() as conn, conn.cursor() as cur:
@@ -313,6 +491,157 @@ def search_words(q: str = Query(..., min_length=1), limit: int = Query(20, ge=1,
             (q, q, limit),
         )
         return [WordSearchResult(id=r[0], lemma=r[1]) for r in cur.fetchall()]
+
+
+class WordCategory(BaseModel):
+    code: str
+    name: str
+    is_primary: bool
+    confidence: float | None
+    color_bucket: str | None  # usas_domains.bucket_for(code[:1]) -- None -> gray chip
+
+
+class DifficultyFactors(BaseModel):
+    zipf: float
+    rarity: float
+    archaic: float
+    domain: float
+    morph: float
+    why: str
+
+
+class WordDetail(BaseModel):
+    id: int
+    lemma: str
+    part_of_speech: str | None
+    definition: str | None
+    ipa: str | None
+    sentence: str | None
+    chapter: str | None
+    synonyms: list[str]
+    etymology: str | None
+    definition_source: str | None
+    first_added: date | None
+
+    zipf: float  # live wordfreq, not stored -- same as /graph
+    difficulty: float | None
+    difficulty_factors: DifficultyFactors | None
+    archaic: str | None
+    archaic_evidence: str | None
+    archaic_confidence: float | None
+    quizzable: bool | None
+    quizzable_reason: str | None
+
+    ngram_peak: float | None
+    ngram_recent: float | None
+    ngram_recency_ratio: float | None
+    ngram_peak_year: int | None
+
+    audio_source: str | None  # 'commons'|'azure'|'azure_guess'|'none'|None (no row)
+
+    categories: list[WordCategory]
+    books: list[str]
+
+
+@app.get("/api/words/{word_id}", response_model=WordDetail)
+def word_detail(word_id: int, _: dict = Depends(require_viewer)) -> WordDetail:
+    """Everything known about one accepted word: definition/IPA/etymology from
+    `word`, the composite difficulty + its factor breakdown from
+    `word_difficulty`, raw Ngram history from `word_ngram`, which audio source
+    (if any) `word_audio` has, every USAS category it carries (not just the
+    one /graph picks for a node color), and which book(s) it came from. Three
+    round trips rather than one fused query: word_category and word_book are
+    both 1:many against word, so joining either into the 1:1
+    difficulty/ngram/audio row would fan out into duplicate rows."""
+    from wordfreq import zipf_frequency
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT w.lemma, w.part_of_speech, w.definition, w.ipa, w.sentence, w.chapter,
+                       w.synonyms, w.etymology, w.definition_source, w.first_added,
+                       d.archaic, d.archaic_evidence, d.archaic_confidence,
+                       d.difficulty, d.difficulty_factors, d.quizzable, d.quizzable_reason,
+                       n.peak, n.recent, n.recency_ratio, n.peak_year,
+                       a.source
+                FROM {SCHEMA}.word w
+                LEFT JOIN {SCHEMA}.word_difficulty d ON d.word_id = w.id
+                LEFT JOIN {SCHEMA}.word_ngram n ON n.word_id = w.id
+                LEFT JOIN {SCHEMA}.word_audio a ON a.word_id = w.id
+                WHERE w.id = %s AND w.active""",
+            (word_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="word not found")
+        (lemma, pos, definition, ipa, sentence, chapter, synonyms, etymology, definition_source,
+         first_added, archaic, archaic_evidence, archaic_confidence, difficulty, difficulty_factors,
+         quizzable, quizzable_reason, ngram_peak, ngram_recent, ngram_recency_ratio, ngram_peak_year,
+         audio_source) = row
+
+        cur.execute(
+            f"""SELECT c.code, c.name, wc.is_primary, wc.confidence
+                FROM {SCHEMA}.word_category wc
+                JOIN {SCHEMA}.category c ON c.id = wc.category_id
+                WHERE wc.word_id = %s
+                ORDER BY wc.is_primary DESC, wc.confidence DESC NULLS LAST, c.code ASC""",
+            (word_id,),
+        )
+        categories = [
+            WordCategory(code=code, name=name, is_primary=is_primary, confidence=confidence,
+                         color_bucket=usas_domains.bucket_for(code[:1] if code else None))
+            for code, name, is_primary, confidence in cur.fetchall()
+        ]
+
+        cur.execute(
+            f"""SELECT b.title FROM {SCHEMA}.word_book wb
+                JOIN {SCHEMA}.book b ON b.id = wb.book_id
+                WHERE wb.word_id = %s ORDER BY b.title ASC""",
+            (word_id,),
+        )
+        books = [r[0] for r in cur.fetchall()]
+
+    return WordDetail(
+        id=word_id, lemma=lemma, part_of_speech=pos, definition=definition, ipa=ipa,
+        sentence=sentence, chapter=chapter, synonyms=synonyms, etymology=etymology,
+        definition_source=definition_source, first_added=first_added,
+        zipf=zipf_frequency(lemma, "en"), difficulty=difficulty,
+        difficulty_factors=DifficultyFactors(**difficulty_factors) if difficulty_factors else None,
+        archaic=archaic, archaic_evidence=archaic_evidence, archaic_confidence=archaic_confidence,
+        quizzable=quizzable, quizzable_reason=quizzable_reason,
+        ngram_peak=ngram_peak, ngram_recent=ngram_recent, ngram_recency_ratio=ngram_recency_ratio,
+        ngram_peak_year=ngram_peak_year, audio_source=audio_source,
+        categories=categories, books=books,
+    )
+
+
+_AUDIO_ROOT = Path(__file__).resolve().parents[2] / "audio"
+# main.py -> parents[2] is the repo root (parents[0]=webapp/backend,
+# parents[1]=webapp) -- matches concordance/audio.py's AUDIO_DIR=Path("audio"),
+# which is CWD-relative there because the ingest pipeline always runs from repo
+# root; the API process's CWD isn't guaranteed, so anchor explicitly.
+
+
+@app.get("/api/words/{word_id}/audio")
+def word_audio(word_id: int, _: dict = Depends(require_viewer)):
+    """Streams the mp3 for a word's pronunciation. Looks up the DB-controlled
+    file_path rather than exposing the audio/ directory via a raw StaticFiles
+    mount, so this route only ever serves what word_audio vouches for."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"SELECT source, file_path FROM {SCHEMA}.word_audio WHERE word_id = %s",
+            (word_id,),
+        )
+        row = cur.fetchone()
+    if row is None or row[0] == "none" or not row[1]:
+        raise HTTPException(status_code=404, detail="no audio for this word")
+    _, file_path = row
+    # .name strips any directory component -- file_path is pipeline-written,
+    # not user input, but this keeps the route from ever resolving outside
+    # _AUDIO_ROOT even if that assumption changes later.
+    full_path = (_AUDIO_ROOT / Path(file_path).name).resolve()
+    if not full_path.is_file():
+        raise HTTPException(status_code=404, detail="audio file missing on disk")
+    return FileResponse(full_path, media_type="audio/mpeg")
 
 
 class Neighbor(BaseModel):
@@ -344,6 +673,7 @@ def word_neighbors(
     difficulty_max: float | None = None,
     same_domain_only: bool = False,
     exclude_synonyms: bool = True,
+    _: dict = Depends(require_viewer),
 ) -> NeighborsResponse:
     """Nearest neighbors of a word by cosine distance on its embedding vector
     (hnsw ANN index — see db.py's word_embedding table), not an all-pairs
@@ -463,7 +793,7 @@ class LegendEntry(BaseModel):
 
 
 @app.get("/api/graph/legend", response_model=list[LegendEntry])
-def graph_legend() -> list[LegendEntry]:
+def graph_legend(_: dict = Depends(require_viewer)) -> list[LegendEntry]:
     """The 6 macro-domain buckets a graph node's color can be — independent of
     any search, so the frontend can show a complete legend immediately (color
     is never the sole identity carrier; a gray "Uncategorized" swatch is a
@@ -479,6 +809,7 @@ def word_graph(
     k2: int = Query(6, ge=0, le=15, description="Each first-hop node's own neighbor count."),
     max_nodes: int = Query(70, ge=10, le=90),
     exclude_synonyms: bool = True,
+    _: dict = Depends(require_viewer),
 ) -> GraphResponse:
     """A multi-hop similarity network around one word: its top-k1 neighbors,
     then each of those gets its own smaller neighbor set too (cross-links kept
@@ -615,10 +946,29 @@ def word_graph(
                           nodes=result_nodes, edges=result_edges)
 
 
+class SPAStaticFiles(StaticFiles):
+    """Falls back to index.html on a 404 so client-side routes (e.g.
+    /words/142) survive a hard refresh instead of 404ing against the static
+    mount -- react-router only renders those paths client-side, so the server
+    has no file at that path to serve directly. StaticFiles.get_response
+    raises starlette.exceptions.HTTPException(404) rather than returning a
+    404 Response -- the base class, not fastapi.HTTPException (a subclass),
+    so the except clause below has to name the base class specifically or it
+    silently never matches."""
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code == 404:
+                return await super().get_response("index.html", scope)
+            raise
+
+
 # Serves the built frontend (webapp/frontend/dist, from `npm run build`) so a
 # single port can be exposed publicly. Registered last so it never shadows an
 # /api/* route above; absent in plain local dev, where the Vite dev server is
 # used instead and this directory doesn't exist.
 _DIST_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 if _DIST_DIR.is_dir():
-    app.mount("/", StaticFiles(directory=_DIST_DIR, html=True), name="frontend")
+    app.mount("/", SPAStaticFiles(directory=_DIST_DIR, html=True), name="frontend")

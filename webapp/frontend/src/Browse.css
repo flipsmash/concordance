@@ -1,0 +1,75 @@
+.browse-page {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 24px 20px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.browse-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 12px;
+}
+
+.browse-user {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.browse-user button {
+  border: none;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0;
+}
+
+.browse-search {
+  position: relative;
+}
+
+.browse-search input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 15px;
+  color: var(--text-h);
+  background: var(--bg);
+}
+
+.browse-suggestions {
+  position: absolute;
+  z-index: 10;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin: 4px 0 0;
+  padding: 4px 0;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.browse-suggestions li {
+  padding: 8px 12px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.browse-suggestions li:hover {
+  background: var(--row-hover, var(--border));
+}
+
+.browse-hint {
+  color: var(--text);
+  font-size: 13px;
+}

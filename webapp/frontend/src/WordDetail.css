@@ -1,0 +1,216 @@
+.word-detail {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px 20px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.word-detail-loading {
+  padding: 24px 20px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.word-detail-not-found {
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.word-detail-back {
+  align-self: flex-start;
+  color: var(--text);
+  text-decoration: none;
+  font-size: 13px;
+}
+
+.word-detail-back:hover {
+  color: var(--text-h);
+  text-decoration: underline;
+}
+
+.word-detail-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 12px;
+}
+
+.word-detail-header h1 {
+  font-size: 32px;
+}
+
+.word-detail-pos {
+  font-style: italic;
+  color: var(--text);
+  font-size: 15px;
+}
+
+.word-detail-audio {
+  height: 32px;
+}
+
+.word-detail-section {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.word-detail-section h2 {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text);
+  margin: 0;
+}
+
+.word-detail-definition {
+  font-size: 16px;
+  color: var(--text-h);
+  margin: 0;
+}
+
+.word-detail-etymology {
+  font-size: 13px;
+  color: var(--text);
+  margin: 0;
+}
+
+.word-detail-synonyms,
+.word-detail-categories {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.synonym-chip {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 2px 10px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.category-chip {
+  border-radius: 12px;
+  padding: 3px 10px;
+  font-size: 12px;
+  color: white;
+}
+
+.category-chip.primary {
+  font-weight: 600;
+}
+
+.word-detail-sentence {
+  margin: 0;
+  padding-left: 12px;
+  border-left: 2px solid var(--border);
+  font-size: 14px;
+  color: var(--text-h);
+}
+
+.word-detail-sentence cite {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text);
+  font-style: normal;
+}
+
+.word-detail-ipa {
+  font-family: var(--mono);
+  font-size: 15px;
+  color: var(--text-h);
+}
+
+.muted {
+  color: var(--text);
+  font-size: 13px;
+  margin: 0;
+}
+
+.difficulty-score {
+  font-size: 32px;
+  font-weight: 600;
+  color: var(--text-h);
+  font-variant-numeric: tabular-nums;
+}
+
+.difficulty-scale {
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--text);
+}
+
+.difficulty-why {
+  font-size: 13px;
+  color: var(--text);
+  margin: 0;
+}
+
+.word-detail-badges {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.register-badge,
+.quizzable-badge {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border-radius: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--accept);
+  color: var(--accept);
+}
+
+.quizzable-badge.not-quizzable {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.difficulty-factors-grid {
+  display: grid;
+  grid-template-columns: max-content max-content;
+  gap: 2px 12px;
+  font-size: 12px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.similar-words-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.similar-words-list a {
+  color: var(--text-h);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.similar-words-list a:hover {
+  text-decoration: underline;
+}
+
+.similar-word-definition {
+  color: var(--text);
+}
+
+.word-detail-graph {
+  margin-top: 4px;
+}

@@ -15,7 +15,7 @@ const ROTATE_STEP = Math.PI / 8 // 22.5° per click
 const ROTATE_PHI_MIN = 0.1 // radians off the top pole
 const ROTATE_PHI_MAX = Math.PI - 0.1 // radians off the bottom pole
 
-function GraphView() {
+function GraphView({ initialWordId, onNodeNavigate, hideSearch = false }) {
   const [query, setQuery] = useState('')
   const [suggestions, setSuggestions] = useState([])
   const [center, setCenter] = useState(null) // { id, lemma }
@@ -114,6 +114,16 @@ function GraphView() {
       .finally(() => setLoading(false))
   }, [])
 
+  // Embedded usage (WordDetail) pre-loads a starting word instead of making
+  // the user search for it. Keyed on the prop, not mount-only: clicking a
+  // node inside an embedded graph navigates WordDetail to a new /words/:id,
+  // and React Router keeps this component mounted across that navigation —
+  // only initialWordId changes, so the effect must re-fire to follow it.
+  useEffect(() => {
+    if (initialWordId != null) loadGraph(initialWordId, signal)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialWordId])
+
   function handlePick(word) {
     setQuery(word.lemma)
     setSuggestions([])
@@ -127,6 +137,10 @@ function GraphView() {
 
   function handleNodeClick(node) {
     if (node.id === center?.id) return
+    if (onNodeNavigate) {
+      onNodeNavigate(node)
+      return
+    }
     setQuery(node.lemma)
     loadGraph(node.id, signal)
   }
@@ -201,23 +215,25 @@ function GraphView() {
   return (
     <div className="graph-view" ref={viewRef}>
       <div className="graph-controls">
-        <div className="graph-search" ref={searchRef}>
-          <input
-            type="text"
-            placeholder="Search for a word…"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-          {suggestions.length > 0 && (
-            <ul className="graph-suggestions">
-              {suggestions.map((w) => (
-                <li key={w.id} onClick={() => handlePick(w)}>
-                  {w.lemma}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+        {!hideSearch && (
+          <div className="graph-search" ref={searchRef}>
+            <input
+              type="text"
+              placeholder="Search for a word…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            {suggestions.length > 0 && (
+              <ul className="graph-suggestions">
+                {suggestions.map((w) => (
+                  <li key={w.id} onClick={() => handlePick(w)}>
+                    {w.lemma}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
         <div className="graph-signal-toggle">
           <button className={signal === 'definition' ? 'active' : ''} onClick={() => handleSignalChange('definition')}>
             Meaning

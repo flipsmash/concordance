@@ -152,6 +152,42 @@ CREATE TABLE IF NOT EXISTS {s}.rejected_word (
 );
 
 CREATE INDEX IF NOT EXISTS rejected_word_lemma_idx ON {s}.rejected_word (lemma_lc);
+
+-- App-level accounts, separate from Cloudflare Access (which gates the admin
+-- curation UI at the network edge). is_admin distinguishes the curation-side
+-- role from an ordinary browsing/study account.
+CREATE TABLE IF NOT EXISTS {s}.users (
+    id             serial PRIMARY KEY,
+    username       text NOT NULL,
+    username_lc    text GENERATED ALWAYS AS (lower(username)) STORED UNIQUE,
+    password_hash  text NOT NULL,
+    is_admin       boolean NOT NULL DEFAULT false,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    last_login_at  timestamptz
+);
+
+-- token is the cookie value itself (no separate id/lookup indirection) --
+-- session validation is one indexed WHERE token=%s.
+CREATE TABLE IF NOT EXISTS {s}.sessions (
+    token       text PRIMARY KEY,
+    user_id     integer NOT NULL REFERENCES {s}.users(id) ON DELETE CASCADE,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    expires_at  timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON {s}.sessions (user_id);
+CREATE INDEX IF NOT EXISTS sessions_expires_at_idx ON {s}.sessions (expires_at);
+
+-- Invite-only signup: admin generates a one-time link carrying `token`;
+-- registering consumes it (sets used_at/used_by_user_id) so it can't be reused.
+CREATE TABLE IF NOT EXISTS {s}.invite_tokens (
+    id                 serial PRIMARY KEY,
+    token              text NOT NULL UNIQUE,
+    label              text,
+    created_at         timestamptz NOT NULL DEFAULT now(),
+    expires_at         timestamptz NOT NULL,
+    used_at            timestamptz,
+    used_by_user_id    integer REFERENCES {s}.users(id) ON DELETE SET NULL
+);
 """
 
 
