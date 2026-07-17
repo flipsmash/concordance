@@ -875,6 +875,16 @@ def create_admin(
     from Cloudflare Access). Prompts for a password via getpass, never as an argument
     — passing it on the command line would land it in shell history."""
     import getpass
+    import sys
+    from pathlib import Path
+
+    # `webapp` isn't an installed package (unlike `concordance`) -- it's only
+    # importable when something puts the repo root on sys.path for you
+    # (pytest's rootdir insertion, uvicorn's --app-dir .). The installed
+    # `concordance` console-script doesn't, so this command has to do it itself.
+    _repo_root = str(Path(__file__).resolve().parent.parent)
+    if _repo_root not in sys.path:
+        sys.path.insert(0, _repo_root)
 
     from webapp.backend import auth
 
