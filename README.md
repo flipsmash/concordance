@@ -315,15 +315,16 @@ pip install -e ".[web]"
 
 ### User accounts (`create-admin`, invites, `/app`)
 
-The curation UI above (Accepted/Rejected/Graph) is admin-only and stays
-behind Cloudflare Access as before. Separately, the app now has its own
-login — independent accounts for browsing/studying the vocab bank, gated by
-one-time invite links rather than open signup:
+The curation UI above (Accepted/Rejected/Graph) is admin-only, enforced by
+the app itself (see below) rather than an edge gate. Separately, the app has
+its own login — independent accounts for browsing/studying the vocab bank,
+gated by one-time invite links rather than open signup:
 
 - `concordance create-admin <username>` seeds the first admin-flagged
   account (prompts for a password via `getpass`; run once per deployment —
-  see "Public access" below for why this has to happen before Cloudflare
-  Access gets loosened at all).
+  needs to exist and be confirmed working before anything else touches
+  who's allowed in, so app-layer auth is never the only thing standing
+  between a restart and a lockout).
 - A logged-in admin gets a **"+ Generate Invite Link"** button in the
   Accepted tab, which mints a one-time `/register?token=...` link
   (`POST /api/admin/invites`, default 7-day expiry). Whoever opens it sets a
@@ -334,13 +335,14 @@ one-time invite links rather than open signup:
   expiry) backed by a `sessions` table — not JWTs — so a session can be
   revoked server-side (`/api/auth/logout`) rather than just expiring.
   Passwords are hashed with Argon2 (`argon2-cffi`).
-- Every route is one of `require_admin` (curation API — admin session **or**
-  a verified Cloudflare Access JWT) or `require_viewer` (word
-  search/detail/audio/graph — admin session, non-admin session, **or** CF
-  Access). The CF Access branch exists so the original admin UI keeps
-  working with zero new login step for anyone already passing Access at the
-  edge; it's redundant with `require_admin`, not load-bearing on its own —
-  see `webapp/backend/auth.py`.
+- Every route is one of `require_admin` (curation API) or `require_viewer`
+  (word search/detail/audio/graph) — this is the sole, load-bearing gate;
+  see "Public access" below for why an edge layer (Cloudflare Access) turned
+  out to be structurally incompatible with a fetch()-driven SPA and got
+  dropped rather than layered on top. `auth.py` still has a
+  `verify_cf_access` JWT-verification helper and both dependencies still
+  call it, but with no Access application configured it's simply dead code
+  — harmless, since it fails closed (returns `None`) when unconfigured.
 
 `dev.sh` also sets `WATCHFILES_FORCE_POLLING=true` for uvicorn (Vite's own
 polling is configured in `frontend/vite.config.js`). Both are needed because
@@ -351,36 +353,29 @@ edits silently fail to hot-reload without polling.
 ### Public access — `vocab.brfinnegan.org`
 
 The app is exposed to that domain via a **Cloudflare Tunnel** running on this
-WSL machine (no port-forwarding/firewall changes). Since [user
-accounts](#user-accounts-create-admin-invites-app) landed, the API enforces
-its own admin/viewer boundary (`require_admin`/`require_viewer` in
-`webapp/backend/main.py`) regardless of what's happening at the edge — that's
-the load-bearing check now, verified by `tests/test_auth.py`'s HTTP
-round-trip test. **Cloudflare Access is still layered on top, but scoped to
-admin-only paths** rather than the whole hostname, so invite links actually
-work for people who aren't `brfinnegan@gmail.com`:
+WSL machine (no port-forwarding/firewall changes) — DNS-only, no Cloudflare
+Access application in front of it. Access was tried and removed: it gates by
+redirecting unauthenticated requests to a `cloudflareaccess.com` login page,
+which only works for a full page navigation. Every API call this SPA makes
+is a background `fetch()`, and a fetch that gets redirected cross-origin
+fails the browser's CORS check outright (a bare "Failed to fetch", no status
+code) — so Access couldn't gate a single `/api/*` route without breaking the
+page that calls it, and it can't gate `/register` at all without defeating
+the entire point of invite links. There was nothing left for it to
+usefully protect.
 
-- **Access-gated** (Zero Trust → Access → Applications → "Vocab Review",
-  policy allows only `brfinnegan@gmail.com`): just the three API paths with
-  zero legitimate anonymous or viewer use — `/api/pos-values`,
-  `/api/rejected*`, `/api/admin/*`.
-- **Not Access-gated** — reachable by anyone, relying on the app-layer check
-  alone: everything else, including the admin frontend pages themselves
-  (`/`, `/accepted`, `/rejected`, `/graph`), `/login`, `/register`, `/app*`,
-  `/api/auth/*`, and the whole `/api/words*` family (`/api/words/search`,
-  `/api/words/{id}`, `/api/words/{id}/audio`). The frontend pages don't need
-  edge gating — their JS/CSS shell is the same bundle for everyone and every
-  data fetch they make still hits `require_admin`, so an anonymous visitor
-  sees an empty/erroring page, not data. `/api/words*` can't be split
-  cleanly even if we wanted to: the admin word list (`GET /api/words`,
-  admin-only) and the viewer's word-detail lookup (`GET /api/words/{id}`,
-  any logged-in viewer) share a path prefix, and Cloudflare Access rules
-  aren't method- or sub-resource-aware.
+[User accounts](#user-accounts-create-admin-invites-app) are the actual,
+sole gate now — `require_admin`/`require_viewer` in
+`webapp/backend/main.py`, fail-closed, verified end-to-end by
+`tests/test_auth.py`'s HTTP round-trip test. Removing Access doesn't expose
+anything Access was reliably protecting before this: same test suite covered
+the app-layer boundary the whole time, Access was always documented as
+"redundant, not load-bearing" on top of it (see `webapp/backend/auth.py`).
 
-Setup order matters here: the admin account (`concordance create-admin`) has
-to exist and be confirmed working *before* Access gets scoped down, since
-`require_admin` fails closed — no admin row plus no CF Access on a path means
-even Brian is locked out of it.
+Setup order still matters on any fresh deployment: the admin account
+(`concordance create-admin`) has to exist and be confirmed working before
+anything else changes, since `require_admin` fails closed — no admin row
+means no one, including Brian, can reach the curation API at all.
 
 Both pieces run as **systemd --user services** (survive reboot/logout via
 `loginctl enable-linger brian`, already enabled):
