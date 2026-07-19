@@ -417,3 +417,95 @@ def test_blended_quiz_can_produce_multiple_question_types_http():
             cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
         cleanup.commit()
         cleanup.close()
+
+
+@pg
+def test_spaced_repetition_prefers_eligible_words_but_falls_back_when_short_http():
+    from datetime import datetime, timedelta, timezone
+
+    from starlette.testclient import TestClient
+
+    from webapp.backend import main
+
+    schema = "cc_test_quiz_sr_http"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+    # A generous corpus: 4 questions at mc_choice_count=2 (1 target + 1
+    # distractor each, never reusing a word within the session) needs at
+    # least 8 distinct words, plus room for the fallback assertion below --
+    # 40 keeps every word other than the 8 designated "eligible" ones safely
+    # supplied with distractors without exhausting the eligible set.
+    _seed_corpus(conn, schema, n=40)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"INSERT INTO {schema}.users (username, password_hash) VALUES ('srhttpuser', %s) RETURNING id",
+            (auth.hash_password("password123"),),
+        )
+        user_id = cur.fetchone()[0]
+        cur.execute(f"SELECT id FROM {schema}.word ORDER BY id")
+        word_ids = [r[0] for r in cur.fetchall()]
+        # First 8 words are "eligible" (due in the past / never scored) --
+        # deliberately more than the 4 questions requested below, so that an
+        # eligible word incidentally drawn as another eligible word's MC
+        # distractor still leaves enough eligible words free to serve as
+        # targets (worst case: 4 targets + 3 distractors = 7 of the 8
+        # consumed before the last target is locked in). Every other word is
+        # explicitly "not yet eligible" (due far in the future) so none of
+        # them can be mistaken for eligible via a missing row.
+        future = datetime.now(timezone.utc) + timedelta(days=30)
+        past = datetime.now(timezone.utc) - timedelta(days=1)
+        for wid in word_ids[:4]:
+            cur.execute(
+                f"""INSERT INTO {schema}.word_review_schedule (user_id, word_id, next_eligible_at)
+                    VALUES (%s, %s, %s)""",
+                (user_id, wid, past),
+            )
+        # word_ids[4:8] stay eligible via no row at all (never seen).
+        for wid in word_ids[8:]:
+            cur.execute(
+                f"""INSERT INTO {schema}.word_review_schedule (user_id, word_id, next_eligible_at)
+                    VALUES (%s, %s, %s)""",
+                (user_id, wid, future),
+            )
+    conn.commit()
+    conn.close()
+
+    old_schema = main.SCHEMA
+    main.SCHEMA = schema
+    try:
+        client = TestClient(main.app, base_url="https://testserver")
+        client.post("/api/auth/login", json={"username": "srhttpuser", "password": "password123"})
+
+        # Exactly as many questions as eligible words -- every target should
+        # come from the eligible set. mc_choice_count=2 keeps each question's
+        # distractor draw small so it can't accidentally exhaust the corpus.
+        res = client.post("/api/quiz/start",
+                           json={"length": 4, "mc_choice_count": 2, "spaced_repetition_enabled": True})
+        assert res.status_code == 200, res.text
+        session_id = res.json()["session_id"]
+        assert res.json()["total_questions"] == 4
+        for _ in range(4):
+            q = client.get(f"/api/quiz/{session_id}").json()["question"]
+            client.post(f"/api/quiz/{session_id}/answer",
+                        json={"question_id": q["question_id"], "selected_word_id": q["options"][0]["word_id"]})
+        review = client.get(f"/api/quiz/{session_id}/review").json()
+        targets = {item["target_lemma"] for item in review["items"]}
+        eligible_lemmas = {f"quizword{i}" for i in range(8)}  # per _seed_corpus's naming
+        assert targets <= eligible_lemmas, f"expected only eligible words, got {targets}"
+
+        # More questions than the eligible pool has -- must still fill the
+        # request by falling back to not-yet-eligible words, never erroring.
+        res2 = client.post("/api/quiz/start",
+                            json={"length": 10, "mc_choice_count": 2, "spaced_repetition_enabled": True})
+        assert res2.status_code == 200, res2.text
+        assert res2.json()["total_questions"] == 10
+    finally:
+        main.SCHEMA = old_schema
+        cleanup = db.connect(_URL)
+        with cleanup.cursor() as cur:
+            cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        cleanup.commit()
+        cleanup.close()

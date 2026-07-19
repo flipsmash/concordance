@@ -238,6 +238,24 @@ CREATE TABLE IF NOT EXISTS {s}.quiz_answer (
 );
 CREATE INDEX IF NOT EXISTS quiz_answer_question_idx ON {s}.quiz_answer (question_id);
 CREATE INDEX IF NOT EXISTS quiz_answer_word_idx ON {s}.quiz_answer (word_id);
+
+-- Lightweight priority re-exposure for spaced repetition -- NOT full SM-2,
+-- NOT a mastery-tracking system (that's explicitly deferred). Updated on
+-- every quiz_answer regardless of whether the session that produced it had
+-- spaced repetition turned on, so enabling it later immediately benefits
+-- from all prior history rather than starting cold.
+CREATE TABLE IF NOT EXISTS {s}.word_review_schedule (
+    user_id           integer NOT NULL REFERENCES {s}.users(id) ON DELETE CASCADE,
+    word_id           integer NOT NULL REFERENCES {s}.word(id) ON DELETE CASCADE,
+    streak            integer NOT NULL DEFAULT 0,
+    last_seen_at      timestamptz,
+    next_eligible_at  timestamptz,
+    correct_count     integer NOT NULL DEFAULT 0,
+    incorrect_count   integer NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, word_id)
+);
+CREATE INDEX IF NOT EXISTS word_review_schedule_eligible_idx
+    ON {s}.word_review_schedule (user_id, next_eligible_at);
 """
 
 

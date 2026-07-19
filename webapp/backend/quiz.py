@@ -1,8 +1,14 @@
-"""Quiz-taking API (§ quizzing) -- Phase 2: multiple-choice, true/false, and
-matching, blendable within one session.
+"""Quiz-taking API (§ quizzing) -- multiple choice, true/false, and matching,
+blendable within one session, with optional spaced-repetition question
+selection.
 
-Spaced repetition is still a later phase -- question selection here doesn't
-consult any review schedule yet.
+Spaced repetition (concordance/spaced_repetition.py) is a pure selection
+bias, not a schema change to questions/answers: word_review_schedule is
+updated on every answer regardless of whether the session that produced it
+had it enabled, so turning it on later benefits from all prior history
+rather than starting cold. Selection prefers -- never hard-filters to --
+words that are next_eligible_at <= now() (or never seen), falling back to
+not-yet-eligible words whenever the eligible pool can't fill the request.
 
 Imports `main` as a module (not `from webapp.backend.main import SCHEMA, ...`)
 and always accesses `_main.SCHEMA`/`_main.get_conn()` via dotted attribute
@@ -59,6 +65,7 @@ from psycopg.types.json import Json
 from pydantic import BaseModel, Field
 
 from concordance import distractors as dx
+from concordance import spaced_repetition as sr
 from concordance import usas_domains
 from webapp.backend import main as _main
 
@@ -86,6 +93,8 @@ class QuizStartRequest(BaseModel):
     strategy_weights: dict[str, float] = Field(
         default_factory=lambda: {"orthographic": 1 / 3, "semantic": 1 / 3, "domain": 1 / 3, "antonym": 0.0}
     )
+    spaced_repetition_enabled: bool = False
+    spaced_repetition_frequency: sr.Frequency = "normal"
 
 
 class QuizSessionStart(BaseModel):
@@ -201,7 +210,8 @@ def _feedback_timing(conn) -> str:
     return mode if mode in ("immediate", "end_of_test") else "immediate"
 
 
-def _select_target_words(conn, body: QuizStartRequest, count: int, exclude_ids: set[int]) -> list[dict]:
+def _select_target_words(conn, body: QuizStartRequest, count: int, exclude_ids: set[int],
+                          user_id: int) -> list[dict]:
     filters = ["w.active", "wd.quizzable = true", "w.quiz_definition IS NOT NULL"]
     params: list = []
     if exclude_ids:
@@ -227,15 +237,27 @@ def _select_target_words(conn, body: QuizStartRequest, count: int, exclude_ids: 
             )
             params.append(codes)
     where = " AND ".join(filters)
+
+    # Spaced repetition is a preference, never a hard filter: eligible (or
+    # never-seen) words sort first, but the LIMIT still falls through to
+    # not-yet-eligible ones if that's not enough to fill the request -- a
+    # narrow filter config combined with SR-on should degrade gracefully,
+    # not return an empty/short question set.
+    order_by = "random()"
+    if body.spaced_repetition_enabled:
+        order_by = "(wrs.next_eligible_at IS NULL OR wrs.next_eligible_at <= now()) DESC, random()"
+
     with conn.cursor() as cur:
         cur.execute(
             f"""SELECT w.id, w.lemma, w.quiz_definition, w.part_of_speech
                 FROM {_main.SCHEMA}.word w
                 JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
+                LEFT JOIN {_main.SCHEMA}.word_review_schedule wrs
+                    ON wrs.word_id = w.id AND wrs.user_id = %s
                 WHERE {where}
-                ORDER BY random()
+                ORDER BY {order_by}
                 LIMIT %s""",
-            (*params, count),
+            (user_id, *params, count),
         )
         rows = cur.fetchall()
     return [{"id": r[0], "lemma": r[1], "quiz_definition": r[2], "pos": r[3]} for r in rows]
@@ -414,14 +436,39 @@ def _client_question(question_id: int, seq: int, question_type: str, payload: di
 def _get_owned_session(conn, session_id: int, user_id: int) -> dict:
     with conn.cursor() as cur:
         cur.execute(
-            f"""SELECT id, feedback_timing, finished_at, score_pct
+            f"""SELECT id, feedback_timing, finished_at, score_pct, config
                 FROM {_main.SCHEMA}.quiz_session WHERE id = %s AND user_id = %s""",
             (session_id, user_id),
         )
         row = cur.fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="quiz session not found")
-    return {"id": row[0], "feedback_timing": row[1], "finished_at": row[2], "score_pct": row[3]}
+    return {"id": row[0], "feedback_timing": row[1], "finished_at": row[2], "score_pct": row[3], "config": row[4]}
+
+
+def _update_review_schedule(cur, user_id: int, word_id: int, is_correct: bool, frequency: str) -> None:
+    """Upserts word_review_schedule -- called for every answered word,
+    regardless of whether spaced repetition was enabled for the session that
+    produced this answer (see module docstring)."""
+    cur.execute(
+        f"SELECT streak FROM {_main.SCHEMA}.word_review_schedule WHERE user_id = %s AND word_id = %s",
+        (user_id, word_id),
+    )
+    row = cur.fetchone()
+    prior_streak = row[0] if row else 0
+    update = sr.next_review(prior_streak, is_correct, frequency)
+    cur.execute(
+        f"""INSERT INTO {_main.SCHEMA}.word_review_schedule
+                (user_id, word_id, streak, last_seen_at, next_eligible_at, correct_count, incorrect_count)
+            VALUES (%s, %s, %s, now(), %s, %s, %s)
+            ON CONFLICT (user_id, word_id) DO UPDATE SET
+                streak = EXCLUDED.streak,
+                last_seen_at = now(),
+                next_eligible_at = EXCLUDED.next_eligible_at,
+                correct_count = {_main.SCHEMA}.word_review_schedule.correct_count + EXCLUDED.correct_count,
+                incorrect_count = {_main.SCHEMA}.word_review_schedule.incorrect_count + EXCLUDED.incorrect_count""",
+        (user_id, word_id, update.streak, update.next_eligible_at, int(is_correct), int(not is_correct)),
+    )
 
 
 def _mc_or_tf_correct_label(qtype: str, payload: dict) -> str:
@@ -465,7 +512,7 @@ def start_quiz(body: QuizStartRequest, user: dict = Depends(_main.require_user))
         # twice within one session.
         pool_size = body.length * (body.matching_set_size + 2) + 20
         used_ids: set[int] = set()
-        pool = _select_target_words(conn, body, pool_size, used_ids)
+        pool = _select_target_words(conn, body, pool_size, used_ids, user["id"])
         pool_idx = 0
 
         # (question_type, payload, target_word_ids -- what quiz_answer rows get
@@ -555,6 +602,8 @@ def answer_quiz_question(session_id: int, body: QuizAnswerSubmit,
             if cur.fetchone() is not None:
                 raise HTTPException(status_code=400, detail="question already answered")
 
+            frequency = (session["config"] or {}).get("spaced_repetition_frequency", "normal")
+
             if qtype == "mc":
                 if payload["nota_is_correct"]:
                     is_correct = body.selected_word_id is None
@@ -566,6 +615,7 @@ def answer_quiz_question(session_id: int, body: QuizAnswerSubmit,
                     (body.question_id, target_word_ids[0],
                      Json({"selected_word_id": body.selected_word_id}), is_correct),
                 )
+                _update_review_schedule(cur, user["id"], target_word_ids[0], is_correct, frequency)
             elif qtype == "true_false":
                 if body.answer is None:
                     raise HTTPException(status_code=400, detail="answer (true/false) is required")
@@ -575,6 +625,7 @@ def answer_quiz_question(session_id: int, body: QuizAnswerSubmit,
                         VALUES (%s, %s, %s, %s)""",
                     (body.question_id, target_word_ids[0], Json({"answer": body.answer}), is_correct),
                 )
+                _update_review_schedule(cur, user["id"], target_word_ids[0], is_correct, frequency)
             elif qtype == "matching":
                 if not body.pairs:
                     raise HTTPException(status_code=400, detail="pairs is required for a matching question")
@@ -590,6 +641,7 @@ def answer_quiz_question(session_id: int, body: QuizAnswerSubmit,
                             VALUES (%s, %s, %s, %s)""",
                         (body.question_id, wid, Json({"definition_slot": slot}), pair_correct),
                     )
+                    _update_review_schedule(cur, user["id"], wid, pair_correct, frequency)
                     pair_results.append({"word_id": wid, "is_correct": pair_correct, "correct_slot": correct_slot})
                 is_correct = all(p["is_correct"] for p in pair_results)
             else:

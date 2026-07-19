@@ -31,6 +31,8 @@ function QuizConfig() {
   const [domains, setDomains] = useState([])
   const [smartRatio, setSmartRatio] = useState(70)
   const [weights, setWeights] = useState({ orthographic: 34, semantic: 33, domain: 33 })
+  const [srEnabled, setSrEnabled] = useState(false)
+  const [srFrequency, setSrFrequency] = useState('normal')
 
   const [starting, setStarting] = useState(false)
   const [error, setError] = useState('')
@@ -79,6 +81,8 @@ function QuizConfig() {
         difficulty_max: difficultyMax === '' ? null : Number(difficultyMax),
         pos: pos.length ? pos : null,
         domains: domains.length ? domains : null,
+        spaced_repetition_enabled: srEnabled,
+        spaced_repetition_frequency: srFrequency,
         smart_vs_random_ratio: smartRatio / 100,
         strategy_weights: {
           orthographic: weights.orthographic / weightTotal,
@@ -268,6 +272,32 @@ function QuizConfig() {
               )}
             </>
           )}
+        </fieldset>
+
+        <fieldset>
+          <legend>Spaced repetition</legend>
+          <label className="quiz-checkbox">
+            <input type="checkbox" checked={srEnabled} onChange={(e) => setSrEnabled(e.target.checked)} />
+            Prioritize words I've missed before
+          </label>
+          {srEnabled && (
+            <div className="quiz-pill-row">
+              {['loose', 'normal', 'tight'].map((f) => (
+                <button
+                  type="button"
+                  key={f}
+                  className={srFrequency === f ? 'quiz-pill active' : 'quiz-pill'}
+                  onClick={() => setSrFrequency(f)}
+                >
+                  {f}
+                </button>
+              ))}
+            </div>
+          )}
+          <p className="quiz-config-hint">
+            Missed words resurface sooner than ones you got right — always tracked in the background;
+            this just controls whether new quizzes lean on that history and how aggressively.
+          </p>
         </fieldset>
 
         <details className="quiz-advanced">
