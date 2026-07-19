@@ -45,8 +45,10 @@ function QuizReview() {
     <div className="quiz-review-page">
       <div className="quiz-score-hero">
         <div className={scoreClass(pct)}>
-          <span className="quiz-score-number">{pct}</span>
-          <span className="quiz-score-percent">%</span>
+          <span className="quiz-score-value">
+            <span className="quiz-score-number">{pct}</span>
+            <span className="quiz-score-percent">%</span>
+          </span>
         </div>
         <p className="quiz-score-caption">
           {creditLabel} of {review.items.length} correct

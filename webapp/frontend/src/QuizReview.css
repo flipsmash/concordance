@@ -21,9 +21,14 @@
   border-radius: 50%;
   border: 6px solid var(--border);
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: center;
   font-family: var(--mono);
+}
+
+.quiz-score-value {
+  display: flex;
+  align-items: baseline;
 }
 
 .quiz-score-ring.high {
