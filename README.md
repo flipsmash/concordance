@@ -389,6 +389,51 @@ this repo lives on `/mnt/c` — a Windows drive mounted into WSL — where nativ
 fs-change notifications don't reliably reach either dev server's watcher, so
 edits silently fail to hot-reload without polling.
 
+### Quizzing (`/app/quiz`)
+
+Any logged-in account (admin or invited viewer) can take a quiz — configure
+it at `/app/quiz`, driven entirely by `webapp/backend/quiz.py` and
+`concordance/distractors.py`:
+
+- **Three question types, blendable in one session**: multiple choice,
+  true/false, and matching (a set of word↔definition pairs). Pick one type
+  for a single-type test or several to mix them. A matching set counts as
+  one question toward the test length no matter how many pairs it holds, and
+  scores with **per-pair credit** — 3 of 4 correct pairs contributes 0.75 to
+  that slot, not a binary pass/fail.
+- **Direction** — "show the definition, pick the word" or "show the word,
+  pick the definition." Matching is direction-agnostic (always shows both).
+- **Filters**: length (5/10/20/custom), difficulty range, POS, and domain
+  (the same 6 USAS buckets `/api/graph/legend` uses, not raw category codes).
+- **Distractors** are POS-matched (never negotiable) and drawn from a
+  weighted blend of orthographic lookalikes (`pg_trgm` on the lemma),
+  near-miss semantic proximity (embedding cosine-distance band — close
+  enough to be a plausible mix-up, far enough not to be a true synonym),
+  domain/theme similarity (shared USAS category), and random — ratios are
+  configurable per quiz, with a smart-vs-random split on top. A target's own
+  `synonyms` are always excluded from every strategy — a distractor that's
+  actually a valid synonym is a second correct answer, not a wrong one.
+  Antonyms are a reserved-but-unimplemented strategy slot (no antonym data
+  exists anywhere in this pipeline yet).
+- **"None of the above"** (multiple choice only) can be toggled on, with a
+  configurable rate (default 15%) at which it's actually the correct answer
+  rather than always a decoy.
+- **Feedback timing** (reveal correct/incorrect immediately after each
+  question, or only at the end) is a single **admin-controlled global
+  setting** — Settings tab in the curation UI, backed by a generic
+  `app_settings` key/value table — not a per-quiz-taker choice. A session
+  snapshots whichever mode was active when it started, so changing the
+  setting never affects an in-progress quiz.
+- Every quiz-taking route requires only a logged-in session
+  (`require_user`) — no admin flag needed, matching/true-false/multiple-choice
+  are all available to invited non-admin accounts.
+
+Not yet built: spaced repetition (re-surfacing missed words sooner) and any
+mastery-tracking dashboard — the schema captures enough (question type,
+choice count, NOTA presence, per-answer correctness, timestamps) to add
+both later without a backfill.
+
+
 ### Public access — `vocab.brfinnegan.org`
 
 The app is exposed to that domain via a **Cloudflare Tunnel** running on this

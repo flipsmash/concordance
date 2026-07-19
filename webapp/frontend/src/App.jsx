@@ -1,7 +1,8 @@
 import { Suspense, lazy } from 'react'
 import { NavLink, Outlet, Route, Routes } from 'react-router-dom'
-import './App.css'
 import AcceptedView from './AcceptedView'
+import AdminSettings from './AdminSettings'
+import './App.css'
 import { AuthProvider } from './AuthContext'
 import Login from './Login'
 import Register from './Register'
@@ -13,6 +14,9 @@ import RequireAuth from './RequireAuth'
 const GraphView = lazy(() => import('./GraphView'))
 const WordDetail = lazy(() => import('./WordDetail'))
 const Browse = lazy(() => import('./Browse'))
+const QuizConfig = lazy(() => import('./QuizConfig'))
+const QuizRun = lazy(() => import('./QuizRun'))
+const QuizReview = lazy(() => import('./QuizReview'))
 
 function tabClass({ isActive }) {
   return isActive ? 'tab active' : 'tab'
@@ -33,6 +37,9 @@ function Layout() {
           <NavLink to="/graph" className={tabClass}>
             Graph
           </NavLink>
+          <NavLink to="/settings" className={tabClass}>
+            Settings
+          </NavLink>
         </div>
       </header>
 
@@ -49,6 +56,7 @@ function App() {
           <Route index element={<AcceptedView />} />
           <Route path="accepted" element={<AcceptedView />} />
           <Route path="rejected" element={<RejectedView />} />
+          <Route path="settings" element={<AdminSettings />} />
           <Route
             path="graph"
             element={
@@ -89,6 +97,30 @@ function App() {
             element={
               <Suspense fallback={<div className="page-loading">Loading…</div>}>
                 <WordDetail backTo="/app" />
+              </Suspense>
+            }
+          />
+          <Route
+            path="quiz"
+            element={
+              <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                <QuizConfig />
+              </Suspense>
+            }
+          />
+          <Route
+            path="quiz/:sessionId"
+            element={
+              <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                <QuizRun />
+              </Suspense>
+            }
+          />
+          <Route
+            path="quiz/:sessionId/review"
+            element={
+              <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                <QuizReview />
               </Suspense>
             }
           />

@@ -965,6 +965,16 @@ class SPAStaticFiles(StaticFiles):
             raise
 
 
+# Quiz routes live in their own router (quiz.py) rather than growing this
+# already-974-line file further. Imported here, at the bottom, deliberately:
+# quiz.py does `from webapp.backend import main as _main` and immediately uses
+# _main.SCHEMA/_main.require_user/_main.require_admin at its own module-load
+# time (route decoration) -- those names must already exist in this module's
+# namespace when that happens, i.e. this import must stay below every def
+# above it. Moving it earlier breaks the import with an AttributeError.
+from webapp.backend import quiz as _quiz  # noqa: E402
+app.include_router(_quiz.router)
+
 # Serves the built frontend (webapp/frontend/dist, from `npm run build`) so a
 # single port can be exposed publicly. Registered last so it never shadows an
 # /api/* route above; absent in plain local dev, where the Vite dev server is

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from './AuthContext'
 import './Browse.css'
 
@@ -44,6 +44,8 @@ function Browse() {
       <header className="browse-header">
         <h1>Vocab Browse</h1>
         <div className="browse-user">
+          <Link to="/app/quiz" className="browse-quiz-link">Take a quiz</Link>
+          {' · '}
           {user?.username} · <button type="button" onClick={logout}>Log out</button>
         </div>
       </header>

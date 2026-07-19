@@ -1,0 +1,151 @@
+.quiz-review-page {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 28px 20px 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+.quiz-score-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 0 8px;
+}
+
+.quiz-score-ring {
+  width: 140px;
+  height: 140px;
+  border-radius: 50%;
+  border: 6px solid var(--border);
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  font-family: var(--mono);
+}
+
+.quiz-score-ring.high {
+  border-color: var(--accept);
+}
+
+.quiz-score-ring.mid {
+  border-color: var(--accent);
+}
+
+.quiz-score-ring.low {
+  border-color: var(--danger);
+}
+
+.quiz-score-number {
+  font-size: 44px;
+  font-weight: 600;
+  color: var(--text-h);
+}
+
+.quiz-score-percent {
+  font-size: 20px;
+  color: var(--text);
+}
+
+.quiz-score-caption {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.quiz-review-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.quiz-review-item {
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 6px;
+  padding: 12px 14px;
+}
+
+.quiz-review-item.correct {
+  border-left-color: var(--accept);
+}
+
+.quiz-review-item.incorrect {
+  border-left-color: var(--danger);
+}
+
+.quiz-review-item.partial {
+  border-left-color: var(--accent);
+}
+
+.quiz-review-item-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.quiz-review-lemma {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-h);
+}
+
+.quiz-review-mark {
+  font-size: 14px;
+  font-family: var(--mono);
+}
+
+.quiz-review-mark.correct {
+  color: var(--accept);
+}
+
+.quiz-review-mark.incorrect {
+  color: var(--danger);
+}
+
+.quiz-review-mark.partial {
+  color: var(--accent);
+}
+
+.quiz-review-definition {
+  margin: 6px 0 0;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.quiz-review-your-answer {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--danger);
+}
+
+.quiz-review-actions {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.quiz-start-btn {
+  align-self: flex-start;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: white;
+  border-radius: 6px;
+  padding: 11px 24px;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+}
+
+.quiz-review-back {
+  font-size: 13px;
+  color: var(--accent);
+  text-decoration: none;
+}

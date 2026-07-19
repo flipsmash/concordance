@@ -1,0 +1,249 @@
+.quiz-run-page {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 28px 20px 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.quiz-progress-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.quiz-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+.quiz-progress-label {
+  margin: 0;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+.mc-question {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.mc-prompt {
+  font-size: 21px;
+  line-height: 1.4;
+  color: var(--text-h);
+  margin: 8px 0 4px;
+}
+
+.mc-options {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mc-option {
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text-h);
+  padding: 14px 16px;
+  font-size: 15px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.1s ease;
+}
+
+.mc-option:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--row-hover);
+}
+
+.mc-option:active:not(:disabled) {
+  transform: scale(0.99);
+}
+
+.mc-option.selected {
+  border-color: var(--accent);
+  background: var(--row-hover);
+}
+
+.mc-option:disabled {
+  cursor: default;
+}
+
+.mc-option.reveal-correct {
+  border-color: var(--accept);
+  background: var(--row-accept-hover);
+  color: var(--accept);
+  font-weight: 500;
+}
+
+.mc-option.reveal-incorrect {
+  border-color: var(--danger);
+  background: var(--row-danger-hover);
+  color: var(--danger);
+}
+
+.mc-feedback {
+  font-size: 14px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  margin: 0;
+}
+
+.mc-feedback.correct {
+  color: var(--accept);
+  background: var(--row-accept-hover);
+}
+
+.mc-feedback.incorrect {
+  color: var(--danger);
+  background: var(--row-danger-hover);
+}
+
+.quiz-next-btn {
+  align-self: flex-start;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: white;
+  border-radius: 6px;
+  padding: 10px 20px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.quiz-next-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* --- true/false ------------------------------------------------------- */
+
+.tf-options {
+  display: flex;
+  gap: 12px;
+}
+
+.tf-option {
+  flex: 1;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text-h);
+  padding: 16px;
+  font-size: 16px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.tf-option:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--row-hover);
+}
+
+.tf-option:disabled {
+  cursor: default;
+}
+
+.tf-option.selected {
+  border-color: var(--accent);
+  background: var(--row-hover);
+}
+
+.tf-option.reveal-correct {
+  border-color: var(--accept);
+  background: var(--row-accept-hover);
+  color: var(--accept);
+}
+
+.tf-option.reveal-incorrect {
+  border-color: var(--danger);
+  background: var(--row-danger-hover);
+  color: var(--danger);
+}
+
+/* --- matching ----------------------------------------------------------- */
+
+.matching-question {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.matching-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  align-items: start;
+}
+
+.matching-column {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.matching-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text-h);
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.matching-item:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--row-hover);
+}
+
+.matching-item:disabled {
+  cursor: default;
+}
+
+.matching-item.active {
+  border-color: var(--accent);
+  background: var(--row-hover);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.matching-item.paired {
+  border-style: dashed;
+}
+
+.matching-item.reveal-correct {
+  border-color: var(--accept);
+  background: var(--row-accept-hover);
+  color: var(--accept);
+}
+
+.matching-item.reveal-incorrect {
+  border-color: var(--danger);
+  background: var(--row-danger-hover);
+  color: var(--danger);
+}
+
+.matching-slot-badge {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
