@@ -768,15 +768,16 @@ def fetch_known_verdicts(conn, schema: str = DEFAULT_SCHEMA) -> dict[str, str]:
     every book of a shared-vocabulary corpus is pure waste; this is the cache
     that eliminates it.
 
-      'keep'   -> in `word`, active     (judge kept it; human hasn't pruned)
-      'pruned' -> in `word`, inactive   (human manually pruned via the webapp)
-      'reject' -> in `rejected_word` with reason 'not_interesting', 'numeric_or_symbol',
-                                        or 'proper_noun' (judge, or the post-
-                                        enrichment junk-POS gate, rejected it
-                                        before — both are purely lemma-derived,
-                                        like the judge verdict, so caching them
-                                        is exactly as safe: see pipeline.py's
-                                        junk_pos_reason gate)
+      'keep'    -> in `word`, active    (judge kept it; human hasn't pruned)
+      'pruned'  -> in `word`, inactive  (human manually pruned via the webapp)
+      <reason>  -> in `rejected_word`, one of 'not_interesting', 'numeric_or_symbol',
+                                        or 'proper_noun' -- the specific reason, not a
+                                        generic 'reject', so pipeline.py's _VERDICT_MAP
+                                        can restore the true original reason on a cached
+                                        hit (judge, or the post-enrichment junk-POS gate,
+                                        rejected it before — both are purely lemma-derived,
+                                        like the judge verdict, so caching them is exactly
+                                        as safe: see pipeline.py's junk_pos_reason gate)
 
     `word` wins over `rejected_word` for a lemma present in both: a promoted
     row is authoritative and its `active` flag reflects the human's latest

@@ -27,7 +27,7 @@ def test_cached_pruned_is_dropped_already_known():
 
 def test_cached_reject_is_dropped_not_interesting():
     cands = _cands("beggar")
-    counts = apply_known_verdicts(cands, {"beggar": "reject"})
+    counts = apply_known_verdicts(cands, {"beggar": "not_interesting"})
     assert counts["reject"] == 1
     assert cands["beggar"].verdict is Verdict.DROP
     assert cands["beggar"].reject_reason is RejectReason.NOT_INTERESTING
@@ -53,7 +53,7 @@ def test_does_not_override_an_existing_verdict():
 
 def test_mixed_batch_counts():
     cands = _cands("cangue", "tram", "beggar", "fuligin")
-    known = {"cangue": "keep", "tram": "pruned", "beggar": "reject"}
+    known = {"cangue": "keep", "tram": "pruned", "beggar": "not_interesting"}
     counts = apply_known_verdicts(cands, known)
     assert counts == {"keep": 1, "pruned": 1, "reject": 1}
     assert cands["fuligin"].verdict is None
