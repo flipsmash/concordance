@@ -188,6 +188,56 @@ CREATE TABLE IF NOT EXISTS {s}.invite_tokens (
     used_at            timestamptz,
     used_by_user_id    integer REFERENCES {s}.users(id) ON DELETE SET NULL
 );
+
+-- Generic global key/value settings so future admin-configurable toggles
+-- don't need a new table/migration each time. Currently just one key,
+-- 'quiz_feedback_timing' (value {{"mode": "immediate"|"end_of_test"}}).
+CREATE TABLE IF NOT EXISTS {s}.app_settings (
+    key         text PRIMARY KEY,
+    value       jsonb NOT NULL,
+    updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS {s}.quiz_session (
+    id                serial PRIMARY KEY,
+    user_id           integer NOT NULL REFERENCES {s}.users(id) ON DELETE CASCADE,
+    config            jsonb NOT NULL,
+    feedback_timing   text NOT NULL,   -- snapshot of app_settings at start time, so a
+                                        -- mid-quiz admin change never mutates a session
+                                        -- already in progress
+    started_at        timestamptz NOT NULL DEFAULT now(),
+    finished_at       timestamptz,
+    score_pct         double precision
+);
+CREATE INDEX IF NOT EXISTS quiz_session_user_idx ON {s}.quiz_session (user_id);
+
+CREATE TABLE IF NOT EXISTS {s}.quiz_question (
+    id              serial PRIMARY KEY,
+    session_id      integer NOT NULL REFERENCES {s}.quiz_session(id) ON DELETE CASCADE,
+    seq             integer NOT NULL,        -- 1-based order within the session, also the
+                                              -- test-length budget unit (a matching set is
+                                              -- still exactly 1 here even though it holds
+                                              -- multiple word/definition pairs)
+    question_type   text NOT NULL,           -- 'mc' | 'true_false' | 'matching'
+    target_word_ids integer[] NOT NULL,      -- 1 word for mc/tf, N for a matching set
+    payload         jsonb NOT NULL,          -- type-specific, includes the answer key --
+                                              -- stripped before any client-facing response
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (session_id, seq)
+);
+
+CREATE TABLE IF NOT EXISTS {s}.quiz_answer (
+    id              serial PRIMARY KEY,
+    question_id     integer NOT NULL REFERENCES {s}.quiz_question(id) ON DELETE CASCADE,
+    word_id         integer NOT NULL REFERENCES {s}.word(id) ON DELETE CASCADE,
+                                              -- one row per matching pair (per-pair credit),
+                                              -- exactly one row for mc/tf
+    response        jsonb NOT NULL,
+    is_correct      boolean NOT NULL,
+    answered_at     timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS quiz_answer_question_idx ON {s}.quiz_answer (question_id);
+CREATE INDEX IF NOT EXISTS quiz_answer_word_idx ON {s}.quiz_answer (word_id);
 """
 
 
@@ -288,6 +338,9 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS validity_notes text")
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS suggested_correction text")
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS validity_checked_at timestamptz")
+        cur.execute(
+            f"""INSERT INTO {s}.app_settings (key, value) VALUES ('quiz_feedback_timing', '{{"mode": "immediate"}}')
+                ON CONFLICT (key) DO NOTHING""")
     trgm = True
     try:
         with conn.cursor() as cur:
@@ -335,6 +388,11 @@ def sync_master(csv_path: Path, conn: psycopg.Connection,
                 continue
             definition = r.get("definition") or ""
             is_blank = not definition.strip()
+
+            cur.execute(f"SELECT definition FROM {s}.word WHERE lemma_lc = lower(%s)", (word,))
+            prior = cur.fetchone()
+            old_definition = (prior[0] or "").strip() if prior else None
+
             cur.execute(
                 f"""INSERT INTO {s}.word
                     (lemma, as_seen, definition, part_of_speech, ipa, sentence,
@@ -365,14 +423,17 @@ def sync_master(csv_path: Path, conn: psycopg.Connection,
                             ELSE {s}.word.flagged_undefined_at
                         END,
                         updated_at=now()
-                    RETURNING id""",
+                    RETURNING id, definition""",
                 (word, r.get("as_seen"), definition, normalize_pos(r.get("part_of_speech")),
                  r.get("ipa"), r.get("sentence"), r.get("chapter"), _synonyms(r.get("synonyms", "")),
                  r.get("etymology"), r.get("source"), (r.get("date_added") or ""),
                  is_blank, is_blank),
             )
-            word_id = cur.fetchone()[0]
+            word_id, new_definition = cur.fetchone()
             stats["words"] += 1
+
+            if old_definition and (new_definition or "").strip() != old_definition:
+                _invalidate_definition_dependents(cur, s, word_id)
 
             for title in _books(r.get("source_book", "")):
                 if title not in seen_books:
@@ -389,6 +450,28 @@ def sync_master(csv_path: Path, conn: psycopg.Connection,
                     stats["links"] += 1
     conn.commit()
     return stats
+
+
+def _invalidate_definition_dependents(cur, s: str, word_id: int) -> None:
+    """Clear the downstream artifacts computed FROM word.definition text whose
+    recompute is only-missing/NOT-EXISTS gated -- i.e. the ones that would
+    otherwise silently go stale and never get revisited once this word's
+    definition changes (e.g. the same lemma resolving to a different
+    dictionary sense when a later book re-ingests it -- see the "changeful"
+    bug this was written for: its quiz_definition was a redaction of an
+    earlier, longer definition no longer stored anywhere).
+
+    Deliberately NOT touched here: archaic, difficulty, and quizzable. All
+    three fully recompute every row unconditionally whenever their command
+    runs (no only-missing filter), so they self-correct on the next
+    maintenance pass with no help -- invalidating them would just be a
+    no-op that adds noise."""
+    cur.execute(f"UPDATE {s}.word SET quiz_definition=NULL, quiz_def_source=NULL WHERE id=%s", (word_id,))
+    cur.execute(f"DELETE FROM {s}.word_category WHERE word_id=%s", (word_id,))
+    cur.execute(
+        f"""UPDATE {s}.word_embedding SET definition_vector=NULL, definition_model=NULL, definition_source=NULL
+            WHERE word_id=%s""",
+        (word_id,))
 
 
 def sync_book_results(conn, book_title: str, kept: list, rejected: list,
@@ -415,6 +498,15 @@ def sync_book_results(conn, book_title: str, kept: list, rejected: list,
             rep = c.representative
             definition = c.definition or ""
             is_blank = not definition.strip()
+
+            # Fetched before the upsert so it reflects the pre-upsert value --
+            # needed to tell "this lemma's definition just changed" apart from
+            # "first time seeing this lemma" / "same value again", the only
+            # case _invalidate_definition_dependents needs to fire for.
+            cur.execute(f"SELECT definition FROM {s}.word WHERE lemma_lc = lower(%s)", (c.lemma,))
+            prior = cur.fetchone()
+            old_definition = (prior[0] or "").strip() if prior else None
+
             cur.execute(
                 f"""INSERT INTO {s}.word
                     (lemma, as_seen, definition, part_of_speech, ipa, sentence,
@@ -442,15 +534,19 @@ def sync_book_results(conn, book_title: str, kept: list, rejected: list,
                             ELSE {s}.word.flagged_undefined_at
                         END,
                         updated_at=now()
-                    RETURNING id""",
+                    RETURNING id, definition""",
                 (c.lemma, rep.surface if rep else "", definition,
                  normalize_pos(c.part_of_speech or c.pos), c.ipa,
                  rep.sentence if rep else "", rep.chapter if rep else "",
                  list(c.synonyms), c.etymology,
                  c.definition_source or ", ".join(c.validity_sources),
                  is_blank, is_blank))
-            word_id = cur.fetchone()[0]
+            word_id, new_definition = cur.fetchone()
             stats["kept"] += 1
+
+            if old_definition and (new_definition or "").strip() != old_definition:
+                _invalidate_definition_dependents(cur, s, word_id)
+
             cur.execute(
                 f"""INSERT INTO {s}.word_book (word_id, book_id) VALUES (%s,%s)
                     ON CONFLICT DO NOTHING""", (word_id, book_id))

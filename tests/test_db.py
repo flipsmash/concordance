@@ -114,6 +114,86 @@ def test_ingest_never_clobbers_a_definition_and_flags_undefined(tmp_path):
 
 
 @pg
+def test_ingest_invalidates_stale_definition_dependents_on_change():
+    """The "changeful" bug: a word's quiz_definition/categories/embedding get
+    computed once, then the same lemma resolves to a DIFFERENT dictionary
+    sense on a later book's ingest -- definition changes, but nothing used to
+    tell the downstream only-missing-gated artifacts to recompute, so they
+    silently kept describing the old text. sync_book_results/sync_master
+    should now clear them whenever an upsert actually changes an existing
+    definition (never on a first-time fill, never when it's unchanged)."""
+    from pgvector.psycopg import register_vector
+
+    from concordance.model import Candidate
+
+    schema = "cc_test_definition_invalidation"
+    conn = db.connect(_URL)
+    register_vector(conn)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    first = Candidate(lemma="changeful", pos="ADJ")
+    first.definition = "very susceptible to change; changing frequently"
+    db.sync_book_results(conn, "Book One", kept=[first], rejected=[], schema=schema)
+
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT id FROM {schema}.word WHERE lemma='changeful'")
+        word_id = cur.fetchone()[0]
+        # Simulate a maintenance pass having already run on the ORIGINAL definition.
+        cur.execute(f"UPDATE {schema}.word SET quiz_definition='stale clue', quiz_def_source='redacted', "
+                    f"ipa='tʃeɪndʒfʊl' WHERE id=%s", (word_id,))
+        cur.execute(f"INSERT INTO {schema}.category (taxonomy, code, name) VALUES ('usas','A1','test cat') "
+                    f"ON CONFLICT (taxonomy, code) DO NOTHING")
+        cur.execute(f"SELECT id FROM {schema}.category WHERE taxonomy='usas' AND code='A1'")
+        cat_id = cur.fetchone()[0]
+        cur.execute(f"INSERT INTO {schema}.word_category (word_id, category_id, is_primary) VALUES (%s,%s,true)",
+                    (word_id, cat_id))
+        cur.execute(
+            f"""INSERT INTO {schema}.word_embedding (word_id, definition_vector, definition_model, fasttext_vector, fasttext_model)
+                VALUES (%s, %s, 'test-def-model', %s, 'test-ft-model')""",
+            (word_id, [0.1] * 384, [0.2] * 300))
+    conn.commit()
+
+    # Re-ingesting Book One again with the SAME definition must not invalidate anything.
+    same = Candidate(lemma="changeful", pos="ADJ")
+    same.definition = "very susceptible to change; changing frequently"
+    db.sync_book_results(conn, "Book One", kept=[same], rejected=[], schema=schema)
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT quiz_definition FROM {schema}.word WHERE id=%s", (word_id,))
+        assert cur.fetchone()[0] == "stale clue"
+
+    # Book Two resolves "changeful" to a different, shorter sense -- this is
+    # the actual trigger: definition changes on an already-enriched word.
+    changed = Candidate(lemma="changeful", pos="ADJ")
+    changed.definition = "Changing frequently"
+    db.sync_book_results(conn, "Book Two", kept=[changed], rejected=[], schema=schema)
+
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT definition, quiz_definition, quiz_def_source, ipa FROM {schema}.word WHERE id=%s",
+                    (word_id,))
+        defn, quiz_def, quiz_src, ipa = cur.fetchone()
+        assert defn == "Changing frequently"
+        assert quiz_def is None and quiz_src is None            # invalidated
+        assert ipa == "tʃeɪndʒfʊl"                               # untouched -- not definition-derived
+
+        cur.execute(f"SELECT count(*) FROM {schema}.word_category WHERE word_id=%s", (word_id,))
+        assert cur.fetchone()[0] == 0                            # invalidated
+
+        cur.execute(f"SELECT definition_vector, fasttext_vector FROM {schema}.word_embedding WHERE word_id=%s",
+                    (word_id,))
+        def_vec, ft_vec = cur.fetchone()
+        assert def_vec is None                                   # invalidated
+        assert ft_vec is not None                                # untouched -- lemma-derived, not definition-derived
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
 def test_sync_roundtrip_and_idempotent(tmp_path):
     schema = "cc_test"
     conn = db.connect(_URL)
