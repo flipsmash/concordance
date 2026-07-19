@@ -38,7 +38,8 @@ _FOREIGN_MIN_TOKENS = 5
 _FOREIGN_ENGLISH_FRACTION = 0.5
 _COMMON_ENGLISH_ZIPF = 3.0
 
-_PREFIXES = ("un", "re", "over", "under", "dis", "mis", "out", "be", "en", "im", "in")
+_PREFIXES = ("un", "re", "over", "under", "dis", "mis", "out", "be", "en", "im", "in",
+             "pre", "ir", "il", "non", "post", "sub", "super", "inter", "anti", "fore")
 _SUFFIXES = ("edly", "ing", "ed", "es", "s", "er", "est", "ness", "less", "ly",
              "ure", "ment", "ish", "y", "d")
 

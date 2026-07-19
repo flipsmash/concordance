@@ -27,6 +27,23 @@ def test_unrelated_short_prefix_is_not_a_leak():
     assert not quizdef._shared_root("cat", "catalogue")
 
 
+def test_detects_prefix_derived_leak():
+    # "premeditate" = "pre" + "meditate" -- shares NO leading characters with
+    # its base at all, so the front-alignment check alone can never catch
+    # this; needs the explicit prefix-list check.
+    assert quizdef.has_leak("premeditate", "To meditate, consider, or plan beforehand")
+    assert "meditate" in quizdef.leaking_tokens("premeditate", "To meditate, consider, or plan beforehand")
+    assert quizdef.has_leak("irremovable", "Not removable")
+    assert "removable" in quizdef.leaking_tokens("irremovable", "Not removable")
+
+
+def test_prefix_check_does_not_false_positive_on_coincidental_endings():
+    # Both happen to end in "-ation" but are unrelated words -- a generic
+    # shared-suffix scan would wrongly flag this; the targeted prefix-list
+    # check must not.
+    assert not quizdef._shared_root("nation", "creation")
+
+
 def test_redact_blanks_leaking_tokens_only():
     out = quizdef.redact("borderer", "A person who resides near a border.")
     assert "border" not in out.lower() and "person" in out

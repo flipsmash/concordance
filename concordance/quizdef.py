@@ -22,6 +22,7 @@ import re
 from nltk.stem import SnowballStemmer
 
 from .config import Config
+from .validity_score import _PREFIXES
 
 _st = SnowballStemmer("english")
 
@@ -35,7 +36,22 @@ def _shared_root(a: str, b: str) -> bool:
             n += 1
         else:
             break
-    return n >= 4 and n >= 0.55 * min(len(a), len(b))
+    if n >= 4 and n >= 0.55 * min(len(a), len(b)):
+        return True
+    # A word formed by adding a prefix ("premeditate" = "pre" + "meditate",
+    # "irremovable" = "ir" + "removable") shares NO leading characters with
+    # its base, so the prefix-alignment check above can never catch it --
+    # check explicitly for "one string is exactly a known prefix glued onto
+    # the other" instead. Targeted at a specific prefix list (shared with
+    # validity_score's own morphology check) rather than a generic
+    # shared-suffix scan, which would false-positive constantly on
+    # coincidental shared endings between unrelated words (e.g. "nation" and
+    # "creation" both ending in "-ation").
+    for word, other in ((a, b), (b, a)):
+        for p in _PREFIXES:
+            if word.startswith(p) and word[len(p):] == other and len(other) >= 4:
+                return True
+    return False
 
 
 def leaking_tokens(word: str, definition: str) -> list[str]:
