@@ -96,6 +96,47 @@ Flags: `--min-zipf` (frequency floor; higher = rarer only), `--limit`,
 `--no-lookup`, `--model`, `--stub`, `--schema`, `--database-url`,
 `--no-archive` (batch mode only).
 
+## Post-ingest maintenance (`maintain`)
+
+Everything below this point — backfilling, enrichment/scoring, pronunciation
+prep, and embeddings — runs in one dependency-ordered pass instead of twelve
+commands to remember and re-order by hand:
+
+```bash
+concordance maintain   # refill -> deepen -> classify -> normalize-pos -> ngram
+                        # -> archaic -> difficulty -> quizdef -> quizzable
+                        # -> wordnik-pron -> ipa -> embed
+```
+
+Every step runs incrementally (only-missing / blank-only / not-yet-embedded),
+so a re-run after everything's caught up is fast — it only touches the newest
+batch's words. The **first** run against a corpus with a real backlog is not:
+`classify` and `quizdef` both load a local LLM and call it per word, so
+catching up a few thousand words is likely to take hours. That cost is paid
+once. Use `--skip-refill`, `--skip-classify`, `--skip-quizdef`, etc. (one flag
+per step) to defer the slow ones to run separately/overnight instead of
+blocking on them inline; `--limit` caps words processed per step, useful for
+chunking a large backlog into resumable pieces (`compute_quiz_definitions`,
+for one, only commits at the very end of a run — an unlimited invocation
+against tens of thousands of words risks losing hours of LLM work to a single
+interruption; looping `--limit 3000` and relying on only-missing to pick up
+where the last chunk left off is the safer shape for a big catch-up).
+`load-taxonomy` and `train-fasttext` are deliberately excluded — both are
+one-time/occasional setup, not per-batch maintenance — and so are the
+Commons/Azure audio steps, since Commons rate-limits hard and is meant to run
+for hours unattended on its own (see "Pronunciation audio" below).
+
+**Definitions can change after these have already run** — the same lemma
+reappearing in a later book can resolve to a different dictionary sense, and
+`sync_book_results`/`sync_master` will overwrite an existing definition with
+the new one. Whenever that happens, whatever was computed from the *old* text
+and only ever revisited via an only-missing check — `quiz_definition`, USAS
+categories, the definition embedding — gets invalidated (cleared) right there
+in the same upsert, so the next `maintain` run regenerates it from the
+current text instead of silently going stale. `archaic`/`difficulty`/
+`quizzable` don't need this: all three always recompute every row
+unconditionally, so they self-correct on the next run with no help.
+
 ## Backfilling definitions (`refill`, `deepen`)
 
 A word can be *kept* (a real word, worth learning) without ever getting a
@@ -179,13 +220,12 @@ concordance quizzable       # flag variant/inferable-derivative words as unquizz
   base form is grammatical (plurals, inflections) or a transparently inferable
   derivative, so quizzing doesn't waste a card on something not actually new.
 
-### Pronunciation audio (`maintain`, `wordnik-pron`, `ipa`, `commons-search`, `commons-download`, `audio`, `audio-guess`)
+### Pronunciation audio (`wordnik-pron`, `ipa`, `commons-search`, `commons-download`, `audio`, `audio-guess`)
 
 Real human recordings where they exist, IPA-guided synthesis otherwise —
 never a blind spelling-to-speech guess unless nothing else is available:
 
 ```bash
-concordance maintain          # wordnik-pron + ipa in one pass — run after every ingest batch
 concordance wordnik-pron      # fetch raw Wordnik transcriptions (ARPAbet/AHD-5/IPA)
 concordance ipa               # backfill+validate word.ipa from kaikki, then Wordnik, then local Wiktionary
 concordance commons-search    # find real Commons recordings kaikki's dump missed
@@ -194,17 +234,16 @@ concordance audio             # Commons recording if present, else Azure IPA-gui
 concordance audio-guess       # last resort: Azure guesses from spelling alone
 ```
 
-`maintain` exists because `wordnik-pron` and `ipa` can't be folded into `ingest`
-itself: `wordnik-pron` is rate-limited (~1 word/several seconds on the free
-tier) and `ipa`'s primary source is a 2.7GB dump scan, so both stay batch
-passes rather than per-word ingest-time lookups — `maintain` is what makes
-running them after a batch a habit instead of something to remember. Run it
-(or at least `ipa`) before `audio` — synthesis quality depends on the
-transcription it's given. `commons-search`/`commons-download`/`audio` are
-deliberately separate commands rather than one pass: Commons rate-limits hard
-and is meant to run for hours unattended, which would starve the fast Azure
-calls if interleaved. `audio-guess` results are tagged `source='azure_guess'`
-(vs. `'azure'` for IPA-guided) so the app can flag them as unverified.
+`wordnik-pron` and `ipa` are both part of the `maintain` chain above — rerun
+`maintain` (or just `ipa`) before `audio`, since synthesis quality depends on
+the transcription it's given. `wordnik-pron` is rate-limited (~1 word/several
+seconds on the free tier) and `ipa`'s primary source is a 2.7GB dump scan, so
+both stay batch passes rather than per-word ingest-time lookups.
+`commons-search`/`commons-download`/`audio` are deliberately separate
+commands rather than folded into `maintain`: Commons rate-limits hard and is
+meant to run for hours unattended, which would starve every other step if
+interleaved. `audio-guess` results are tagged `source='azure_guess'` (vs.
+`'azure'` for IPA-guided) so the app can flag them as unverified.
 
 ## Semantic distance (`train-fasttext`, `embed`)
 
