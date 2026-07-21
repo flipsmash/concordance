@@ -219,7 +219,12 @@ def _parse_etymology(text: str) -> str:
 
 def _pick_sense(cand: Candidate, senses: list[tuple[str, str, list]]) -> tuple[str, str, list]:
     """Choose the sense matching the book's sentence. The LLM sense-picker wires
-    in here; until then, prefer a sense whose POS matches the tagger, else first.
+    in here; until then, prefer a sense whose POS matches the tagger, else the
+    first sense that actually carries a POS at all (mirrors deepdef._from_wordnik's
+    same tiebreak) — the source API's own partOfSpeech field can be blank on a
+    given meaning grouping, and picking that one by pure response-order accident
+    left part_of_speech empty on an otherwise-successful definition hit for no
+    reason better than "it happened to come first."
 
     A "symbol"/"proper noun" sense (see model.is_junk_pos) is only ever picked
     when it's truly the word's SOLE resolvable sense — never over a legitimate
@@ -232,11 +237,12 @@ def _pick_sense(cand: Candidate, senses: list[tuple[str, str, list]]) -> tuple[s
     if len(real) == 1:
         return real[0]
     tagged = _COARSE_POS.get(cand.pos)
-    if tagged:
-        for s in real:
-            if s[0].lower().startswith(tagged):
-                return s
-    return real[0]
+
+    def rank(s: tuple[str, str, list]) -> tuple[int, int]:
+        tag_matches = bool(tagged) and s[0].lower().startswith(tagged)
+        return (0 if tag_matches else 1, 0 if s[0] else 1)
+
+    return sorted(real, key=rank)[0]
 
 
 _COARSE_POS = {"NOUN": "noun", "VERB": "verb", "ADJ": "adjective", "ADV": "adverb"}

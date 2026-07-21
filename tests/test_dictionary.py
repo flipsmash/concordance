@@ -111,3 +111,25 @@ def test_enrich_no_source_stays_empty(monkeypatch):
     D.enrich(cand, session=object())
     assert cand.definition == ""
     assert cand.definition_source == ""
+
+
+def test_pick_sense_prefers_tagged_pos_first_match():
+    c = Candidate(lemma="x", pos="VERB")
+    senses = [("noun", "a thing", []), ("verb", "to do a thing", [])]
+    assert D._pick_sense(c, senses) == ("verb", "to do a thing", [])
+
+
+def test_pick_sense_prefers_a_posed_entry_over_a_blank_one_when_untagged():
+    # Regression, mirrors deepdef._from_wordnik's own tiebreak: with no
+    # tagger match (or no tagger POS at all), a same-rank entry whose
+    # partOfSpeech field the source API just left blank must not win over
+    # one that actually carries a POS, purely by response-order accident.
+    c = Candidate(lemma="x", pos="ADJ")
+    senses = [("", "a cross-reference gloss", []), ("noun", "the real definition", [])]
+    assert D._pick_sense(c, senses) == ("noun", "the real definition", [])
+
+
+def test_pick_sense_falls_back_to_first_when_all_blank():
+    c = Candidate(lemma="x", pos="NOUN")
+    senses = [("", "first gloss", []), ("", "second gloss", [])]
+    assert D._pick_sense(c, senses) == ("", "first gloss", [])
