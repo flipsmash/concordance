@@ -84,7 +84,6 @@ def resolve_definition(
     cand: Candidate,
     *,
     max_tier: Tier = Tier.WEB,
-    try_free: bool = True,
     lexicon: dict | None = None,
     session=None,
     wordnik_key: str | None = None,
@@ -97,23 +96,14 @@ def resolve_definition(
     max_tier missed. `lexicon` (from localdict.build_lexicon) and `session`
     (from dictionary.make_session) are expected to be built once per batch
     by the caller and passed in -- omitting `lexicon` simply skips Tier
-    LOCAL (e.g. scripts/lookup_word.py, which has no database at all).
-
-    `try_free=False` skips Tier FREE specifically while still trying tiers
-    above it -- deepen_definitions's one real need: by the time a word
-    reaches deepen in the normal maintain sequence, refill_definitions has
-    already tried Free Dictionary/Wiktionary on that exact lemma and failed
-    (deterministically, same sources), so retrying it would just be more of
-    the same wasted redundancy Tier LOCAL already had before this module
-    existed -- not a `max_tier` ceiling, since deepen still wants WORDNIK/
-    YOURDICT/WEB above it."""
+    LOCAL (e.g. scripts/lookup_word.py, which has no database at all)."""
     lexicon = lexicon or {}
     resolved: Tier | None = None
 
     if localdict.enrich(cand, lexicon):
         resolved = Tier.LOCAL
 
-    if resolved is None and try_free and max_tier >= Tier.FREE:
+    if resolved is None and max_tier >= Tier.FREE:
         session = session or dictionary.make_session()
         dictionary.enrich(cand, session)
         if cand.definition:

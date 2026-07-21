@@ -394,14 +394,13 @@ def test_compute_ipa_limit_applies_after_the_only_missing_filter(monkeypatch):
 
 
 @pg
-def test_deepen_skips_free_tier_and_gates_web_on_validity(monkeypatch, tmp_path):
-    # deepen_definitions runs right after refill_definitions in the normal
-    # maintain sequence, which already tried Free Dictionary/Wiktionary on
-    # every one of these lemmas -- try_free=False must actually reach
-    # through to resolve.resolve_definition, not just be accepted and
-    # ignored. And the WEB tier must stay gated on validity_score exactly
-    # like before resolve.py existed: only tried when an LLM is available
-    # AND the word doesn't score as a likely artifact.
+def test_fill_definitions_gates_web_tier_on_validity(monkeypatch, tmp_path):
+    # fill_definitions is the single merged pass now (used to be separate
+    # refill_definitions + deepen_definitions calls) -- the WEB tier must
+    # stay gated on validity_score exactly like deepen used to: only tried
+    # when an LLM is available AND the word doesn't score as a likely
+    # artifact. resolve_definition itself has no concept of this gate, so
+    # it has to survive the merge as fill_definitions' own logic.
     import llama_cpp
 
     from concordance import resolve, validity_score
@@ -412,7 +411,12 @@ def test_deepen_skips_free_tier_and_gates_web_on_validity(monkeypatch, tmp_path)
     model_path = tmp_path / "fake.gguf"
     model_path.write_bytes(b"")
 
-    schema = "cc_test_deepen"
+    monkeypatch.setattr(resolve.localdict, "enrich", lambda cand, lex: False)
+    monkeypatch.setattr(resolve.dictionary, "enrich", lambda cand, session: None)
+    monkeypatch.setattr(resolve.deepdef, "wordnik_key", lambda: "")
+    monkeypatch.setattr(resolve.deepdef, "_from_yourdictionary", lambda cand, session: False)
+
+    schema = "cc_test_fill"
     conn = db.connect(_URL)
     with conn.cursor() as cur:
         cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
@@ -422,12 +426,6 @@ def test_deepen_skips_free_tier_and_gates_web_on_validity(monkeypatch, tmp_path)
     blank_a = Candidate(lemma="artifactword", pos="NOUN")
     blank_b = Candidate(lemma="realword", pos="NOUN")
     db.sync_book_results(conn, "Book One", kept=[blank_a, blank_b], rejected=[], schema=schema)
-
-    monkeypatch.setattr(resolve.localdict, "enrich", lambda cand, lex: False)
-    monkeypatch.setattr(resolve.dictionary, "enrich",
-                         lambda *a, **k: pytest.fail("FREE tier must be skipped in deepen"))
-    monkeypatch.setattr(resolve.deepdef, "wordnik_key", lambda: "")
-    monkeypatch.setattr(resolve.deepdef, "_from_yourdictionary", lambda cand, session: False)
 
     def fake_estimate(word, session=None, sentence="", zipf=None):
         label = "likely-artifact" if word == "artifactword" else "plausible"
@@ -445,9 +443,12 @@ def test_deepen_skips_free_tier_and_gates_web_on_validity(monkeypatch, tmp_path)
 
     monkeypatch.setattr("concordance.websearch.define_via_web", fake_web)
 
-    stats = db.deepen_definitions(conn, schema, use_web=True, model_path=str(model_path))
+    stats = db.fill_definitions(conn, schema, use_web=True, model_path=str(model_path))
 
-    # likely-artifact never reaches the web tier; the other word does.
+    # likely-artifact never reaches the web tier; the other word does. (Both
+    # words are real, invented nonce lemmas -- neither resolves via any real
+    # dictionary tier, so whichever one reaches WEB is purely a function of
+    # the validity_score gate, not a fluke of a live source having an entry.)
     assert calls == ["realword"]
     assert stats["defined"] == 1
     assert stats["still_undefined"] == 1
@@ -458,6 +459,97 @@ def test_deepen_skips_free_tier_and_gates_web_on_validity(monkeypatch, tmp_path)
         cur.execute(f"select definition, validity_label from {schema}.word where lemma='artifactword'")
         assert cur.fetchone() == ("", "likely-artifact")
 
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_fill_definitions_cooldown_skips_a_recently_checked_word(monkeypatch):
+    # The idempotency gap this closes: without a cooldown, every `maintain`
+    # run re-attempts the ENTIRE permanently-undefined tail through
+    # Wordnik/web-search again, forever. A word with a recent
+    # validity_checked_at (i.e. it failed every tier recently) must be
+    # skipped; one whose check is older than recheck_after_days must still
+    # be retried.
+    from concordance import resolve
+    from concordance.model import Candidate
+
+    monkeypatch.setattr(resolve.localdict, "enrich", lambda cand, lex: False)
+    monkeypatch.setattr(resolve.dictionary, "enrich", lambda cand, session: None)
+    monkeypatch.setattr(resolve.deepdef, "wordnik_key", lambda: "")
+    monkeypatch.setattr(resolve.deepdef, "_from_yourdictionary", lambda cand, session: False)
+
+    schema = "cc_test_cooldown"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    recent = Candidate(lemma="recentlychecked", pos="NOUN")
+    stale = Candidate(lemma="stalechecked", pos="NOUN")
+    never = Candidate(lemma="neverchecked", pos="NOUN")
+    db.sync_book_results(conn, "Book One", kept=[recent, stale, never], rejected=[], schema=schema)
+    with conn.cursor() as cur:
+        cur.execute(f"""UPDATE {schema}.word SET validity_checked_at = now() - interval '1 day'
+                        WHERE lemma = 'recentlychecked'""")
+        cur.execute(f"""UPDATE {schema}.word SET validity_checked_at = now() - interval '30 days'
+                        WHERE lemma = 'stalechecked'""")
+    conn.commit()
+
+    stats = db.fill_definitions(conn, schema, recheck_after_days=14)
+
+    # Only stale + never-checked are candidates; recentlychecked is skipped.
+    assert stats["attempted"] == 2
+    with conn.cursor() as cur:
+        cur.execute(f"select validity_checked_at from {schema}.word where lemma='recentlychecked'")
+        before = cur.fetchone()[0]
+    assert before is not None  # untouched by this run, still the seeded value
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_fill_definitions_builds_the_lexicon_once_not_twice_per_word(monkeypatch):
+    # The redundancy this whole merge eliminates: the old two-pass
+    # refill-then-deepen design re-entered the cascade at Tier LOCAL twice
+    # per word (once per pass). One merged pass means localdict.build_lexicon
+    # runs exactly once per fill_definitions call, not once per tier/pass.
+    from concordance import localdict, resolve
+    from concordance.model import Candidate
+
+    monkeypatch.setattr(resolve.dictionary, "enrich", lambda cand, session: None)
+    monkeypatch.setattr(resolve.deepdef, "wordnik_key", lambda: "")
+    monkeypatch.setattr(resolve.deepdef, "_from_yourdictionary", lambda cand, session: False)
+
+    schema = "cc_test_lexicon_once"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    words = [Candidate(lemma=f"lexword{i}", pos="NOUN") for i in range(3)]
+    db.sync_book_results(conn, "Book One", kept=words, rejected=[], schema=schema)
+
+    calls = {"n": 0}
+    real_build_lexicon = localdict.build_lexicon
+
+    def spy_build_lexicon(conn_, lemmas):
+        calls["n"] += 1
+        return real_build_lexicon(conn_, lemmas)
+
+    monkeypatch.setattr(localdict, "build_lexicon", spy_build_lexicon)
+
+    db.fill_definitions(conn, schema)
+
+    assert calls["n"] == 1  # once for the whole batch, not once per word
+
+    with conn.cursor() as cur:
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
     conn.close()

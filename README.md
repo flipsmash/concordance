@@ -103,7 +103,7 @@ prep, and embeddings — runs in one dependency-ordered pass instead of twelve
 commands to remember and re-order by hand:
 
 ```bash
-concordance maintain   # refill -> deepen -> classify -> normalize-pos -> ngram
+concordance maintain   # fill-definitions -> classify -> normalize-pos -> ngram
                         # -> archaic -> difficulty -> quizdef -> quizzable
                         # -> wordnik-pron -> ipa -> embed
 ```
@@ -113,18 +113,22 @@ so a re-run after everything's caught up is fast — it only touches the newest
 batch's words. The **first** run against a corpus with a real backlog is not:
 `classify` and `quizdef` both load a local LLM and call it per word, so
 catching up a few thousand words is likely to take hours. That cost is paid
-once. Use `--skip-refill`, `--skip-classify`, `--skip-quizdef`, etc. (one flag
-per step) to defer the slow ones to run separately/overnight instead of
-blocking on them inline; `--limit` caps words processed per step, useful for
-chunking a large backlog into resumable pieces (`compute_quiz_definitions`,
-for one, only commits at the very end of a run — an unlimited invocation
-against tens of thousands of words risks losing hours of LLM work to a single
-interruption; looping `--limit 3000` and relying on only-missing to pick up
-where the last chunk left off is the safer shape for a big catch-up).
-`load-taxonomy` and `train-fasttext` are deliberately excluded — both are
-one-time/occasional setup, not per-batch maintenance — and so are the
-Commons/Azure audio steps, since Commons rate-limits hard and is meant to run
-for hours unattended on its own (see "Pronunciation audio" below).
+once. Use `--skip-fill-definitions`, `--skip-classify`, `--skip-quizdef`, etc.
+(one flag per step) to defer the slow ones to run separately/overnight
+instead of blocking on them inline; `--limit` caps words processed per step,
+useful for chunking a large backlog into resumable pieces
+(`compute_quiz_definitions`, for one, only commits at the very end of a run —
+an unlimited invocation against tens of thousands of words risks losing hours
+of LLM work to a single interruption; looping `--limit 3000` and relying on
+only-missing to pick up where the last chunk left off is the safer shape for
+a big catch-up). `fill-definitions` also honors `--recheck-after-days`
+(default 14): a word whose last resolution attempt failed recently is
+skipped rather than re-ground through Wordnik/web-search again on every
+single `maintain` run. `load-taxonomy` and `train-fasttext` are deliberately
+excluded — both are one-time/occasional setup, not per-batch maintenance —
+and so are the Commons/Azure audio steps, since Commons rate-limits hard and
+is meant to run for hours unattended on its own (see "Pronunciation audio"
+below).
 
 **Definitions can change after these have already run** — the same lemma
 reappearing in a later book can resolve to a different dictionary sense, and
@@ -147,6 +151,12 @@ accepted with no definition — **sticky by design**: the marker is never
 cleared, even once a definition is later found, because the point is a
 permanent "this one needed a second look" audit trail for your own manual
 validity review, not a live status flag.
+
+`maintain`'s `fill-definitions` step runs both of these in one pass per word
+(cheap sources first, falling through to the deeper ones without ever
+re-entering the cascade from scratch). `refill`/`deepen` below remain as
+separate, independent commands — useful for running just the cheap pass, or
+re-running the deep pass on demand outside a full `maintain`.
 
 ```bash
 concordance refill              # cheap sources, same ones ingest already tried

@@ -634,10 +634,23 @@ def maintain(
     fasttext_model: Path = typer.Option(_FASTTEXT_MODEL_PATH, "--fasttext-model",
                                          help="Trained model from train-fasttext, for the embed step."),
     deepen_web: bool = typer.Option(False, "--deepen-web",
-                                     help="Let the deepen step fall back to web-search + LLM extraction."),
+                                     help="Let the fill-definitions step fall back to web-search + LLM extraction."),
+    recheck_after_days: int = typer.Option(14, "--recheck-after-days",
+                                            help="Skip a word in fill-definitions if its last validity check "
+                                                 "(i.e. its last failed resolution attempt) was more recent "
+                                                 "than this many days ago -- without this, every maintain run "
+                                                 "re-grinds the whole permanently-undefined tail through "
+                                                 "Wordnik/web-search again, forever."),
     limit: int = typer.Option(0, "--limit", "-l", help="Cap number of words processed, per step (0 = all)."),
-    skip_refill: bool = typer.Option(False, "--skip-refill"),
-    skip_deepen: bool = typer.Option(False, "--skip-deepen"),
+    skip_fill_definitions: bool = typer.Option(False, "--skip-fill-definitions",
+                                                help="Skip the definition-lookup step (formerly two separate "
+                                                     "refill + deepen steps, now one)."),
+    skip_refill: bool = typer.Option(False, "--skip-refill",
+                                      help="Deprecated alias for --skip-fill-definitions (refill and deepen "
+                                           "are now one step; either flag skips it)."),
+    skip_deepen: bool = typer.Option(False, "--skip-deepen",
+                                      help="Deprecated alias for --skip-fill-definitions (refill and deepen "
+                                           "are now one step; either flag skips it)."),
     skip_classify: bool = typer.Option(False, "--skip-classify"),
     skip_normalize_pos: bool = typer.Option(False, "--skip-normalize-pos"),
     skip_ngram: bool = typer.Option(False, "--skip-ngram"),
@@ -650,17 +663,23 @@ def maintain(
     skip_embed: bool = typer.Option(False, "--skip-embed"),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
-    """Run the full post-ingest maintenance chain in dependency order: refill
-    -> deepen -> classify -> normalize-pos -> ngram -> archaic -> difficulty ->
-    quizdef -> quizzable -> wordnik-pron -> ipa -> embed. This is the whole
-    documented sequence from the README's "Backfilling definitions" /
-    "Enrichment & scoring" / "Pronunciation audio" / "Semantic distance"
-    sections, chained into one command instead of twelve to remember and
-    re-order by hand. `load-taxonomy` and `train-fasttext` are deliberately
-    excluded — both are one-time/occasional holistic setup, not per-batch
-    maintenance (see their own docstrings); Commons/Azure audio steps stay
-    separate too, since Commons rate-limits hard and is meant to run for hours
-    unattended on its own.
+    """Run the full post-ingest maintenance chain in dependency order:
+    fill-definitions -> classify -> normalize-pos -> ngram -> archaic ->
+    difficulty -> quizdef -> quizzable -> wordnik-pron -> ipa -> embed. This
+    is the whole documented sequence from the README's "Backfilling
+    definitions" / "Enrichment & scoring" / "Pronunciation audio" /
+    "Semantic distance" sections, chained into one command instead of eleven
+    to remember and re-order by hand. `load-taxonomy` and `train-fasttext`
+    are deliberately excluded — both are one-time/occasional holistic setup,
+    not per-batch maintenance (see their own docstrings); Commons/Azure audio
+    steps stay separate too, since Commons rate-limits hard and is meant to
+    run for hours unattended on its own.
+
+    fill-definitions used to be two separate steps here (refill then deepen)
+    that each re-entered the definition cascade from scratch on the same
+    blank words — now one pass per word at whatever depth --deepen-web
+    allows, gated by --recheck-after-days so a permanently-undefined tail
+    doesn't get re-ground through Wordnik/web-search on every single run.
 
     Every step runs incrementally (only-missing / blank-only / not-refetch),
     including forcing classify's only_missing (its own default is False) — so
@@ -679,24 +698,16 @@ def maintain(
     if model:
         cfg.model_path = str(model)
 
-    if not skip_refill:
-        with console.status("[bold]Backfilling definitions (refill)…"):
-            stats = db.refill_definitions(conn, schema, limit=limit)
-        console.print(f"[green]✓[/green] refill: [bold]{stats['filled']}[/bold]/{stats['attempted']} "
-                      f"filled ({stats['still_missing']} still undefined, "
-                      f"{stats.get('cast_out', 0)} cast out as symbol/proper-noun-only)")
-    else:
-        console.print("[dim]refill skipped.[/dim]")
-
-    if not skip_deepen:
-        with console.status("[bold]Resolving the undefined tail (deepen)…"):
-            stats = db.deepen_definitions(conn, schema, use_web=deepen_web,
-                                          model_path=str(model) if model else None, limit=limit)
-        console.print(f"[green]✓[/green] deepen: [bold]{stats['defined']}[/bold]/{stats['attempted']} "
+    if not (skip_fill_definitions or skip_refill or skip_deepen):
+        with console.status("[bold]Backfilling definitions…"):
+            stats = db.fill_definitions(conn, schema, limit=limit, use_web=deepen_web,
+                                        model_path=str(model) if model else None,
+                                        recheck_after_days=recheck_after_days)
+        console.print(f"[green]✓[/green] fill-definitions: [bold]{stats['defined']}[/bold]/{stats['attempted']} "
                       f"defined ({stats['still_undefined']} scored for validity, still undefined, "
                       f"{stats.get('cast_out', 0)} cast out as symbol/proper-noun-only)")
     else:
-        console.print("[dim]deepen skipped.[/dim]")
+        console.print("[dim]fill-definitions skipped.[/dim]")
 
     if not skip_classify:
         from .classify import classify_and_store

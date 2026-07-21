@@ -614,22 +614,148 @@ def sync_book_results(conn, book_title: str, kept: list, rejected: list,
 _POS_TO_TAGGER = {"noun": "NOUN", "verb": "VERB", "adjective": "ADJ", "adverb": "ADV"}
 
 
-def refill_definitions(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0,
-                       delay: float = 0.15) -> dict:
-    """DB-native equivalent of `refill.py`'s CSV backfill: retry the same cheap
-    sources (local Wiktionary, then Free Dictionary API / online Wiktionary)
-    for every word whose definition is still blank. Does NOT clear
-    `flagged_undefined` even on success — that flag is a permanent "this one
-    needed a second look" marker, not a live status (see apply_schema).
+def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
+                     use_web: bool = False, model_path: str | None = None,
+                     recheck_after_days: int = 14) -> dict:
+    """The single definition-acquisition pass for words whose definition is
+    still blank: one candidate SELECT, one lexicon build, one per-row trip
+    through resolve.resolve_definition at whatever depth `use_web` allows
+    (YOURDICT without it, WEB with it) -- replaces what used to be two
+    separate passes (refill_definitions then deepen_definitions) each
+    re-entering the cascade at Tier LOCAL, the second one's local/free
+    attempts always redundant with the first's on the same lemma.
 
-    If the resolved sense is a symbol/proper noun (see model.junk_pos_reason —
-    the same gate ingest's pipeline.process() applies), the word is cast out
-    (active=false) instead of being filled in: these are words that were
-    ACCEPTED with no definition at all, so this is the first real evidence of
-    what they actually are, and blank-defined-but-active is exactly the state
-    this gate exists to eliminate — leaving it blank here would just leave the
-    word sitting in the accepted list unexplained forever."""
-    import time
+    A word that resolves to a symbol/proper-noun-only sense (see
+    model.junk_pos_reason -- the same gate ingest's pipeline.process()
+    applies) is cast out (active=false) instead of being filled in: these
+    words were ACCEPTED with no definition at all, so this is the first
+    real evidence of what they actually are. Never clears flagged_undefined
+    -- that flag is a permanent "this one needed a second look" marker, not
+    a live status (see apply_schema).
+
+    Whatever's still undefined after the full cascade gets a
+    validity_score.estimate() written to word.validity_* -- the DB-native
+    version of deepen.py's <book>.undefined.csv report, so a word that's
+    both flagged_undefined AND scored likely-artifact is an obvious prune
+    candidate, not silent noise in the accepted list.
+
+    `recheck_after_days`: a word already scored by validity_score recently
+    is skipped entirely rather than re-run through the full cascade (Wordnik
+    pacing included) again -- without this, every `maintain` run would
+    re-grind the entire permanently-undefined tail through Wordnik/web-search
+    forever, not just the first time it's ever seen."""
+    from . import deepdef, localdict, resolve, validity_score
+    from .config import Config
+    from .dictionary import make_session
+    from .model import Candidate, Occurrence, junk_pos_reason
+
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT id, lemma, part_of_speech, sentence, chapter, as_seen
+                FROM {s}.word
+                WHERE coalesce(definition,'') = ''
+                  AND (validity_checked_at IS NULL
+                       OR validity_checked_at < now() - (%s * interval '1 day'))
+                ORDER BY flagged_undefined_at NULLS LAST, lemma""" +
+            (f" LIMIT {int(limit)}" if limit else ""), (recheck_after_days,))
+        rows = cur.fetchall()
+
+    stats = {"attempted": len(rows), "defined": 0, "still_undefined": 0, "cast_out": 0}
+    if not rows:
+        return stats
+
+    lexicon = localdict.build_lexicon(conn, {lemma.lower() for _, lemma, *_ in rows})
+    session = make_session()
+    key = deepdef.wordnik_key()
+    max_tier = resolve.Tier.WEB if use_web else resolve.Tier.YOURDICT
+
+    llm = None
+    if use_web:
+        cfg = Config()
+        mp = model_path or cfg.model_path
+        if mp and Path(mp).exists():
+            from llama_cpp import Llama
+            llm = Llama(model_path=mp, n_gpu_layers=cfg.n_gpu_layers, n_ctx=cfg.n_ctx, verbose=False)
+
+    with conn.cursor() as cur:
+        for i, (wid, lemma, pos, sentence, chapter, as_seen) in enumerate(rows, 1):
+            cand = Candidate(lemma=lemma, pos=_POS_TO_TAGGER.get((pos or "").lower(), ""))
+            if sentence:
+                cand.occurrences.append(Occurrence(sentence=sentence, chapter=chapter or "",
+                                                    surface=as_seen or lemma))
+            # llm=None here even when a model is loaded: WEB must stay gated
+            # on the validity_score check below, which resolve_definition has
+            # no concept of, so LOCAL/FREE/WORDNIK/YOURDICT run first in one
+            # pass and WEB is only ever tried directly, never as part of
+            # this call.
+            est = None
+            found = resolve.resolve_definition(
+                cand, max_tier=max_tier, lexicon=lexicon, session=session,
+                wordnik_key=key, llm=None) is not None
+            if not found:
+                est = validity_score.estimate(lemma, session=session, sentence=sentence or "")
+                if llm is not None and est.label != "likely-artifact":
+                    from . import websearch
+                    found = websearch.define_via_web(cand, llm)
+                    if found:
+                        resolve.apply_pos_repair(cand, lexicon)
+
+            reason = junk_pos_reason(cand.part_of_speech) if found else None
+            if reason:
+                cur.execute(
+                    f"""UPDATE {s}.word SET
+                            definition=%s,
+                            definition_source=COALESCE(NULLIF(%s,''), definition_source),
+                            part_of_speech=%s, active=false, updated_at=now()
+                        WHERE id=%s""",
+                    (cand.definition, cand.definition_source,
+                     normalize_pos(cand.part_of_speech), wid))
+                stats["cast_out"] += 1
+            elif found:
+                cur.execute(
+                    f"""UPDATE {s}.word SET
+                            definition=%s,
+                            definition_source=COALESCE(NULLIF(%s,''), definition_source),
+                            part_of_speech=COALESCE(NULLIF(%s,''), part_of_speech),
+                            ipa=COALESCE(NULLIF(%s,''), ipa),
+                            etymology=COALESCE(NULLIF(%s,''), etymology),
+                            synonyms=CASE WHEN %s THEN %s ELSE synonyms END,
+                            updated_at=now()
+                        WHERE id=%s""",
+                    (cand.definition, cand.definition_source, normalize_pos(cand.part_of_speech),
+                     cand.ipa, cand.etymology, bool(cand.synonyms), list(cand.synonyms), wid))
+                stats["defined"] += 1
+            else:
+                cur.execute(
+                    f"""UPDATE {s}.word SET
+                            validity_label=%s, validity_score=%s, validity_notes=%s,
+                            suggested_correction=%s, validity_checked_at=now()
+                        WHERE id=%s""",
+                    (est.label, est.score, est.notes, est.suggestion or None, wid))
+                stats["still_undefined"] += 1
+            # Committed every word, not batched every 200: each iteration's
+            # slow network call (Wordnik/yourdictionary, rate-limited) can
+            # itself take longer than the whole old batch interval, so a
+            # 200-row batch left one transaction open for tens of minutes at
+            # a time -- long enough to block a webapp restart's schema-check
+            # ALTER TABLE, which needs an ACCESS EXCLUSIVE lock on this same
+            # table and would otherwise queue behind it. Per-word commits cap
+            # any held lock at one row's write.
+            conn.commit()
+    return stats
+
+
+def refill_definitions(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> dict:
+    """Standalone `concordance refill`: the cheap/free tiers only (LOCAL,
+    FREE), never Wordnik/yourdictionary/web -- a thin wrapper around
+    fill_definitions for the independent, human-scheduled command. Doesn't
+    write validity_score (that's specifically deepen/fill_definitions'
+    deep-pass signal; a word cheap tiers missed hasn't earned an artifact
+    verdict yet, it just hasn't been tried deeply). Returns refill's
+    historical stat vocabulary (filled/still_missing) rather than
+    fill_definitions' (defined/still_undefined) for backward compatibility
+    with existing callers/scripts."""
     from . import localdict, resolve
     from .dictionary import make_session
     from .model import Candidate, Occurrence, junk_pos_reason
@@ -686,130 +812,19 @@ def refill_definitions(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0,
                 stats["still_missing"] += 1
             if i % 200 == 0:
                 conn.commit()
-            time.sleep(delay)
     conn.commit()
     return stats
 
 
 def deepen_definitions(conn, schema: str = DEFAULT_SCHEMA, use_web: bool = False,
                        model_path: str | None = None, limit: int = 0) -> dict:
-    """DB-native equivalent of deepen.py's `define`: for words still blank after
-    `refill_definitions`, try the deeper/slower sources (Wordnik, yourdictionary,
-    optionally web-search + LLM extraction). Whatever still can't be defined gets
-    a validity_score.estimate() written to word.validity_* — the DB-native
-    version of deepen.py's <book>.undefined.csv report — so a word that's both
-    flagged_undefined AND scored likely-artifact is an obvious prune candidate,
-    not silent noise in the accepted list. Never clears flagged_undefined, same
-    as refill_definitions.
-
-    No blanket per-word sleep here (there used to be one, tuned to Wordnik's
-    cap at 13s/word regardless of whether that row ever touched Wordnik) --
-    resolve.resolve_definition paces the WORDNIK tier itself now, so a row
-    that resolves at LOCAL/YOURDICT/WEB no longer pays a Wordnik-sized delay
-    it never needed. try_free=False: refill_definitions already tried Free
-    Dictionary/Wiktionary on this exact lemma immediately before deepen runs
-    in the normal maintain sequence, so retrying it here would just be more
-    of the redundant work localdict's repeat call already was.
-
-    Same junk-POS gate as refill_definitions (see model.junk_pos_reason): a
-    symbol/proper-noun-only resolution casts the word out (active=false)
-    rather than filling in a definition that would just leave it sitting in
-    the accepted list unexplained."""
-    from . import deepdef, localdict, resolve, validity_score
-    from .config import Config
-    from .dictionary import make_session
-    from .model import Candidate, Occurrence, junk_pos_reason
-
-    s = _safe_schema(schema)
-    with conn.cursor() as cur:
-        cur.execute(
-            f"""SELECT id, lemma, part_of_speech, sentence, chapter, as_seen
-                FROM {s}.word WHERE coalesce(definition,'') = ''
-                ORDER BY flagged_undefined_at NULLS LAST, lemma""" +
-            (f" LIMIT {int(limit)}" if limit else ""))
-        rows = cur.fetchall()
-
-    stats = {"attempted": len(rows), "defined": 0, "still_undefined": 0, "cast_out": 0}
-    if not rows:
-        return stats
-
-    lexicon = localdict.build_lexicon(conn, {lemma.lower() for _, lemma, *_ in rows})
-    session = make_session()
-    key = deepdef.wordnik_key()
-
-    llm = None
-    if use_web:
-        cfg = Config()
-        mp = model_path or cfg.model_path
-        if mp and Path(mp).exists():
-            from llama_cpp import Llama
-            llm = Llama(model_path=mp, n_gpu_layers=cfg.n_gpu_layers, n_ctx=cfg.n_ctx, verbose=False)
-
-    with conn.cursor() as cur:
-        for i, (wid, lemma, pos, sentence, chapter, as_seen) in enumerate(rows, 1):
-            cand = Candidate(lemma=lemma, pos=(pos or "NOUN").upper())
-            if sentence:
-                cand.occurrences.append(Occurrence(sentence=sentence, chapter=chapter or "",
-                                                    surface=as_seen or lemma))
-            # llm=None here even when a model is loaded: WEB must stay gated
-            # on the validity_score check below, which resolve_definition has
-            # no concept of, so LOCAL/WORDNIK/YOURDICT run first in one pass
-            # and WEB is only ever tried directly, never as part of this call.
-            est = None
-            found = resolve.resolve_definition(
-                cand, max_tier=resolve.Tier.YOURDICT, try_free=False,
-                lexicon=lexicon, session=session, wordnik_key=key, llm=None) is not None
-            if not found:
-                est = validity_score.estimate(lemma, session=session, sentence=sentence or "")
-                if llm is not None and est.label != "likely-artifact":
-                    from . import websearch
-                    found = websearch.define_via_web(cand, llm)
-                    if found:
-                        resolve.apply_pos_repair(cand, lexicon)
-
-            reason = junk_pos_reason(cand.part_of_speech) if found else None
-            if reason:
-                cur.execute(
-                    f"""UPDATE {s}.word SET
-                            definition=%s,
-                            definition_source=COALESCE(NULLIF(%s,''), definition_source),
-                            part_of_speech=%s, active=false, updated_at=now()
-                        WHERE id=%s""",
-                    (cand.definition, cand.definition_source,
-                     normalize_pos(cand.part_of_speech), wid))
-                stats["cast_out"] += 1
-            elif found:
-                cur.execute(
-                    f"""UPDATE {s}.word SET
-                            definition=%s,
-                            definition_source=COALESCE(NULLIF(%s,''), definition_source),
-                            part_of_speech=COALESCE(NULLIF(%s,''), part_of_speech),
-                            ipa=COALESCE(NULLIF(%s,''), ipa),
-                            etymology=COALESCE(NULLIF(%s,''), etymology),
-                            synonyms=CASE WHEN %s THEN %s ELSE synonyms END,
-                            updated_at=now()
-                        WHERE id=%s""",
-                    (cand.definition, cand.definition_source, normalize_pos(cand.part_of_speech),
-                     cand.ipa, cand.etymology, bool(cand.synonyms), list(cand.synonyms), wid))
-                stats["defined"] += 1
-            else:
-                cur.execute(
-                    f"""UPDATE {s}.word SET
-                            validity_label=%s, validity_score=%s, validity_notes=%s,
-                            suggested_correction=%s, validity_checked_at=now()
-                        WHERE id=%s""",
-                    (est.label, est.score, est.notes, est.suggestion or None, wid))
-                stats["still_undefined"] += 1
-            # Committed every word, not batched every 200: each iteration's
-            # slow network call (Wordnik/yourdictionary, rate-limited) can
-            # itself take longer than the whole old batch interval, so a
-            # 200-row batch left one transaction open for tens of minutes at
-            # a time -- long enough to block a webapp restart's schema-check
-            # ALTER TABLE, which needs an ACCESS EXCLUSIVE lock on this same
-            # table and would otherwise queue behind it. Per-word commits cap
-            # any held lock at one row's write.
-            conn.commit()
-    return stats
+    """Standalone `concordance deepen`: a thin wrapper around fill_definitions
+    with no cooldown (recheck_after_days=0) -- an explicit, human-invoked
+    deepen run should always retry the undefined tail regardless of when it
+    was last checked; the cooldown exists to stop `maintain`'s *automatic*
+    re-grinding, not to gate a deliberate one-off command."""
+    return fill_definitions(conn, schema, limit=limit, use_web=use_web,
+                            model_path=model_path, recheck_after_days=0)
 
 
 def fetch_known_verdicts(conn, schema: str = DEFAULT_SCHEMA) -> dict[str, str]:
