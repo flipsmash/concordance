@@ -26,7 +26,7 @@ import psycopg
 import requests
 
 from .deepdef import _load_dotenv
-from .model import normalize_pos
+from .model import RejectReason, normalize_pos
 
 DEFAULT_SCHEMA = os.environ.get("CONCORDANCE_DB_SCHEMA", "concordance")
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -508,7 +508,7 @@ def sync_book_results(conn, book_title: str, kept: list, rejected: list,
     same book updates both tables in place. `author` is COALESCEd on conflict
     so re-ingesting a book without a parsed author never blanks a known one."""
     s = _safe_schema(schema)
-    stats = {"kept": 0, "rejected": 0}
+    stats = {"kept": 0, "rejected": 0, "cast_out": 0}
 
     with conn.cursor() as cur:
         cur.execute(
@@ -591,6 +591,21 @@ def sync_book_results(conn, book_title: str, kept: list, rejected: list,
                  c.pos, rep.surface if rep else None,
                  rep.sentence if rep else None, rep.chapter if rep else None))
             stats["rejected"] += 1
+
+            # A symbol/proper-noun rejection can happen for a lemma that's
+            # already an active word from an earlier book (pipeline.py's
+            # post-enrichment junk-POS check now applies on every
+            # re-encounter, not just the first) -- cast it out here too, same
+            # as refill/deepen already do for their own junk-POS
+            # resolutions. A no-op UPDATE (0 rows) for a lemma with no
+            # existing word row, so this is safe to run unconditionally
+            # rather than needing to first check whether one exists.
+            if c.reject_reason in (RejectReason.PROPER_NOUN, RejectReason.NUMERIC_OR_SYMBOL):
+                cur.execute(
+                    f"""UPDATE {s}.word SET active=false, updated_at=now()
+                        WHERE lemma_lc = lower(%s) AND active""",
+                    (c.lemma,))
+                stats["cast_out"] += cur.rowcount
 
     conn.commit()
     return stats

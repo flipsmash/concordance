@@ -66,11 +66,24 @@ def test_keep_true_records_reason_and_survives():
     assert c.interesting_reason == "vivid, literary"
 
 
-def test_unsure_is_never_dropped_by_the_judge():
-    # A coinage routed to review must survive even a keep:false vote.
+def test_unsure_is_dropped_by_a_negative_judge_verdict():
+    # UNSURE means "send to review," but `ingest` has no human review step --
+    # the judge itself is the review, so its keep:false must actually apply
+    # here too, not just to a plain KEEP. (Previously this silently never
+    # happened: UNSURE was veto-proof, so every misspelling/foreign-word
+    # candidate that reached UNSURE was permanently kept regardless of what
+    # the judge said.)
     c = _c("zblargnum", verdict=Verdict.UNSURE)
     apply_verdicts([c], [{"word": "zblargnum", "keep": False, "reason": "nonsense"}])
+    assert c.verdict is Verdict.DROP
+    assert c.reject_reason is RejectReason.NOT_INTERESTING
+
+
+def test_unsure_survives_a_positive_judge_verdict():
+    c = _c("necropoli", verdict=Verdict.UNSURE)
+    apply_verdicts([c], [{"word": "necropoli", "keep": True, "reason": "recurring coinage"}])
     assert c.verdict is Verdict.UNSURE
+    assert c.interesting_reason == "recurring coinage"
 
 
 def test_word_missing_from_verdicts_is_kept():

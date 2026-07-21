@@ -125,8 +125,22 @@ class LlamaJudge:
         apply_verdicts(batch, list(verdicts.values()))
 
     def _query(self, batch: list[Candidate]) -> str:
-        items = [{"word": c.lemma, "freq": _freq_band(c.zipf)} for c in batch]
+        # `interesting_reason` already carries validity.py's own suspicion for
+        # an UNSURE candidate ("likely misspelling of 'abject'", "recurs but
+        # sits in a non-English context") -- forwarded as `hint` so the model
+        # judges with that evidence instead of guessing blind from the bare
+        # lemma, the same pattern classify.py already uses for its WND prior.
+        # A model call can't verify a real dictionary distinction (abject vs.
+        # abiect) from the string alone; the pipeline already worked that out.
+        items = [
+            {"word": c.lemma, "freq": _freq_band(c.zipf), **({"hint": c.interesting_reason}
+                                                               if c.interesting_reason else {})}
+            for c in batch
+        ]
         instructions = (
+            'A "hint" field, when present, is a suspicion from an earlier pipeline stage '
+            '(e.g. a likely misspelling of a named word, or a non-English context) -- treat it '
+            "as strong evidence for keep=false unless you have good reason to overrule it. "
             'Output ONLY a JSON array, one object per input word IN THE SAME ORDER, '
             'no prose and no code fences: [{"w": "<word>", "k": <true|false>}]. '
             "Include EVERY input word exactly once."
@@ -159,7 +173,16 @@ def apply_verdicts(batch: list[Candidate], verdicts: list | None) -> None:
     """Apply the model's keep/skip decisions to a batch. Pure and side-effecting
     on the candidates; kept separate from model I/O so it can be unit-tested
     without the (nondeterministic) LLM. Keep-biased: a missing or unparseable
-    verdict leaves the word on the shortlist rather than dropping it."""
+    verdict leaves the word on the shortlist rather than dropping it.
+
+    A keep=false verdict drops the word regardless of whether validity.py
+    handed it a KEEP or an UNSURE ("recurs but resembles a misspelling" /
+    "unattested but recurs") -- UNSURE was designed as "send to human
+    review," but `ingest` has no review step, so treating it as veto-proof
+    silently converted every UNSURE into a permanent keep no matter what the
+    judge said. The judge's own rubric already instructs it to reject
+    misspellings and unremarkable words; UNSURE candidates need that
+    scrutiny even more than plain KEEPs, not less."""
     if verdicts is None:
         for c in batch:
             c.interesting_reason = c.interesting_reason or "(judge parse error — kept)"
@@ -170,9 +193,8 @@ def apply_verdicts(batch: list[Candidate], verdicts: list | None) -> None:
         if not v:
             continue
         if not _verdict_keep(v):
-            if c.verdict is Verdict.KEEP:  # never override an UNSURE-to-review flag
-                c.verdict = Verdict.DROP
-                c.reject_reason = RejectReason.NOT_INTERESTING
+            c.verdict = Verdict.DROP
+            c.reject_reason = RejectReason.NOT_INTERESTING
         else:
             c.interesting_reason = str(v.get("reason", ""))[:60]
 

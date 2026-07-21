@@ -226,4 +226,54 @@ def test_sync_roundtrip_and_idempotent(tmp_path):
         assert cur.fetchone()[0] == 2             # linked to both books
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
+
+
+@pg
+def test_junk_pos_rejection_casts_out_an_already_active_word():
+    # Regression: a lemma accepted in an earlier book (e.g. its first-ever
+    # dictionary lookup landed on a non-junk sense) must actually be
+    # un-accepted the moment a LATER book's lookup resolves it to a proper
+    # noun/symbol -- pipeline.py's post-enrichment junk-POS check now runs on
+    # every re-encounter, and sync_book_results is what has to act on it.
+    from concordance.model import Candidate, RejectReason
+
+    schema = "cc_test_castout"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    accepted = Candidate(lemma="linnaea", pos="NOUN")
+    accepted.definition = "a genus of plants"
+    db.sync_book_results(conn, "Book One", kept=[accepted], rejected=[], schema=schema)
+
+    with conn.cursor() as cur:
+        cur.execute(f"select active from {schema}.word where lemma='linnaea'")
+        assert cur.fetchone() == (True,)
+
+    later_lookup = Candidate(lemma="linnaea", pos="NOUN")
+    later_lookup.reject_reason = RejectReason.PROPER_NOUN
+    later_lookup.interesting_reason = "dictionary lookup resolved this as 'proper noun' — cast out"
+    stats = db.sync_book_results(conn, "Book Two", kept=[], rejected=[later_lookup], schema=schema)
+
+    assert stats["cast_out"] == 1
+    with conn.cursor() as cur:
+        cur.execute(f"select active from {schema}.word where lemma='linnaea'")
+        assert cur.fetchone() == (False,)
+        cur.execute(f"""select reason from {schema}.rejected_word r
+                        join {schema}.book b on b.id=r.book_id
+                        where r.lemma='linnaea' and b.title='Book Two'""")
+        assert cur.fetchone() == ("proper_noun",)
+
+    # A junk-POS rejection for a lemma with no pre-existing word row is a
+    # harmless no-op cast-out (0 rows affected), not an error.
+    never_seen = Candidate(lemma="acac", pos="NOUN")
+    never_seen.reject_reason = RejectReason.PROPER_NOUN
+    stats2 = db.sync_book_results(conn, "Book Two", kept=[], rejected=[never_seen], schema=schema)
+    assert stats2["cast_out"] == 0
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
     conn.close()

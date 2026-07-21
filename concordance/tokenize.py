@@ -148,8 +148,18 @@ def tokenize(chapters: list[Chapter], nlp=None) -> dict[str, Candidate]:
                         a.propn_hits += 1
                     if tok.ent_type_:
                         a.ent_hits += 1
-                    # Capitalization only carries signal away from sentence start.
-                    if tok.i != sent_start:
+                    # Capitalization only carries signal away from sentence start
+                    # -- and only Title-Case capitalization at that. An ALL-CAPS
+                    # token (len > 1) is a different, unrelated convention --
+                    # boilerplate legal text (a Gutenberg license's "WARRANTIES
+                    # OF MERCHANTABILITY"), a heading, or emphasis -- not a
+                    # name being marked. Counting it the same as "Bloom"/"Baker"
+                    # let real dictionary words get mistaken for consistently-
+                    # capitalized names purely from formatting noise, with no
+                    # actual name usage anywhere in the book. Excluded from
+                    # both numerator and denominator: an ALL-CAPS occurrence
+                    # gives no information either way, not evidence against.
+                    if tok.i != sent_start and not (len(tok.text) > 1 and tok.text.isupper()):
                         a.midsentence_total += 1
                         if tok.text[:1].isupper():
                             a.midsentence_caps += 1

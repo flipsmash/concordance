@@ -167,9 +167,10 @@ def ingest(
             raise typer.Exit(code=1)
 
         stats = db.sync_book_results(conn, title, kept, rejected, schema, author=author)
+        cast_out_note = f", {stats['cast_out']} already-active word(s) cast out" if stats.get("cast_out") else ""
         console.print(
-            f"[bold]{stats['kept']}[/bold] words kept, {stats['rejected']} rejected "
-            f"→ '{schema}' (title={title!r}, author={author or 'unknown'})"
+            f"[bold]{stats['kept']}[/bold] words kept, {stats['rejected']} rejected"
+            f"{cast_out_note} → '{schema}' (title={title!r}, author={author or 'unknown'})"
         )
 
         if not no_archive:

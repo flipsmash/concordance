@@ -141,19 +141,22 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
         # every enrichment call site checks. Catch it before the kept/rejected
         # split so it never reaches word.csv / the word table.
         #
-        # Skipped for cache-sourced candidates (already `known` — an
-        # established KEEP from an earlier book, per apply_known_verdicts
-        # above): enrichment re-runs on them too since it isn't cached, and if
-        # THIS book's independent dictionary call happens to resolve a
-        # different/worse sense than the one that got the word accepted,
-        # that's enrichment's own non-determinism, not new evidence to
-        # un-accept an already-established word over. Un-cast-ing a word back
-        # out is a deliberate human/retroactive-cleanup action, not something
-        # a single book's enrichment pass should trigger silently.
+        # Applies to cache-sourced candidates too (already `known` — an
+        # established KEEP from an earlier book): enrichment re-runs on them
+        # since it isn't cached, and a junk-POS resolution is a structural
+        # signal, not enrichment's own non-determinism — every other place in
+        # this codebase treats it as authoritative wherever it's seen, and a
+        # word's first-ever lookup happening to land on a different sense
+        # before the junk one ever surfaced is exactly why this needs to keep
+        # checking on every re-encounter, not just the first. (Confirmed in
+        # the wild: taxonomic Latin genus names — linnaea, olor, hircus —
+        # sat active and defined for weeks because this check used to skip
+        # them once cached, even as later books' lookups kept correctly
+        # resolving "proper noun" and being ignored.) sync_book_results casts
+        # the word out (active=false) if it already exists, same as
+        # refill/deepen do for their own junk-POS resolutions.
         cast_out = 0
         for cand in shortlist:
-            if cand.lemma in known:
-                continue
             reason = junk_pos_reason(cand.part_of_speech)
             if reason:
                 cand.verdict = Verdict.DROP

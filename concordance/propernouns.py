@@ -54,7 +54,14 @@ def strip_proper_nouns(candidates: dict[str, Candidate], cfg: Config) -> None:
     for cand in candidates.values():
         if cand.verdict is not None:
             continue
-        # Real mid-sentence capitalization is a strong, standalone signal.
+        # Real mid-sentence capitalization is a strong, standalone signal —
+        # deliberately NOT dictionary-guarded (see the Bloom/Baker case
+        # below): a common word consistently capitalized throughout one
+        # particular book IS being used as a name there, dictionary
+        # membership notwithstanding. (tokenize.py's counting is what needed
+        # the fix instead — see its own comment: ALL-CAPS boilerplate like a
+        # Gutenberg license's "MERCHANTABILITY" was being counted as
+        # Title-Case name-evidence, which it isn't.)
         capitalization_says_name = cand.cap_ratio >= cfg.cap_ratio_threshold
         # The tagger alone is unreliable on a lone sentence-initial token
         # (where every word is capitalized). A single-occurrence PROPN always
