@@ -5,18 +5,22 @@ No database connection needed -- unlike `concordance define` (which resolves
 an entire book's undefined words and needs Postgres for the local Wiktionary
 dump), this is a single-word, network-only lookup you can run from anywhere.
 
-Tries a quality-ordered cascade of sources, stopping at the first real hit:
+Tries concordance.resolve's shared cascade (see resolve.py's own docstring
+for the full rationale), stopping at the first real hit:
 
-  1. Wordnik (Century / GCIDE / AHD)  -- the archaic/literary vocabulary this
+  1. Free Dictionary API / Wiktionary (REST) -- no key, no rate limit.
+  2. Wordnik (Century / GCIDE / AHD)  -- the archaic/literary vocabulary this
                                           project cares about most; needs
                                           WORDNIK_API_KEY (.env or env var),
-                                          skipped silently if absent.
-  2. Free Dictionary API              -- a real, curated modern dictionary.
-  3. Wiktionary (REST)                -- broad community coverage.
-  4. yourdictionary.com               -- a keyless scraped aggregator; lower
+                                          skipped silently if absent. Tried
+                                          AFTER the free tier now (this
+                                          script used to try it first) to
+                                          protect its tight 5-req/min budget
+                                          for words nothing free can resolve.
+  3. yourdictionary.com               -- a keyless scraped aggregator; lower
                                           confidence, but sometimes has nonce
                                           words the above miss.
-  5. Web search + local LLM extraction -- last resort, ALWAYS tried if
+  4. Web search + local LLM extraction -- last resort, ALWAYS tried if
                                           nothing above defined the word (no
                                           flag to disable). The model reads
                                           real search-result snippets and
@@ -44,10 +48,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from rich.console import Console  # noqa: E402
 
-from concordance import deepdef, dictionary, websearch  # noqa: E402
+from concordance import deepdef, dictionary, resolve  # noqa: E402
 from concordance.model import Candidate  # noqa: E402
 
-console = Console()
+# soft_wrap=True: never insert a hard line break mid-sentence. Rich defaults
+# to wrapping at ~80 columns even when stdout isn't a real terminal (e.g.
+# redirected to a file for a batch run), which silently truncated wrapped
+# continuation lines when a downstream parser only understood single-line
+# entries -- real data loss, not just a cosmetic wrap.
+console = Console(soft_wrap=True)
 
 
 def _load_llm():
@@ -68,44 +77,44 @@ def _load_llm():
 
 
 class _LazyLLM:
-    """Loads the model at most once, only if a lookup actually reaches the
-    web-search stage -- most words resolve via a real dictionary long before
-    that, and shouldn't pay the model-load cost."""
+    """Stands in for a real Llama instance as resolve_definition's `llm`
+    argument, so it's always "available" from the cascade's point of view
+    (never None) but only actually loads the model the first time
+    create_chat_completion is called -- i.e. only once the WEB tier is
+    truly reached. Most words resolve via a real dictionary long before
+    that, and shouldn't pay the model-load cost. If the model file isn't
+    present, degrades to answering NONE (websearch.extract_definition's own
+    "nothing found" signal) instead of crashing -- same as the old
+    lazy_llm.get() returning None used to make the web tier a silent no-op."""
 
     def __init__(self):
         self._llm = None
         self._tried = False
 
-    def get(self):
+    def create_chat_completion(self, *args, **kwargs):
         if not self._tried:
             self._tried = True
             self._llm = _load_llm()
-        return self._llm
+        if self._llm is None:
+            return {"choices": [{"message": {"content": "NONE"}}]}
+        return self._llm.create_chat_completion(*args, **kwargs)
 
 
 def lookup(word: str, session, lazy_llm: _LazyLLM) -> Candidate | None:
-    """The quality-ordered cascade described in the module docstring. Returns
-    a Candidate with definition/source (+ whatever else that source carries:
-    POS, IPA, etymology, synonyms) on a hit, or None if every source --
-    including the web-search fallback -- came up empty."""
+    """The shared cascade (concordance.resolve), stopping at the first real
+    hit. `lazy_llm` is passed as the WEB tier's `llm` -- it satisfies
+    websearch.define_via_web's `llm.create_chat_completion(...)` interface
+    but only actually loads the model the first time that's called, i.e.
+    only if every earlier tier missed AND a web search actually returned
+    snippets worth asking the model about (extract_definition itself skips
+    the model call when there are no snippets). Returns a Candidate with
+    definition/source (+ whatever else that source carries: POS, IPA,
+    etymology, synonyms) on a hit, or None if every source came up empty."""
     cand = Candidate(lemma=word, pos="")
-
-    key = deepdef.wordnik_key()
-    if key and deepdef._from_wordnik(cand, session, key):
-        return cand
-
-    dictionary.enrich(cand, session)  # tries Free Dictionary, then Wiktionary
-    if cand.definition:
-        return cand
-
-    if deepdef._from_yourdictionary(cand, session):
-        return cand
-
-    llm = lazy_llm.get()
-    if llm is not None and websearch.define_via_web(cand, llm):
-        return cand
-
-    return None
+    resolve.resolve_definition(
+        cand, max_tier=resolve.Tier.WEB, session=session,
+        wordnik_key=deepdef.wordnik_key(), llm=lazy_llm)
+    return cand if cand.definition else None
 
 
 def _print_result(word: str, cand: Candidate | None) -> None:
@@ -127,12 +136,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("words", nargs="+", help="One or more terms to look up.")
     parser.add_argument(
-        "--delay", type=float, default=13.0,
-        help="Seconds to wait between words (default 13.0). The cascade tries Wordnik FIRST "
-             "for every word, whether or not it hits -- a free-tier Wordnik key is capped at "
-             "5 requests/minute, so anything faster than ~12s/word will start drawing 429s and "
-             "wasting time in retry-backoff rather than actually going faster. Irrelevant for a "
-             "single word; matters once you're looking up more than a handful in one run.",
+        "--delay", type=float, default=0.5,
+        help="Seconds to wait between words (default 0.5). Wordnik's 5-req/min free-tier cap "
+             "is now paced internally by concordance.resolve, only when a word actually reaches "
+             "that tier -- this flag is just polite self-throttling between words for the free/"
+             "yourdictionary/web-search tiers, not a Wordnik budget. Irrelevant for a single word.",
     )
     args = parser.parse_args()
 

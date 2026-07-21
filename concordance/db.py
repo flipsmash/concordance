@@ -630,7 +630,8 @@ def refill_definitions(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0,
     this gate exists to eliminate — leaving it blank here would just leave the
     word sitting in the accepted list unexplained forever."""
     import time
-    from . import dictionary, localdict
+    from . import localdict, resolve
+    from .dictionary import make_session
     from .model import Candidate, Occurrence, junk_pos_reason
 
     s = _safe_schema(schema)
@@ -647,7 +648,7 @@ def refill_definitions(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0,
         return stats
 
     lexicon = localdict.build_lexicon(conn, {lemma.lower() for _, lemma, *_ in rows})
-    session = dictionary.make_session()
+    session = make_session()
 
     with conn.cursor() as cur:
         for i, (wid, lemma, pos, sentence, chapter, as_seen) in enumerate(rows, 1):
@@ -655,8 +656,7 @@ def refill_definitions(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0,
             if sentence:
                 cand.occurrences.append(Occurrence(sentence=sentence, chapter=chapter or "",
                                                     surface=as_seen or lemma))
-            if not localdict.enrich(cand, lexicon):
-                dictionary.enrich(cand, session)
+            resolve.resolve_definition(cand, max_tier=resolve.Tier.FREE, lexicon=lexicon, session=session)
             reason = junk_pos_reason(cand.part_of_speech)
             if reason:
                 cur.execute(
@@ -692,8 +692,7 @@ def refill_definitions(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0,
 
 
 def deepen_definitions(conn, schema: str = DEFAULT_SCHEMA, use_web: bool = False,
-                       model_path: str | None = None, limit: int = 0,
-                       delay: float = 13.0) -> dict:
+                       model_path: str | None = None, limit: int = 0) -> dict:
     """DB-native equivalent of deepen.py's `define`: for words still blank after
     `refill_definitions`, try the deeper/slower sources (Wordnik, yourdictionary,
     optionally web-search + LLM extraction). Whatever still can't be defined gets
@@ -703,13 +702,22 @@ def deepen_definitions(conn, schema: str = DEFAULT_SCHEMA, use_web: bool = False
     not silent noise in the accepted list. Never clears flagged_undefined, same
     as refill_definitions.
 
+    No blanket per-word sleep here (there used to be one, tuned to Wordnik's
+    cap at 13s/word regardless of whether that row ever touched Wordnik) --
+    resolve.resolve_definition paces the WORDNIK tier itself now, so a row
+    that resolves at LOCAL/YOURDICT/WEB no longer pays a Wordnik-sized delay
+    it never needed. try_free=False: refill_definitions already tried Free
+    Dictionary/Wiktionary on this exact lemma immediately before deepen runs
+    in the normal maintain sequence, so retrying it here would just be more
+    of the redundant work localdict's repeat call already was.
+
     Same junk-POS gate as refill_definitions (see model.junk_pos_reason): a
     symbol/proper-noun-only resolution casts the word out (active=false)
     rather than filling in a definition that would just leave it sitting in
     the accepted list unexplained."""
-    import time
-    from . import deepdef, dictionary, localdict, validity_score
+    from . import deepdef, localdict, resolve, validity_score
     from .config import Config
+    from .dictionary import make_session
     from .model import Candidate, Occurrence, junk_pos_reason
 
     s = _safe_schema(schema)
@@ -726,7 +734,7 @@ def deepen_definitions(conn, schema: str = DEFAULT_SCHEMA, use_web: bool = False
         return stats
 
     lexicon = localdict.build_lexicon(conn, {lemma.lower() for _, lemma, *_ in rows})
-    session = dictionary.make_session()
+    session = make_session()
     key = deepdef.wordnik_key()
 
     llm = None
@@ -743,13 +751,21 @@ def deepen_definitions(conn, schema: str = DEFAULT_SCHEMA, use_web: bool = False
             if sentence:
                 cand.occurrences.append(Occurrence(sentence=sentence, chapter=chapter or "",
                                                     surface=as_seen or lemma))
-            found = localdict.enrich(cand, lexicon) or deepdef.deep_enrich(cand, session, key)
+            # llm=None here even when a model is loaded: WEB must stay gated
+            # on the validity_score check below, which resolve_definition has
+            # no concept of, so LOCAL/WORDNIK/YOURDICT run first in one pass
+            # and WEB is only ever tried directly, never as part of this call.
             est = None
+            found = resolve.resolve_definition(
+                cand, max_tier=resolve.Tier.YOURDICT, try_free=False,
+                lexicon=lexicon, session=session, wordnik_key=key, llm=None) is not None
             if not found:
                 est = validity_score.estimate(lemma, session=session, sentence=sentence or "")
                 if llm is not None and est.label != "likely-artifact":
                     from . import websearch
                     found = websearch.define_via_web(cand, llm)
+                    if found:
+                        resolve.apply_pos_repair(cand, lexicon)
 
             reason = junk_pos_reason(cand.part_of_speech) if found else None
             if reason:
@@ -793,7 +809,6 @@ def deepen_definitions(conn, schema: str = DEFAULT_SCHEMA, use_web: bool = False
             # table and would otherwise queue behind it. Per-word commits cap
             # any held lock at one row's write.
             conn.commit()
-            time.sleep(delay)
     return stats
 
 

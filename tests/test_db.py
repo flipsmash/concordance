@@ -277,3 +277,73 @@ def test_junk_pos_rejection_casts_out_an_already_active_word():
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
     conn.close()
+
+
+@pg
+def test_deepen_skips_free_tier_and_gates_web_on_validity(monkeypatch, tmp_path):
+    # deepen_definitions runs right after refill_definitions in the normal
+    # maintain sequence, which already tried Free Dictionary/Wiktionary on
+    # every one of these lemmas -- try_free=False must actually reach
+    # through to resolve.resolve_definition, not just be accepted and
+    # ignored. And the WEB tier must stay gated on validity_score exactly
+    # like before resolve.py existed: only tried when an LLM is available
+    # AND the word doesn't score as a likely artifact.
+    import llama_cpp
+
+    from concordance import resolve, validity_score
+    from concordance.model import Candidate
+    from concordance.validity_score import ValidityEstimate
+
+    monkeypatch.setattr(llama_cpp, "Llama", lambda *a, **k: object())
+    model_path = tmp_path / "fake.gguf"
+    model_path.write_bytes(b"")
+
+    schema = "cc_test_deepen"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    blank_a = Candidate(lemma="artifactword", pos="NOUN")
+    blank_b = Candidate(lemma="realword", pos="NOUN")
+    db.sync_book_results(conn, "Book One", kept=[blank_a, blank_b], rejected=[], schema=schema)
+
+    monkeypatch.setattr(resolve.localdict, "enrich", lambda cand, lex: False)
+    monkeypatch.setattr(resolve.dictionary, "enrich",
+                         lambda *a, **k: pytest.fail("FREE tier must be skipped in deepen"))
+    monkeypatch.setattr(resolve.deepdef, "wordnik_key", lambda: "")
+    monkeypatch.setattr(resolve.deepdef, "_from_yourdictionary", lambda cand, session: False)
+
+    def fake_estimate(word, session=None, sentence="", zipf=None):
+        label = "likely-artifact" if word == "artifactword" else "plausible"
+        return ValidityEstimate(word=word, score=0.0, label=label, notes="")
+
+    monkeypatch.setattr(validity_score, "estimate", fake_estimate)
+
+    calls = []
+
+    def fake_web(cand, llm):
+        calls.append(cand.lemma)
+        cand.definition = f"a web definition of {cand.lemma}"
+        cand.definition_source = "Web (LLM-extracted)"
+        return True
+
+    monkeypatch.setattr("concordance.websearch.define_via_web", fake_web)
+
+    stats = db.deepen_definitions(conn, schema, use_web=True, model_path=str(model_path))
+
+    # likely-artifact never reaches the web tier; the other word does.
+    assert calls == ["realword"]
+    assert stats["defined"] == 1
+    assert stats["still_undefined"] == 1
+
+    with conn.cursor() as cur:
+        cur.execute(f"select definition, validity_label from {schema}.word where lemma='realword'")
+        assert cur.fetchone() == ("a web definition of realword", None)
+        cur.execute(f"select definition, validity_label from {schema}.word where lemma='artifactword'")
+        assert cur.fetchone() == ("", "likely-artifact")
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()

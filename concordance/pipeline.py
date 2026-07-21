@@ -7,7 +7,8 @@ from pathlib import Path
 
 from rich.console import Console
 
-from . import clean, db, dictionary, extract, floor, judge, localdict, master, output, propernouns, tokenize, validity
+from . import clean, db, extract, floor, judge, localdict, master, output, propernouns, resolve, tokenize, validity
+from .dictionary import make_session
 from .config import Config
 from .model import Candidate, RejectReason, Verdict, junk_pos_reason
 
@@ -128,11 +129,10 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
 
     # --- enrichment ------------------------------------------------------
     if cfg.lookup_definitions and shortlist:
-        session = dictionary.make_session()
+        session = make_session()
         with console.status("[bold]Looking up definitions…") as status:
             for i, cand in enumerate(shortlist, 1):
-                if not localdict.enrich(cand, lexicon):
-                    dictionary.enrich(cand, session)
+                resolve.resolve_definition(cand, max_tier=resolve.Tier.FREE, lexicon=lexicon, session=session)
                 status.update(f"[bold]Looking up definitions… {i}/{len(shortlist)}")
 
         # A dictionary hit can reveal, only now, that a survivor is a symbol
