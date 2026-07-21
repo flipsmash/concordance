@@ -126,6 +126,117 @@ def _dominant_neighbor(word: str) -> tuple[str, float] | None:
     return best
 
 
+# --- hard-reject gates for a word a source ALREADY defined ----------------
+#
+# _dominant_neighbor above is a soft SCORING signal only, used exclusively on
+# words nothing could define at all -- safe there because a wrong guess just
+# nudges a score, never silently drops a word. The two functions below are
+# for the opposite, riskier situation: a definition-lookup source (Wordnik,
+# yourdictionary, web-search, even Free Dictionary) DID successfully return
+# something for the word, and the question is whether to accept it as real
+# vocabulary at all. That needs a much higher precision bar than the scoring
+# signal -- see unambiguous_dominant_neighbor's docstring for the concrete
+# false positive (bogoak/book) that ruled out reusing _dominant_neighbor
+# verbatim for this purpose.
+
+# A hard reject needs the SAME threshold ingest's ValidityGate already uses
+# for its own misspelling drop (config.misspelling_zipf_gap) -- this is a
+# second, independent enforcement point for that identical judgment call
+# (see model docstring on why re-enforcement is necessary at all: the
+# cross-book verdict cache makes an ingest-time KEEP sticky forever, and
+# refill/deepen/fill_definitions never re-run ValidityGate).
+_HARD_REJECT_GAP = 2.0
+
+# Languages checked for the foreign-word gate, via wordfreq's own per-language
+# corpora -- picked as the non-English languages most likely to appear as
+# loanwords/quotations in this project's English-language literary corpus.
+# Latin isn't in wordfreq's language list at all (no living web corpus to
+# derive frequencies from), so a Latin fragment (nolunt, insidiis, prosequi)
+# simply isn't caught here -- it falls through to validity_score.estimate's
+# ordinary artifact scoring instead, same as before this gate existed; not a
+# regression, just an uncovered case.
+_FOREIGN_LANGS = ("fr", "it", "es", "de", "nl", "pt", "fi")
+_FOREIGN_MIN_ZIPF = 3.0   # the word must be genuinely common THERE, not a one-off hit
+_FOREIGN_GAP = 1.0        # ...and meaningfully commoner there than in English
+
+
+def foreign_language_hint(word: str) -> tuple[str, float] | None:
+    """(language, zipf) if `word` is clearly a foreign-language word rather
+    than English -- e.g. acte (French, zipf 4.79 vs English 1.99), bellissimo
+    (Italian 4.66 vs 1.66), auxilio (Spanish 3.98 vs 1.27). None if nothing
+    clears both bars (a genuine English rarity like armiger/cangue/bogoak
+    scores near-zero in every language checked, or the foreign showing is too
+    marginal to trust -- montfaucon's French zipf of 2.65 falls under
+    _FOREIGN_MIN_ZIPF, correctly left uncaught since it's actually a proper
+    noun, a different problem this check isn't meant to solve)."""
+    word = word.strip().lower()
+    en_z = zipf_frequency(word, "en")
+    best: tuple[str, float] | None = None
+    for lang in _FOREIGN_LANGS:
+        z = zipf_frequency(word, lang)
+        if z >= _FOREIGN_MIN_ZIPF and z - en_z >= _FOREIGN_GAP and (best is None or z > best[1]):
+            best = (lang, z)
+    return best
+
+
+def _shares_stem(a: str, b: str, prefix_len: int = 5) -> bool:
+    """True if `a`/`b` are plausibly the same root (plural, adverb, etc. of
+    each other) rather than two unrelated words that happen to be SymSpell
+    neighbors of the same target -- apparel/apparels, beneficial/beneficially,
+    not book/bogota/bogor (bogoak's actual SymSpell ties)."""
+    return a.startswith(b) or b.startswith(a) or a[:prefix_len] == b[:prefix_len]
+
+
+def unambiguous_dominant_neighbor(word: str) -> str | None:
+    """Like _dominant_neighbor, but tuned for a hard reject rather than a
+    soft score nudge: the neighbor must be the UNIQUE (up to trivial
+    morphological variants) best SymSpell match, not just A match within 2
+    edits. Without this, bogoak -- a real word (preserved bog wood) -- would
+    get "corrected" to book purely because both sit within edit-distance 2
+    and book is vastly more common; the giveaway is that bogoak ALSO ties
+    with bogota/bogor/boga/bogon at the same distance, none related to each
+    other or to book, whereas a genuine archaic-spelling variant like
+    apparrell only ties with apparel/apparels -- the same root twice.
+    Verified against this project's own real corpus words: correctly
+    accepts assunder/beneficiall/apparrell/allyance/adventrous, correctly
+    rejects bogoak/armiger/cangue/befalne/aftersong (either genuinely
+    ambiguous, or a real word this project explicitly wants to keep)."""
+    from symspellpy import Verbosity
+    word = word.strip().lower()
+    cands = [s for s in _symspell().lookup(word, Verbosity.CLOSEST, max_edit_distance=2,
+                                            include_unknown=False) if s.term != word]
+    if not cands:
+        return None
+    best = max(cands, key=lambda c: c.count)
+    if any(c.term != best.term and not _shares_stem(c.term, best.term) for c in cands):
+        return None  # a genuinely distinct second candidate -- too ambiguous to act on
+    if not (_in_wordnet(best.term) or zipf_frequency(best.term, "en") >= 4.0):
+        return None
+    if zipf_frequency(best.term, "en") - zipf_frequency(word, "en") < _HARD_REJECT_GAP:
+        return None
+    return best.term
+
+
+def variant_reject_reason(word: str) -> tuple["RejectReason", str] | None:
+    """The single choke point every definition-acceptance call site should
+    check on a word a source just successfully defined: (RejectReason,
+    human-readable note) if it's clearly a foreign-language word or an
+    archaic/OCR spelling variant of a common modern word, else None. Foreign
+    is checked first since a word can occasionally trip both (acte both
+    scores as French AND has English SymSpell neighbors like "act") --
+    foreign is the more specific, more confident signal of the two."""
+    from .model import RejectReason
+    word = word.strip().lower()
+    foreign = foreign_language_hint(word)
+    if foreign:
+        lang, z = foreign
+        return RejectReason.FOREIGN_LANGUAGE, f"looks {lang} (zipf {z:.1f} there vs English)"
+    neighbor = unambiguous_dominant_neighbor(word)
+    if neighbor:
+        return RejectReason.MISSPELLING, f"archaic/OCR spelling of '{neighbor}'"
+    return None
+
+
 def _morph_root(word: str) -> str | None:
     """The most common known root reachable by peeling a SINGLE prefix or a
     SINGLE suffix off `word` — e.g. unbuttoned -> buttoned, bemused -> mused.

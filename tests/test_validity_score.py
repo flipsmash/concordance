@@ -142,3 +142,69 @@ def test_english_fraction_helper():
     assert hi > 0.5 and n >= 5
     lo, _ = V._english_fraction("Hic ibat Simois hic est Sigeia tellus hic steterat Priami regia")
     assert lo < 0.5
+
+
+# --- foreign_language_hint / unambiguous_dominant_neighbor / variant_reject_reason ---
+# Real (unstubbed) checks against wordfreq/symspellpy/wordnet -- these are the
+# actual detectors used to gate whether a definition source's hit gets
+# accepted, verified against real words pulled from this project's own
+# corpus during the web-search-tier rollout, not synthetic examples.
+
+@pytest.mark.parametrize("word,lang", [
+    ("acte", "fr"),
+    ("bellissimo", "it"),
+    ("auxilio", "es"),
+    ("jolie", "fr"),
+    ("unter", "de"),
+    ("jadis", "fr"),
+])
+def test_foreign_language_hint_catches_real_foreign_words(word, lang):
+    hint = V.foreign_language_hint(word)
+    assert hint is not None and hint[0] == lang
+
+
+@pytest.mark.parametrize("word", [
+    "armiger", "cangue", "bogoak", "aftersong", "homometrically", "stele", "silkman",
+])
+def test_foreign_language_hint_does_not_flag_real_rare_english_words(word):
+    assert V.foreign_language_hint(word) is None
+
+
+@pytest.mark.parametrize("word,neighbor", [
+    ("assunder", "asunder"),
+    ("beneficiall", "beneficial"),
+    ("apparrell", "apparel"),
+    ("allyance", "alliance"),
+    ("adventrous", "adventurous"),
+])
+def test_unambiguous_dominant_neighbor_catches_archaic_spelling_variants(word, neighbor):
+    assert V.unambiguous_dominant_neighbor(word) == neighbor
+
+
+@pytest.mark.parametrize("word", [
+    "bogoak",     # ties with bogota/bogor/boga/bogon -- genuinely ambiguous, not "book"
+    "armiger",    # a real archaic word this project explicitly wants to keep
+    "cangue",     # ditto -- ties with unrelated "gangue"
+    "befalne",    # ties with beaune/betaine as well as befall/befallen -- ambiguous
+    "aftersong",  # no SymSpell candidates at all
+])
+def test_unambiguous_dominant_neighbor_does_not_flag_real_or_ambiguous_words(word):
+    assert V.unambiguous_dominant_neighbor(word) is None
+
+
+def test_variant_reject_reason_foreign_wins_over_misspelling():
+    from concordance.model import RejectReason
+    reason, note = V.variant_reject_reason("acte")
+    assert reason is RejectReason.FOREIGN_LANGUAGE
+    assert "fr" in note
+
+
+def test_variant_reject_reason_flags_archaic_spelling():
+    from concordance.model import RejectReason
+    reason, note = V.variant_reject_reason("assunder")
+    assert reason is RejectReason.MISSPELLING
+    assert "asunder" in note
+
+
+def test_variant_reject_reason_none_for_a_real_word():
+    assert V.variant_reject_reason("armiger") is None

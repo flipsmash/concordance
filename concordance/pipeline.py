@@ -7,7 +7,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from . import clean, db, extract, floor, judge, localdict, master, output, propernouns, resolve, tokenize, validity
+from . import clean, db, extract, floor, judge, localdict, master, output, propernouns, resolve, tokenize, validity, validity_score
 from .dictionary import make_session
 from .config import Config
 from .model import Candidate, RejectReason, Verdict, junk_pos_reason
@@ -155,18 +155,30 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
         # resolving "proper noun" and being ignored.) sync_book_results casts
         # the word out (active=false) if it already exists, same as
         # refill/deepen do for their own junk-POS resolutions.
+        #
+        # validity_score.variant_reject_reason is the same idea for a
+        # different failure mode: a hit that's real English grammatically
+        # (so junk_pos_reason doesn't catch it) but is actually a foreign
+        # word (acte, bellissimo) or just an archaic/OCR spelling of a common
+        # modern word (assunder, beneficiall) — neither belongs in the
+        # accepted list no matter which source defined it.
         cast_out = 0
         for cand in shortlist:
             reason = junk_pos_reason(cand.part_of_speech)
+            detail = f"dictionary lookup resolved this as {cand.part_of_speech!r} — cast out"
+            if not reason:
+                variant = validity_score.variant_reject_reason(cand.lemma)
+                if variant:
+                    reason, note = variant
+                    detail = f"{note} — cast out"
             if reason:
                 cand.verdict = Verdict.DROP
                 cand.reject_reason = reason
-                cand.interesting_reason = (
-                    f"dictionary lookup resolved this as {cand.part_of_speech!r} — cast out")
+                cand.interesting_reason = detail
                 cast_out += 1
         if cast_out:
             console.print(f"[dim]{cast_out} more cast out post-enrichment "
-                           "(symbol/proper-noun-only dictionary sense).[/dim]")
+                           "(symbol/proper-noun/foreign/spelling-variant dictionary sense).[/dim]")
 
     conn.close()
     return output.partition(candidates)
