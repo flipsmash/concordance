@@ -45,6 +45,22 @@ def test_wordnik_prefers_century_and_sets_source():
     assert c.definition_source == "Wordnik (century)"
 
 
+def test_wordnik_prefers_a_posed_entry_over_a_same_rank_crossreference():
+    # Regression: real Wordnik data for "cangue" -- two century entries, the
+    # API returns the no-POS cross-reference gloss FIRST. A stable sort on
+    # source-dictionary rank alone leaves it in front of the actual noun
+    # definition; the tiebreaker must prefer the POS-carrying entry.
+    payload = [
+        {"text": "To sentence to the cangue.", "sourceDictionary": "century"},  # no partOfSpeech
+        {"text": "A heavy wooden collar worn as punishment.",
+         "sourceDictionary": "century", "partOfSpeech": "noun"},
+    ]
+    c = Candidate(lemma="cangue", pos="NOUN")
+    assert deepdef._from_wordnik(c, _Session(_Resp(payload=payload)), "KEY") is True
+    assert c.definition == "A heavy wooden collar worn as punishment."
+    assert c.part_of_speech == "noun"
+
+
 def test_wordnik_empty_text_is_a_miss():
     c = Candidate(lemma="cobloaf", pos="NOUN")
     payload = [{"text": "", "sourceDictionary": "century"}]

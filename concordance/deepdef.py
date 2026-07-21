@@ -81,8 +81,17 @@ def _from_wordnik(cand: Candidate, session: requests.Session, key: str) -> bool:
     defs = [e for e in entries if isinstance(e, dict) and (e.get("text") or "").strip()]
     if not defs:
         return False
-    defs.sort(key=lambda e: _WORDNIK_PREF.index(e["sourceDictionary"])
-              if e.get("sourceDictionary") in _WORDNIK_PREF else len(_WORDNIK_PREF))
+    # Same source dictionary can carry more than one entry (e.g. Century's
+    # noun headword AND a secondary cross-reference gloss like "cangue" ->
+    # "To sentence to the cangue.", which has no partOfSpeech at all) -- sort
+    # is stable, so without a tiebreaker the API's own response order decides,
+    # and a no-POS cross-reference sense can end up ahead of the real
+    # definition purely by chance. Prefer an entry with a real partOfSpeech
+    # within the same source-dictionary rank.
+    defs.sort(key=lambda e: (
+        _WORDNIK_PREF.index(e["sourceDictionary"]) if e.get("sourceDictionary") in _WORDNIK_PREF else len(_WORDNIK_PREF),
+        0 if e.get("partOfSpeech") else 1,
+    ))
     best = defs[0]
     cand.definition = _clean(best["text"])
     cand.part_of_speech = best.get("partOfSpeech", "") or cand.part_of_speech
