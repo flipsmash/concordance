@@ -853,14 +853,19 @@ def fetch_known_verdicts(conn, schema: str = DEFAULT_SCHEMA) -> dict[str, str]:
     return verdicts
 
 
-def normalize_word_pos(conn, schema: str = DEFAULT_SCHEMA) -> dict:
+def normalize_word_pos(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> dict:
     """Clean up word.part_of_speech in place: folds abbreviations/case variants
     (adj, adv, pron, adp, sconj, num, Noun, Adjective, ...) accumulated from
     older write paths down to the canonical vocabulary via normalize_pos().
-    Idempotent — safe to re-run any time a new inconsistency creeps in."""
+    Idempotent — safe to re-run any time a new inconsistency creeps in.
+    Always recomputes every word in scope (no only_missing gate): the source
+    column is mutable and there's no separate signal to gate a re-check on,
+    so freezing a word's normalized POS after the one time this ran would
+    silently stop it from self-correcting if part_of_speech changes later."""
     s = _safe_schema(schema)
     with conn.cursor() as cur:
-        cur.execute(f"SELECT id, part_of_speech FROM {s}.word")
+        cur.execute(f"SELECT id, part_of_speech FROM {s}.word ORDER BY id" +
+                    (f" LIMIT {int(limit)}" if limit else ""))
         rows = cur.fetchall()
         changed = 0
         for wid, pos in rows:
@@ -899,9 +904,12 @@ def load_taxonomy(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA,
     return {"categories": len(cats), "top_level": sum(1 for c in cats if c["parent_code"] is None)}
 
 
-def compute_archaic(conn, schema: str = DEFAULT_SCHEMA) -> dict:
+def compute_archaic(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> dict:
     """Set the archaic-currency ordinal on word_difficulty for every word. Uses the
-    definition register-label + (if present) vocab.wiktionary is_archaic/is_obsolete."""
+    definition register-label + (if present) vocab.wiktionary is_archaic/is_obsolete.
+    Always recomputes every word in scope (no only_missing gate) -- definition
+    text and ngram data can both change after the first run, and there's no
+    signal to gate a re-check on other than just running it again."""
     from collections import Counter
     from . import archaic as _archaic
     s = _safe_schema(schema)
@@ -915,7 +923,8 @@ def compute_archaic(conn, schema: str = DEFAULT_SCHEMA) -> dict:
     with conn.cursor() as cur:
         cur.execute(f"""SELECT w.id, w.definition, {cols}, g.peak, g.recency_ratio
                         FROM {s}.word w {join}
-                        LEFT JOIN {s}.word_ngram g ON g.word_id = w.id""")
+                        LEFT JOIN {s}.word_ngram g ON g.word_id = w.id
+                        ORDER BY w.id""" + (f" LIMIT {int(limit)}" if limit else ""))
         rows = cur.fetchall()
         for wid, defn, arc, obs, peak, ratio in rows:
             flag, evid, conf = _archaic.classify(defn, arc, obs, peak, ratio)
@@ -967,8 +976,11 @@ def fetch_ngrams(conn, schema: str = DEFAULT_SCHEMA, only_missing: bool = True,
     return stats
 
 
-def compute_difficulty(conn, schema: str = DEFAULT_SCHEMA) -> dict:
-    """Compute the ex-ante difficulty scalar (+ factor breakdown) for every word."""
+def compute_difficulty(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> dict:
+    """Compute the ex-ante difficulty scalar (+ factor breakdown) for every word.
+    Always recomputes every word in scope (no only_missing gate) -- ngram,
+    archaic, and domain data are all mutable upstream inputs with no signal
+    to gate a re-check on."""
     import statistics
     from psycopg.types.json import Json
     from . import difficulty as _diff
@@ -982,7 +994,8 @@ def compute_difficulty(conn, schema: str = DEFAULT_SCHEMA) -> dict:
             LEFT JOIN {s}.word_difficulty d ON d.word_id = w.id
             LEFT JOIN (SELECT wc.word_id, string_agg(DISTINCT left(c.code,1), '') fields
                        FROM {s}.word_category wc JOIN {s}.category c ON c.id = wc.category_id
-                       GROUP BY wc.word_id) dom ON dom.word_id = w.id""")
+                       GROUP BY wc.word_id) dom ON dom.word_id = w.id
+            ORDER BY w.id""" + (f" LIMIT {int(limit)}" if limit else ""))
         rows = cur.fetchall()
         scores = []
         for wid, lemma, peak, archaic, aconf, fields in rows:
@@ -1042,8 +1055,11 @@ def compute_quiz_definitions(conn, schema: str = DEFAULT_SCHEMA, cfg=None,
             "rewritten": stats["rewritten"], "redacted": stats["redacted"]}
 
 
-def compute_quizzable(conn, schema: str = DEFAULT_SCHEMA) -> dict:
-    """Set the quizzable flag (+ reason) on word_difficulty for every word."""
+def compute_quizzable(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> dict:
+    """Set the quizzable flag (+ reason) on word_difficulty for every word.
+    Always recomputes every word in scope (no only_missing gate) -- definition
+    and quiz_definition are both mutable upstream inputs with no signal to
+    gate a re-check on."""
     from collections import Counter
     from wordfreq import zipf_frequency
     from . import quizdef
@@ -1052,7 +1068,8 @@ def compute_quizzable(conn, schema: str = DEFAULT_SCHEMA) -> dict:
     dist: Counter = Counter()
     with conn.cursor() as cur:
         cur.execute(f"SELECT id, lemma, definition, quiz_definition, quiz_def_source "
-                    f"FROM {s}.word WHERE coalesce(definition,'') <> ''")
+                    f"FROM {s}.word WHERE coalesce(definition,'') <> '' ORDER BY id" +
+                    (f" LIMIT {int(limit)}" if limit else ""))
         rows = cur.fetchall()
         for wid, lemma, defn, quiz_defn, quiz_def_source in rows:
             root = _morph_root(lemma)
@@ -1292,8 +1309,8 @@ def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None
     s = _safe_schema(schema)
 
     with conn.cursor() as cur:
-        cur.execute(f"SELECT id, lemma, ipa, wordnik_pron_raw, wordnik_pron_type FROM {s}.word" +
-                    (f" LIMIT {int(limit)}" if limit else ""))
+        cur.execute(f"SELECT id, lemma, ipa, wordnik_pron_raw, wordnik_pron_type "
+                    f"FROM {s}.word ORDER BY id")
         all_rows = cur.fetchall()
 
     def is_valid(ipa):
@@ -1301,6 +1318,14 @@ def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None
 
     candidates = all_rows if not only_missing else [r for r in all_rows if not is_valid(r[2])]
     dist: Counter = Counter(total=len(all_rows), already_valid=len(all_rows) - len(candidates))
+    # `limit` slices the already-filtered candidate set, not the raw fetch --
+    # applying it beforehand (the original bug) could silently hand back
+    # fewer than `limit` words, or zero, depending on where the first N rows
+    # in scan order happened to already be valid. already_valid above is
+    # computed from the full filtered set, before this slice, so it still
+    # reflects the whole table regardless of `limit`.
+    if limit:
+        candidates = candidates[:limit]
     if not candidates:
         return dict(dist)
 

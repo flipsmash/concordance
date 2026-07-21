@@ -280,6 +280,120 @@ def test_junk_pos_rejection_casts_out_an_already_active_word():
 
 
 @pg
+def test_batchable_scoring_steps_honor_limit_in_id_order():
+    # normalize_word_pos/compute_archaic/compute_difficulty/compute_quizzable
+    # used to have no `limit` at all (always scanned the whole table) -- now
+    # that they accept one, confirm it actually caps the row count AND is
+    # deterministic (ORDER BY id, not whatever order Postgres feels like
+    # returning today), by seeding 5 words and checking limit=2 always
+    # touches the same 2 lowest-id words, repeatably.
+    from concordance.model import Candidate
+
+    schema = "cc_test_batchable"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    words = [Candidate(lemma=f"batchword{i}", pos="noun") for i in range(5)]
+    for c in words:
+        c.definition = f"a definition of {c.lemma}"
+    db.sync_book_results(conn, "Book One", kept=words, rejected=[], schema=schema)
+    with conn.cursor() as cur:
+        cur.execute(f"UPDATE {schema}.word SET part_of_speech='Noun' WHERE lemma LIKE 'batchword%%'")
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT id, lemma FROM {schema}.word ORDER BY id")
+        ordered = cur.fetchall()
+    lowest_two_ids = {ordered[0][0], ordered[1][0]}
+
+    stats = db.normalize_word_pos(conn, schema, limit=2)
+    assert stats["words"] == 2
+    stats_again = db.normalize_word_pos(conn, schema, limit=2)
+    assert stats_again["words"] == 2  # same 2 rows every time -- deterministic, not a fluke of scan order
+
+    dist = db.compute_archaic(conn, schema, limit=2)
+    assert sum(dist.values()) == 2
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT word_id FROM {schema}.word_difficulty")
+        touched = {r[0] for r in cur.fetchall()}
+    assert touched == lowest_two_ids
+
+    with conn.cursor() as cur:
+        cur.execute(f"DELETE FROM {schema}.word_difficulty")
+    conn.commit()
+    stats = db.compute_difficulty(conn, schema, limit=2)
+    assert stats["words"] == 2
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT word_id FROM {schema}.word_difficulty")
+        touched = {r[0] for r in cur.fetchall()}
+    assert touched == lowest_two_ids
+
+    with conn.cursor() as cur:
+        cur.execute(f"DELETE FROM {schema}.word_difficulty")
+    conn.commit()
+    dist = db.compute_quizzable(conn, schema, limit=2)
+    assert sum(dist.values()) == 2
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT word_id FROM {schema}.word_difficulty")
+        touched = {r[0] for r in cur.fetchall()}
+    assert touched == lowest_two_ids
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_compute_ipa_limit_applies_after_the_only_missing_filter(monkeypatch):
+    # Regression: `limit` used to slice the raw SQL fetch BEFORE the
+    # only_missing filter ran in Python, so if the lowest-id rows all
+    # happened to already have valid ipa, a small `limit` could return zero
+    # actually-missing words even though plenty existed further down the
+    # table -- the filter has to run over the full fetched set first, then
+    # `limit` slices what's left.
+    from concordance import wiktextract
+    from concordance.model import Candidate
+
+    monkeypatch.setattr(wiktextract, "build_lexicon", lambda *a, **k: {})
+
+    schema = "cc_test_ipa"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    # Lowest ids (inserted first) already have valid ipa; the missing ones
+    # come later in id order -- exactly the scenario the old bug mishandled.
+    already_valid = [Candidate(lemma=f"validword{i}", pos="NOUN") for i in range(3)]
+    still_missing = [Candidate(lemma=f"missingword{i}", pos="NOUN") for i in range(3)]
+    db.sync_book_results(conn, "Book One", kept=already_valid + still_missing, rejected=[], schema=schema)
+    with conn.cursor() as cur:
+        for c in already_valid:
+            cur.execute(f"UPDATE {schema}.word SET ipa=%s WHERE lemma=%s", ("/test/", c.lemma))
+    conn.commit()
+
+    stats = db.compute_ipa(conn, schema, limit=2)
+
+    # The bug: with limit sliced onto the raw (ORDER-BY-less) fetch, this
+    # table's 3 lowest-id rows are exactly the already-valid ones, so the
+    # buggy code would see only those 2-3 rows at all -- stats["total"]
+    # would come back far short of 6, and already_valid could equal total,
+    # with the 3 genuinely-missing rows never even inspected.
+    assert stats["total"] == 6
+    assert stats["already_valid"] == 3     # unaffected by `limit`
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
 def test_deepen_skips_free_tier_and_gates_web_on_validity(monkeypatch, tmp_path):
     # deepen_definitions runs right after refill_definitions in the normal
     # maintain sequence, which already tried Free Dictionary/Wiktionary on

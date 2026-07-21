@@ -299,6 +299,7 @@ def classify(
 @app.command("normalize-pos")
 def normalize_pos_cmd(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of words processed."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Clean up word.part_of_speech: fold abbreviations/case variants (adj,
@@ -309,7 +310,7 @@ def normalize_pos_cmd(
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
     db.apply_schema(conn, schema)
-    stats = db.normalize_word_pos(conn, schema)
+    stats = db.normalize_word_pos(conn, schema, limit=limit)
     conn.close()
     console.print(f"[green]✓[/green] normalize-pos: [bold]{stats['changed']}[/bold]/{stats['words']} words updated")
 
@@ -317,6 +318,7 @@ def normalize_pos_cmd(
 @app.command()
 def archaic(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of words processed."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Set the archaic-currency flag (current/dated/archaic/obsolete) on word_difficulty."""
@@ -325,7 +327,7 @@ def archaic(
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
     db.apply_schema(conn, schema)
-    dist = db.compute_archaic(conn, schema)
+    dist = db.compute_archaic(conn, schema, limit=limit)
     conn.close()
     total = sum(dist.values())
     parts = ", ".join(f"{k} {v}" for k, v in sorted(dist.items()))
@@ -356,6 +358,7 @@ def ngram(
 @app.command()
 def difficulty(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of words processed."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Compute the ex-ante difficulty scalar (+ factor breakdown) on word_difficulty."""
@@ -364,7 +367,7 @@ def difficulty(
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
     db.apply_schema(conn, schema)
-    stats = db.compute_difficulty(conn, schema)
+    stats = db.compute_difficulty(conn, schema, limit=limit)
     conn.close()
     console.print(f"[green]✓[/green] difficulty set on [bold]{stats['words']}[/bold] words "
                   f"(mean {stats['mean']}, median {stats['median']})")
@@ -398,6 +401,7 @@ def quizdef(
 @app.command()
 def quizzable(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of words processed."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Flag words as quizzable (exclude grammatical/variant forms and trivially-inferable derivatives)."""
@@ -406,7 +410,7 @@ def quizzable(
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
     db.apply_schema(conn, schema)
-    dist = db.compute_quizzable(conn, schema)
+    dist = db.compute_quizzable(conn, schema, limit=limit)
     conn.close()
     console.print(f"[green]✓[/green] quizzable: [bold]{dist.get('quizzable',0)}[/bold] quizzable, "
                   f"{dist.get('excluded',0)} excluded")
@@ -704,7 +708,7 @@ def maintain(
         console.print("[dim]classify skipped.[/dim]")
 
     if not skip_normalize_pos:
-        stats = db.normalize_word_pos(conn, schema)
+        stats = db.normalize_word_pos(conn, schema, limit=limit)
         console.print(f"[green]✓[/green] normalize-pos: [bold]{stats['changed']}[/bold]/{stats['words']} words updated")
     else:
         console.print("[dim]normalize-pos skipped.[/dim]")
@@ -717,7 +721,7 @@ def maintain(
         console.print("[dim]ngram skipped.[/dim]")
 
     if not skip_archaic:
-        dist = db.compute_archaic(conn, schema)
+        dist = db.compute_archaic(conn, schema, limit=limit)
         total = sum(dist.values())
         parts = ", ".join(f"{k} {v}" for k, v in sorted(dist.items()))
         console.print(f"[green]✓[/green] archaic flags set on [bold]{total}[/bold] words — {parts}")
@@ -725,7 +729,7 @@ def maintain(
         console.print("[dim]archaic skipped.[/dim]")
 
     if not skip_difficulty:
-        stats = db.compute_difficulty(conn, schema)
+        stats = db.compute_difficulty(conn, schema, limit=limit)
         console.print(f"[green]✓[/green] difficulty set on [bold]{stats['words']}[/bold] words "
                       f"(mean {stats['mean']}, median {stats['median']})")
     else:
@@ -740,7 +744,7 @@ def maintain(
         console.print("[dim]quizdef skipped.[/dim]")
 
     if not skip_quizzable:
-        dist = db.compute_quizzable(conn, schema)
+        dist = db.compute_quizzable(conn, schema, limit=limit)
         console.print(f"[green]✓[/green] quizzable: [bold]{dist.get('quizzable',0)}[/bold] quizzable, "
                       f"{dist.get('excluded',0)} excluded")
     else:
