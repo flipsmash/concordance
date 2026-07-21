@@ -144,9 +144,23 @@ def browse_authors(
     dir: Literal["asc", "desc"] = "desc",
     _: dict = Depends(_main.require_viewer),
 ) -> AuthorPage:
+    # author/book_id are NOT passed through _build_word_filters here: that
+    # helper's EXISTS subquery is only correct when the outer query is
+    # anchored on `word` (browse_words) -- it correlates solely to w.id, with
+    # no connection to whichever book/word_book row the outer query happens
+    # to be iterating. browse_authors/browse_books already have a real,
+    # correctly-scoped `b` in their own FROM/JOIN, so filtering by book_id
+    # here is a direct condition against it instead. (Confirmed in
+    # production: passing book_id through the word-anchored EXISTS made
+    # EVERY author who ever shares so much as one common word with a book
+    # match that book_id -- e.g. every Shakespeare play pulled in nearly the
+    # entire corpus as "co-authors.")
     filters, params = _build_word_filters(
-        None, book_id, domain, difficulty_min, difficulty_max, archaic, pos, quizzable_only
+        None, [], domain, difficulty_min, difficulty_max, archaic, pos, quizzable_only
     )
+    if book_id:
+        filters.append("b.id = ANY(%s)")
+        params.append(book_id)
     filters.append("b.author IS NOT NULL")
     if q:
         filters.append("b.author ILIKE %s")
@@ -221,9 +235,16 @@ def browse_books(
     dir: Literal["asc", "desc"] = "asc",
     _: dict = Depends(_main.require_viewer),
 ) -> BookPage:
+    # author is NOT passed through _build_word_filters -- same reasoning as
+    # browse_authors' book_id fix: this endpoint's outer query already has a
+    # correctly-scoped `b`, so filtering by author is a direct condition on
+    # it, not the word-anchored EXISTS meant for browse_words.
     filters, params = _build_word_filters(
-        author, [], domain, difficulty_min, difficulty_max, archaic, pos, quizzable_only
+        None, [], domain, difficulty_min, difficulty_max, archaic, pos, quizzable_only
     )
+    if author:
+        filters.append("b.author = %s")
+        params.append(author)
     if q:
         filters.append("b.title ILIKE %s")
         params.append(f"%{q}%")

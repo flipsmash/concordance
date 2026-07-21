@@ -165,6 +165,37 @@ def test_word_in_multiple_books_dedupes_and_does_not_inflate_total():
 
 
 @pg
+def test_shared_word_does_not_cross_contaminate_author_or_book_filters():
+    # Regression: browse_books(author=X) and browse_authors(book_id=Y) both
+    # reused the word-anchored EXISTS filter meant for browse_words, which
+    # correlates only to the word -- not to which book the outer row is
+    # actually about. Since word_book is highly connected (most words appear
+    # in many books), that silently returned every book/author that shares
+    # so much as one common word with the target, regardless of authorship.
+    # Confirmed in production: filtering books by "Shakespeare, William"
+    # returned 497 of 500 results by other authors entirely.
+    schema = "cc_test_browse_crosscontam"
+    client, conn, restore = _setup(schema)
+    try:
+        b1 = _insert_book(conn, schema, "Hamlet", author="Shakespeare, William")
+        b2 = _insert_book(conn, schema, "The Prose Works of William Wordsworth", author="Wordsworth, William")
+        shared = _insert_word(conn, schema, "shared")  # a common word both books happen to use
+        _link(conn, schema, shared, b1)
+        _link(conn, schema, shared, b2)
+        conn.commit()
+
+        res = client.get("/api/browse/books", params={"author": "Shakespeare, William"})
+        titles = [b["title"] for b in res.json()["items"]]
+        assert titles == ["Hamlet"], f"expected only Shakespeare's book, got {titles}"
+
+        res2 = client.get("/api/browse/authors", params={"book_id": [b2]})
+        authors = [a["author"] for a in res2.json()["items"]]
+        assert authors == ["Wordsworth, William"], f"expected only Wordsworth, got {authors}"
+    finally:
+        restore()
+
+
+@pg
 def test_combined_facets_intersect_regardless_of_which_is_set_first():
     schema = "cc_test_browse_combined"
     client, conn, restore = _setup(schema)
