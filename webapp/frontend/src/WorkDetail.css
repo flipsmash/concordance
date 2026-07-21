@@ -1,0 +1,22 @@
+.work-detail-page {
+  max-width: 960px;
+}
+
+.work-detail-author-link {
+  font-size: 13px;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.work-detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.work-detail-heading {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-h);
+  margin: 0;
+}

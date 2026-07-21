@@ -1,0 +1,69 @@
+.domain-dist {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.domain-dist-row {
+  display: grid;
+  grid-template-columns: 12px 150px 1fr auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.domain-dist-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.domain-dist-label {
+  font-size: 13px;
+  color: var(--text-h);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.domain-dist-label.muted {
+  color: var(--text);
+}
+
+.domain-dist-track {
+  height: 10px;
+  border-radius: 6px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.domain-dist-fill {
+  display: block;
+  height: 100%;
+  border-radius: 6px;
+}
+
+.domain-dist-count {
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.domain-dist-caption {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--text);
+  opacity: 0.8;
+}
+
+.domain-dist-empty {
+  font-size: 13px;
+  color: var(--text);
+}
+
+@media (max-width: 520px) {
+  .domain-dist-row {
+    grid-template-columns: 12px 110px 1fr auto;
+  }
+}

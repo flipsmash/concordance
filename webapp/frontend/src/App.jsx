@@ -17,6 +17,9 @@ const Browse = lazy(() => import('./Browse'))
 const QuizConfig = lazy(() => import('./QuizConfig'))
 const QuizRun = lazy(() => import('./QuizRun'))
 const QuizReview = lazy(() => import('./QuizReview'))
+const Authors = lazy(() => import('./Authors'))
+const AuthorWorks = lazy(() => import('./AuthorWorks'))
+const WorkDetail = lazy(() => import('./WorkDetail'))
 
 function tabClass({ isActive }) {
   return isActive ? 'tab active' : 'tab'
@@ -121,6 +124,30 @@ function App() {
             element={
               <Suspense fallback={<div className="page-loading">Loading…</div>}>
                 <QuizReview />
+              </Suspense>
+            }
+          />
+          <Route
+            path="authors"
+            element={
+              <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                <Authors />
+              </Suspense>
+            }
+          />
+          <Route
+            path="authors/:author"
+            element={
+              <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                <AuthorWorks />
+              </Suspense>
+            }
+          />
+          <Route
+            path="authors/:author/:bookId"
+            element={
+              <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                <WorkDetail />
               </Suspense>
             }
           />

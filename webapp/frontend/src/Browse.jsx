@@ -230,6 +230,8 @@ function Browse() {
       <header className="browse-header">
         <h1>Vocab Browse</h1>
         <div className="browse-user">
+          <Link to="/app/authors" className="browse-quiz-link">Browse by author</Link>
+          {' · '}
           <Link to="/app/quiz" className="browse-quiz-link">Take a quiz</Link>
           {' · '}
           {user?.username} · <button type="button" onClick={logout}>Log out</button>

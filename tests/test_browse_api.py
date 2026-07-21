@@ -329,6 +329,7 @@ def test_anonymous_requests_are_refused():
         assert client.get("/api/browse/authors").status_code == 401
         assert client.get("/api/browse/books").status_code == 401
         assert client.get("/api/browse/domains").status_code == 401
+        assert client.get("/api/browse/domain-summary").status_code == 401
         assert client.get("/api/browse/difficulty-bands").status_code == 401
     finally:
         main.SCHEMA = old_schema
@@ -337,3 +338,104 @@ def test_anonymous_requests_are_refused():
             cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
         cleanup.commit()
         cleanup.close()
+
+
+@pg
+def test_book_stats_report_scored_count_mean_and_stddev():
+    schema = "cc_test_browse_bookstats"
+    client, conn, restore = _setup(schema)
+    try:
+        book = _insert_book(conn, schema, "Stats Book", author="Stats, Author")
+
+        # Zero scored words -> mean/stddev both null, scored_word_count 0.
+        unscored = _insert_word(conn, schema, "unscoredword")
+        _link(conn, schema, unscored, book)
+        conn.commit()
+        row = client.get("/api/browse/books", params={"author": "Stats, Author"}).json()["items"][0]
+        assert row["scored_word_count"] == 0
+        assert row["mean_difficulty"] is None
+        assert row["stddev_difficulty"] is None
+
+        # Exactly one scored word -> mean is that value, stddev is null
+        # (STDDEV_SAMP is undefined at N=1, not 0 -- 0 would misleadingly
+        # read as "no variation" instead of "not enough data").
+        one_scored = _insert_word(conn, schema, "onescored", difficulty=40.0)
+        _link(conn, schema, one_scored, book)
+        conn.commit()
+        row = client.get("/api/browse/books", params={"author": "Stats, Author"}).json()["items"][0]
+        assert row["scored_word_count"] == 1
+        assert row["mean_difficulty"] == 40.0
+        assert row["stddev_difficulty"] is None
+
+        # Two scored words -> both mean and stddev are real numbers.
+        two_scored = _insert_word(conn, schema, "twoscored", difficulty=60.0)
+        _link(conn, schema, two_scored, book)
+        conn.commit()
+        row = client.get("/api/browse/books", params={"author": "Stats, Author"}).json()["items"][0]
+        assert row["scored_word_count"] == 2
+        assert row["mean_difficulty"] == 50.0  # (40 + 60) / 2
+        assert row["stddev_difficulty"] is not None and row["stddev_difficulty"] > 0
+        assert row["word_count"] == 3  # unscored word still counts toward total entries
+    finally:
+        restore()
+
+
+@pg
+def test_books_endpoint_filters_by_book_id():
+    # The work-detail page needs to look up one specific book's title/author/
+    # stats by id -- every other browse endpoint already accepts book_id as a
+    # filter; browse_books was the one exception.
+    schema = "cc_test_browse_bookid"
+    client, conn, restore = _setup(schema)
+    try:
+        b1 = _insert_book(conn, schema, "Wanted", author="Author, Some")
+        b2 = _insert_book(conn, schema, "Unwanted", author="Author, Some")
+        w1 = _insert_word(conn, schema, "wordone")
+        w2 = _insert_word(conn, schema, "wordtwo")
+        _link(conn, schema, w1, b1)
+        _link(conn, schema, w2, b2)
+        conn.commit()
+
+        res = client.get("/api/browse/books", params={"book_id": [b1]})
+        titles = [b["title"] for b in res.json()["items"]]
+        assert titles == ["Wanted"]
+    finally:
+        restore()
+
+
+@pg
+def test_domain_summary_includes_uncategorized_and_correct_total():
+    schema = "cc_test_browse_domainsummary"
+    client, conn, restore = _setup(schema)
+    try:
+        book = _insert_book(conn, schema, "Summary Book")
+        cat_society = _category(conn, schema, "S", "People Society Test")
+        cat_science = _category(conn, schema, "F", "Nature Science Test")
+
+        dual = _insert_word(conn, schema, "dualdomain")  # tagged in 2 buckets
+        _tag_domain(conn, schema, dual, cat_society, is_primary=True)
+        _tag_domain(conn, schema, dual, cat_science, is_primary=False)
+        plain = _insert_word(conn, schema, "notagsword")  # zero categories
+
+        for w in (dual, plain):
+            _link(conn, schema, w, book)
+        conn.commit()
+
+        data = client.get("/api/browse/domain-summary", params={"book_id": [book]}).json()
+        assert data["total_words"] == 2
+
+        by_bucket = {b["bucket"]: b["word_count"] for b in data["buckets"]}
+        assert by_bucket["people_society"] == 1
+        assert by_bucket["nature_science"] == 1
+        assert by_bucket["uncategorized"] == 1  # only "plain", not "dual"
+        assert "uncategorized" in [b["bucket"] for b in data["buckets"]]
+
+        # /api/browse/domains itself must stay a bare list of the 6 named
+        # buckets only -- no uncategorized entry -- since the faceted Browse
+        # page's domain-chip click handler depends on that exact shape.
+        plain_domains = client.get("/api/browse/domains", params={"book_id": [book]}).json()
+        assert isinstance(plain_domains, list)
+        assert "uncategorized" not in [b["bucket"] for b in plain_domains]
+        assert len(plain_domains) == 6
+    finally:
+        restore()

@@ -1,0 +1,131 @@
+.authors-page {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 24px 20px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.authors-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 12px;
+}
+
+.authors-back-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.authors-search {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 15px;
+  color: var(--text-h);
+  background: var(--bg);
+}
+
+.authors-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.authors-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.authors-row:last-child {
+  border-bottom: none;
+}
+
+.authors-row:hover {
+  background: var(--row-hover, var(--border));
+}
+
+.authors-name {
+  font-weight: 600;
+  color: var(--text-h);
+}
+
+.authors-counts {
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.authors-empty {
+  padding: 20px 14px;
+  color: var(--text);
+  font-size: 13px;
+  text-align: center;
+}
+
+.work-row {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.work-title {
+  font-weight: 600;
+  color: var(--text-h);
+}
+
+.work-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.work-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.work-qualifier {
+  color: var(--text);
+  opacity: 0.75;
+}
+
+.authors-footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.authors-footer button {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-h);
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.authors-footer button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
