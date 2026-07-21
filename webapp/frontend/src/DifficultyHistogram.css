@@ -1,0 +1,51 @@
+.diff-hist {
+  overflow-x: auto;
+}
+
+.diff-hist-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  min-width: min-content;
+}
+
+.diff-hist-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 64px;
+  flex: 0 0 auto;
+}
+
+.diff-hist-count {
+  font-size: 11px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  height: 14px;
+}
+
+.diff-hist-bar-track {
+  width: 100%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  border-bottom: 2px solid var(--text-h);
+}
+
+.diff-hist-bar {
+  width: 70%;
+  min-width: 18px;
+  background: var(--accent);
+  border-radius: 3px 3px 0 0;
+}
+
+.diff-hist-bar.unscored {
+  background: var(--border);
+}
+
+.diff-hist-label {
+  font-size: 11px;
+  color: var(--text);
+  white-space: nowrap;
+}

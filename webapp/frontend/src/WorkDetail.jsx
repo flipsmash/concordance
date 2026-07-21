@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
+import DifficultyHistogram from './DifficultyHistogram'
 import DomainDistribution from './DomainDistribution'
 import { usePagedTable } from './usePagedTable'
 import './Authors.css'
@@ -10,9 +11,11 @@ const API_BASE = ''
 const PAGE_SIZE = 30
 
 // Level 3 of the author drilldown: one work's domain makeup, difficulty
-// spread, and full word list. Reuses the faceted Browse page's difficulty-
-// histogram and result-row visual language (imported from Browse.css)
-// scoped to a single book_id, rather than reinventing either.
+// spread, and full word list. Reuses the faceted Browse page's result-row
+// visual language (imported from Browse.css) scoped to a single book_id.
+// The difficulty distribution gets its own real histogram component
+// (DifficultyHistogram) rather than reusing Browse's compact filter strip,
+// which varies bar WIDTH not height and isn't a histogram.
 function WorkDetail() {
   const { author, bookId } = useParams()
   const navigate = useNavigate()
@@ -32,8 +35,6 @@ function WorkDetail() {
       .then(setBands)
       .catch(() => {})
   }, [bookId])
-
-  const bandsTotal = bands.reduce((sum, b) => sum + b.word_count, 0) || 1
 
   const { items, total, page, setPage, loading, error, totalPages } = usePagedTable({
     endpoint: '/api/browse/words',
@@ -66,16 +67,7 @@ function WorkDetail() {
 
       <section className="browse-facets work-detail-section">
         <h2 className="work-detail-heading">Difficulty distribution</h2>
-        <div className="browse-difficulty-histogram">
-          {bands.map((b) => (
-            <div
-              key={b.label}
-              className={b.band_min === null ? 'browse-band unscored' : 'browse-band'}
-              style={{ flexGrow: Math.max(b.word_count, 1) / bandsTotal }}
-              title={`${b.label}: ${b.word_count} words`}
-            />
-          ))}
-        </div>
+        <DifficultyHistogram bands={bands} />
       </section>
 
       {error && <div className="error-banner">{error}</div>}
