@@ -637,7 +637,15 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
     validity_score.estimate() written to word.validity_* -- the DB-native
     version of deepen.py's <book>.undefined.csv report, so a word that's
     both flagged_undefined AND scored likely-artifact is an obvious prune
-    candidate, not silent noise in the accepted list.
+    candidate, not silent noise in the accepted list. WEB (when use_web) is
+    tried for EVERY word nothing else defined, regardless of that estimate
+    -- there used to be a pre-gate skipping WEB for anything already scored
+    likely-artifact, on the theory that a web search for OCR noise was
+    wasted effort; dropped because that same "probably not a real word"
+    signal is exactly the rare/archaic vocabulary this project's judge
+    rubric exists to prize, and a word simply not matching any of the
+    dictionaries checked earlier is not strong enough evidence to skip the
+    one source most likely to catch what they all missed.
 
     `recheck_after_days`: a word already scored by validity_score recently
     is skipped entirely rather than re-run through the full cascade (Wordnik
@@ -684,18 +692,20 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
             if sentence:
                 cand.occurrences.append(Occurrence(sentence=sentence, chapter=chapter or "",
                                                     surface=as_seen or lemma))
-            # llm=None here even when a model is loaded: WEB must stay gated
-            # on the validity_score check below, which resolve_definition has
-            # no concept of, so LOCAL/FREE/WORDNIK/YOURDICT run first in one
-            # pass and WEB is only ever tried directly, never as part of
-            # this call.
+            # llm=None here even when a model is loaded: max_tier already
+            # includes WEB when use_web is set, but resolve_definition would
+            # try it before validity_score ever runs -- deliberately not
+            # skipped here (the likely-artifact pre-gate was removed; WEB is
+            # now the true last resort, tried for anything nothing else
+            # defined), just sequenced so validity_score's estimate() always
+            # gets computed and is available to write if WEB also misses.
             est = None
             found = resolve.resolve_definition(
                 cand, max_tier=max_tier, lexicon=lexicon, session=session,
                 wordnik_key=key, llm=None) is not None
             if not found:
                 est = validity_score.estimate(lemma, session=session, sentence=sentence or "")
-                if llm is not None and est.label != "likely-artifact":
+                if llm is not None:
                     from . import websearch
                     found = websearch.define_via_web(cand, llm)
                     if found:

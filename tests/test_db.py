@@ -394,13 +394,15 @@ def test_compute_ipa_limit_applies_after_the_only_missing_filter(monkeypatch):
 
 
 @pg
-def test_fill_definitions_gates_web_tier_on_validity(monkeypatch, tmp_path):
-    # fill_definitions is the single merged pass now (used to be separate
-    # refill_definitions + deepen_definitions calls) -- the WEB tier must
-    # stay gated on validity_score exactly like deepen used to: only tried
-    # when an LLM is available AND the word doesn't score as a likely
-    # artifact. resolve_definition itself has no concept of this gate, so
-    # it has to survive the merge as fill_definitions' own logic.
+def test_fill_definitions_web_tier_is_no_longer_gated_on_validity(monkeypatch, tmp_path):
+    # Phase 5a: the WEB tier used to skip anything validity_score scored
+    # likely-artifact, on the theory a web search for OCR noise was wasted
+    # effort. That pre-gate is gone -- WEB is now tried for every word
+    # nothing else defined, likely-artifact included, since that same
+    # "doesn't match any dictionary" signal is exactly the rare/archaic
+    # vocabulary this project's judge rubric exists to prize. validity_score
+    # still runs and its estimate is still available to write for whatever
+    # WEB *also* misses, just no longer used to skip the attempt.
     import llama_cpp
 
     from concordance import resolve, validity_score
@@ -437,19 +439,21 @@ def test_fill_definitions_gates_web_tier_on_validity(monkeypatch, tmp_path):
 
     def fake_web(cand, llm):
         calls.append(cand.lemma)
-        cand.definition = f"a web definition of {cand.lemma}"
-        cand.definition_source = "Web (LLM-extracted)"
-        return True
+        # Only "realword" actually gets defined by the (fake) web search --
+        # confirms the gate no longer blocks the ATTEMPT, while still
+        # letting a genuine miss fall through to validity-score recording.
+        if cand.lemma == "realword":
+            cand.definition = f"a web definition of {cand.lemma}"
+            cand.definition_source = "Web (LLM-extracted)"
+            return True
+        return False
 
     monkeypatch.setattr("concordance.websearch.define_via_web", fake_web)
 
     stats = db.fill_definitions(conn, schema, use_web=True, model_path=str(model_path))
 
-    # likely-artifact never reaches the web tier; the other word does. (Both
-    # words are real, invented nonce lemmas -- neither resolves via any real
-    # dictionary tier, so whichever one reaches WEB is purely a function of
-    # the validity_score gate, not a fluke of a live source having an entry.)
-    assert calls == ["realword"]
+    # Both words reach the web tier now -- the gate is gone.
+    assert calls == ["artifactword", "realword"]
     assert stats["defined"] == 1
     assert stats["still_undefined"] == 1
 
