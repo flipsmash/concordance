@@ -975,6 +975,12 @@ class SPAStaticFiles(StaticFiles):
 from webapp.backend import quiz as _quiz  # noqa: E402
 app.include_router(_quiz.router)
 
+# Same ordering requirement as quiz.py, same reason -- browse.py's own
+# `from webapp.backend import main as _main` resolves against this already-
+# populated module namespace at its own module-load time.
+from webapp.backend import browse as _browse  # noqa: E402
+app.include_router(_browse.router)
+
 # Serves the built frontend (webapp/frontend/dist, from `npm run build`) so a
 # single port can be exposed publicly. Registered last so it never shadows an
 # /api/* route above; absent in plain local dev, where the Vite dev server is

@@ -307,6 +307,12 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
         # idempotent column additions (CREATE TABLE IF NOT EXISTS won't alter an
         # existing table, so evolve columns explicitly)
         cur.execute(f"ALTER TABLE {s}.book ADD COLUMN IF NOT EXISTS author text")
+        # word_book's PK (word_id, book_id) serves word-id-leading lookups (does
+        # this word belong to book X) for free, but the browse feature's author/
+        # book listing endpoints join book -> word_book on book_id, a direction
+        # the PK doesn't cover -- a full scan of the link table without this.
+        cur.execute(f"CREATE INDEX IF NOT EXISTS word_book_book_id_idx ON {s}.word_book (book_id)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS book_author_idx ON {s}.book (author)")
         # so "un-rejecting" a word in the review webapp can produce a word row
         # with the same context a normally-kept word has, not a bare stub
         cur.execute(f"ALTER TABLE {s}.rejected_word ADD COLUMN IF NOT EXISTS pos text")

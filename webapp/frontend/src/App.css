@@ -200,6 +200,29 @@ header {
   background: var(--row-alt);
 }
 
+.multiselect-search {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 13px;
+  padding: 5px 8px;
+  margin-bottom: 6px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-h);
+}
+
+.multiselect-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.multiselect-empty {
+  font-size: 13px;
+  color: var(--text);
+  padding: 5px 6px;
+}
+
 .count {
   font-size: 13px;
   color: var(--text);
