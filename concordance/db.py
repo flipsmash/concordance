@@ -711,20 +711,16 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
                     if found:
                         resolve.apply_pos_repair(cand, lexicon)
 
-            # Same "did a source's hit reveal this shouldn't be accepted at
-            # all" check pipeline.py applies at ingest time: junk_pos_reason
-            # for symbol/proper-noun senses, variant_reject_reason for a
-            # grammatically-fine hit that's actually a foreign word or an
-            # archaic/OCR spelling of a common modern word. Needed here too,
-            # independently of ingest, because refill/deepen/fill_definitions
-            # never re-run ingest's ValidityGate on a word already sitting in
-            # the table -- a source successfully defining it is otherwise
-            # taken as sufficient evidence to accept it, which it isn't.
+            # validity_score.variant_reject_reason (foreign-word / archaic-
+            # spelling-variant detection) is deliberately NOT checked here:
+            # a real-scale dry-run sweep against the live word table found
+            # it flags ~21% of already-accepted vocabulary, and the flagged
+            # sample was mostly genuine rare words (haft, glaive, thurible,
+            # discomfit, kickshaw) rather than the junk it was built to
+            # catch. See pipeline.py's matching comment and
+            # validity_score.py's docstrings -- the detectors are real and
+            # tested, just not safe as an unattended hard gate yet.
             reason = junk_pos_reason(cand.part_of_speech) if found else None
-            if not reason and found:
-                variant = validity_score.variant_reject_reason(lemma)
-                if variant:
-                    reason = variant[0]
             if reason:
                 cur.execute(
                     f"""UPDATE {s}.word SET

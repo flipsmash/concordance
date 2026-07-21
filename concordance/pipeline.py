@@ -7,7 +7,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from . import clean, db, extract, floor, judge, localdict, master, output, propernouns, resolve, tokenize, validity, validity_score
+from . import clean, db, extract, floor, judge, localdict, master, output, propernouns, resolve, tokenize, validity
 from .dictionary import make_session
 from .config import Config
 from .model import Candidate, RejectReason, Verdict, junk_pos_reason
@@ -156,29 +156,33 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
         # the word out (active=false) if it already exists, same as
         # refill/deepen do for their own junk-POS resolutions.
         #
-        # validity_score.variant_reject_reason is the same idea for a
-        # different failure mode: a hit that's real English grammatically
-        # (so junk_pos_reason doesn't catch it) but is actually a foreign
-        # word (acte, bellissimo) or just an archaic/OCR spelling of a common
-        # modern word (assunder, beneficiall) — neither belongs in the
-        # accepted list no matter which source defined it.
+        # validity_score.variant_reject_reason (foreign-word / archaic-
+        # spelling-variant detection) is NOT wired in here as a hard
+        # cast-out: real-scale testing (a 31k-word dry-run sweep) found it
+        # flags ~21% of the live vocabulary, and a sample of the flagged
+        # words was mostly genuine rare vocabulary (haft, glaive, thurible,
+        # discomfit, kickshaw, outlawry) rather than the foreign/misspelling
+        # junk it was built to catch — edit-distance similarity doesn't
+        # imply a real spelling-variant relationship, and cross-language
+        # zipf can't separate a foreign word from an English word that's
+        # ALSO a word in that language (haft, argent, rood are all real
+        # English). See validity_score.py's docstrings for the detectors
+        # themselves, which are real and tested — just not safe as an
+        # unattended hard gate at this precision. Do not re-enable this
+        # cast-out without a materially more precise check or a
+        # human-review queue instead of a silent drop.
         cast_out = 0
         for cand in shortlist:
             reason = junk_pos_reason(cand.part_of_speech)
-            detail = f"dictionary lookup resolved this as {cand.part_of_speech!r} — cast out"
-            if not reason:
-                variant = validity_score.variant_reject_reason(cand.lemma)
-                if variant:
-                    reason, note = variant
-                    detail = f"{note} — cast out"
             if reason:
                 cand.verdict = Verdict.DROP
                 cand.reject_reason = reason
-                cand.interesting_reason = detail
+                cand.interesting_reason = (
+                    f"dictionary lookup resolved this as {cand.part_of_speech!r} — cast out")
                 cast_out += 1
         if cast_out:
             console.print(f"[dim]{cast_out} more cast out post-enrichment "
-                           "(symbol/proper-noun/foreign/spelling-variant dictionary sense).[/dim]")
+                           "(symbol/proper-noun-only dictionary sense).[/dim]")
 
     conn.close()
     return output.partition(candidates)
