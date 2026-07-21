@@ -672,7 +672,7 @@ def refill_definitions(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0,
 
 def deepen_definitions(conn, schema: str = DEFAULT_SCHEMA, use_web: bool = False,
                        model_path: str | None = None, limit: int = 0,
-                       delay: float = 0.5) -> dict:
+                       delay: float = 13.0) -> dict:
     """DB-native equivalent of deepen.py's `define`: for words still blank after
     `refill_definitions`, try the deeper/slower sources (Wordnik, yourdictionary,
     optionally web-search + LLM extraction). Whatever still can't be defined gets
