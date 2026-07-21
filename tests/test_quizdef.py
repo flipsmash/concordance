@@ -90,3 +90,72 @@ def test_quizzable_no_exclusion_when_root_below_threshold():
     # root present but uncommon (zipf < 3.0) -> still quizzable
     ok, reason = quizdef.quizzable("The act of gnarring.", morph_root="gnar", root_zipf=1.2)
     assert ok and reason == ""
+
+
+# --- redaction sparsity ------------------------------------------------------
+
+def test_content_word_count_ignores_function_words():
+    assert quizdef._content_word_count("A male dealer in —.") == 2  # male, dealer
+    assert quizdef._content_word_count("—") == 0
+    # pertaining, boxing, fighting
+    assert quizdef._content_word_count("Of or pertaining to boxing or fighting with —.") == 3
+
+
+def test_redaction_too_sparse_flags_near_empty_definitions():
+    # Regression: "silkman" -> "A male dealer in silk." redacted to "A male
+    # dealer in —." is grammatically intact but no longer distinguishes
+    # silkman from any other "male dealer in X" trade word.
+    assert quizdef.redaction_too_sparse("A male dealer in —.")
+    assert quizdef.redaction_too_sparse("—")
+    assert quizdef.redaction_too_sparse("One who —.")
+
+
+def test_redaction_too_sparse_keeps_content_rich_redaction():
+    # A definition with enough surviving content still functions as a clue
+    # even with one term blanked.
+    assert not quizdef.redaction_too_sparse(
+        "A device for holding one or more lit — near a window during a storm.")
+
+
+def test_quizzable_excludes_over_redacted_definition():
+    ok, reason = quizdef.quizzable(
+        "A male dealer in silk.", quiz_definition="A male dealer in —.", quiz_def_source="redacted")
+    assert not ok
+    assert "redaction" in reason
+
+
+def test_quizzable_ignores_sparsity_check_for_non_redacted_sources():
+    # A short CLEAN or REWRITTEN definition was never blanked -- brevity
+    # alone isn't grounds for exclusion, only redaction that hollowed it out.
+    ok, reason = quizdef.quizzable(
+        "Wealth, riches.", quiz_definition="Wealth, riches.", quiz_def_source="clean")
+    assert ok and reason == ""
+
+
+def test_rewrite_chunks_the_hard_retry_pass():
+    # Regression: rewrite() chunked the normal pass by self.batch but passed
+    # the ENTIRE too-sparse subset to _batch_hard in one call -- on a real
+    # backlog (1,407 too-sparse items) that built a single prompt payload
+    # requesting far more tokens than the model's context window, and
+    # crashed with "Requested tokens (22264) exceed context window of 8192."
+    from unittest.mock import MagicMock, patch
+
+    rw = quizdef.Rewriter.__new__(quizdef.Rewriter)
+    rw.llm = MagicMock()
+    rw.batch = 10
+
+    # Every item here is short enough that its redaction is too sparse, so
+    # all of them fall into the would_redact_sparse / hard-retry path.
+    items = [{"word": f"tradesman{i}", "definition": f"A dealer in tradesman{i}."} for i in range(25)]
+
+    call_sizes = []
+
+    def fake_query_hard(pending):
+        call_sizes.append(len(pending))
+        return []  # model returns nothing -> everything falls to redact()
+
+    with patch.object(rw, "_query", return_value=[]), patch.object(rw, "_query_hard", side_effect=fake_query_hard):
+        rw.rewrite(items)
+
+    assert call_sizes, "the hard-retry path was never exercised"
+    assert max(call_sizes) <= rw.batch, f"a hard-retry batch exceeded self.batch: {call_sizes}"

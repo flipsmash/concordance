@@ -93,6 +93,24 @@ _SYSTEM = (
     'Output ONLY JSON: [{"w":"<word>","d":"<rewrite>"}], every input word exactly once, no prose.'
 )
 
+# Second-chance prompt for definitions where a normal rewrite still leaked and
+# a blind redaction would gut the definition to near-nothing (see
+# redaction_too_sparse below) -- e.g. "a male dealer in silk" for "silkman" is
+# short enough that the target word essentially IS the content, so simply
+# "reword while avoiding the root" (the normal prompt) tends to fail
+# repeatedly. This asks for a different strategy instead of a rephrasing of
+# the same one.
+_SYSTEM_HARD = (
+    "You rewrite dictionary definitions into quiz clues. These are HARD cases: the "
+    "definition is short enough that the target word is essentially its only real "
+    "content, so simply avoiding the word/its root isn't enough -- instead, describe "
+    "the broader CATEGORY, MATERIAL, or DOMAIN the answer belongs to, specifically "
+    "enough to still be a real clue. Example: for a dealer in a specific fine fabric, "
+    "say 'a merchant who trades in a certain luxury textile', not just 'a merchant.' "
+    "Do not add facts you aren't confident are true. "
+    'Output ONLY JSON: [{"w":"<word>","d":"<rewrite>"}], every input word exactly once, no prose.'
+)
+
 
 class Rewriter:
     _MAX_PASSES = 3
@@ -112,7 +130,22 @@ class Rewriter:
         result: dict[str, tuple[str, str]] = {}
         for i in range(0, len(items), self.batch):
             self._batch(items[i : i + self.batch], result)
-        # anything the model never returned or that still leaks -> redact
+
+        # Anything not resolved by a normal rewrite would fall straight to
+        # redact() -- but when that redaction would leave too little content
+        # to be a usable clue, try the different (category-describing)
+        # strategy above first, rather than accepting the hollowed-out
+        # fallback immediately. Re-trying _SYSTEM itself wouldn't help: it
+        # already got _MAX_PASSES attempts in _batch.
+        would_redact_sparse = [
+            it for it in items
+            if it["word"].lower() not in result
+            and redaction_too_sparse(redact(it["word"], it["definition"]))
+        ]
+        for i in range(0, len(would_redact_sparse), self.batch):
+            self._batch_hard(would_redact_sparse[i : i + self.batch], result)
+
+        # anything still unresolved, or that still leaks -> blind redact
         for it in items:
             w = it["word"].lower()
             if w not in result or has_leak(it["word"], result[w][0]):
@@ -140,6 +173,33 @@ class Rewriter:
         out = self.llm.create_chat_completion(
             messages=[{"role": "system", "content": _SYSTEM}, {"role": "user", "content": payload}],
             temperature=0.2, max_tokens=len(items) * 60 + 128)
+        return _parse(out["choices"][0]["message"]["content"])
+
+    def _batch_hard(self, batch: list[dict], result: dict) -> None:
+        """Same shape as _batch, but accepts a candidate only if it's BOTH
+        leak-free AND not itself too sparse -- a category-describing rewrite
+        that comes back just as hollow ("a kind of fabric" -> still vague)
+        isn't an improvement worth keeping over the eventual redaction."""
+        pending = list(batch)
+        for _ in range(self._MAX_PASSES):
+            for obj in self._query_hard(pending):
+                w = str(obj.get("w", "")).strip().lower()
+                d = str(obj.get("d", "")).strip()
+                if not w or not d:
+                    continue
+                src_word = next((it["word"] for it in batch if it["word"].lower() == w), w)
+                if not has_leak(src_word, d) and not redaction_too_sparse(d):
+                    result[w] = (d, "rewritten")
+            pending = [it for it in batch if it["word"].lower() not in result]
+            if not pending:
+                break
+
+    def _query_hard(self, items: list[dict]) -> list:
+        payload = json.dumps([{"word": it["word"], "definition": (it.get("definition") or "")[:220]}
+                              for it in items], ensure_ascii=False)
+        out = self.llm.create_chat_completion(
+            messages=[{"role": "system", "content": _SYSTEM_HARD}, {"role": "user", "content": payload}],
+            temperature=0.3, max_tokens=len(items) * 60 + 128)
         return _parse(out["choices"][0]["message"]["content"])
 
 
@@ -173,6 +233,49 @@ _VARIANT_RE = re.compile(
 # is not, so the word stays quizzable. wordfreq Zipf is corpus-independent.
 _COMMON_ROOT_ZIPF = 3.0
 
+# --- redaction sparsity -----------------------------------------------------
+# redact() is the always-available fallback when a rewrite still leaks, but
+# blanking every leaking token can gut a short, templated definition down to
+# its scaffolding: "silkman" -> "A male dealer in silk." becomes "A male
+# dealer in —." -- grammatically intact, but no longer distinguishes silkman
+# from any other "male dealer in X" trade word. Not caught by _VARIANT_RE
+# (this isn't a "form of X" cross-reference) or the common-root check (silk
+# isn't silkman's morphological root) -- quizzable() never looked at what
+# redaction actually did to the definition at all.
+#
+# A small, deliberately narrow function word list -- this operates on short,
+# templated dictionary-gloss sentences, not general prose, so it doesn't need
+# NLTK's broader stopword corpus.
+_FUNCTION_WORDS = frozenset({
+    "a", "an", "the", "of", "in", "on", "to", "for", "with", "by", "or", "and",
+    "is", "are", "was", "were", "be", "being", "been", "who", "that", "which",
+    "this", "these", "those", "one", "someone", "something", "as", "at", "from",
+    "it", "its", "their", "his", "her", "not", "no", "any", "some", "you",
+})
+
+
+def _content_word_count(text: str) -> int:
+    """Alphabetic tokens (len >= 3) that aren't function words -- a proxy for
+    how much distinguishing content a definition still carries."""
+    return sum(
+        1 for w in re.findall(r"[A-Za-z]+", text or "")
+        if len(w) >= 3 and w.lower() not in _FUNCTION_WORDS
+    )
+
+
+def redaction_too_sparse(quiz_definition: str, threshold: int = 3) -> bool:
+    """True when a redacted definition has lost so much content that it can
+    no longer meaningfully distinguish the target word from many other
+    plausible answers. Not exact -- a mechanical word count can't judge true
+    distinguishing power (a strong single clue like "boxing" in "pertaining
+    to boxing or fighting with —" can carry a definition; two generic nouns
+    like "male dealer" in "a male dealer in —" can't) -- but it reliably
+    catches the unambiguous failures: near/fully-empty redactions and short
+    template definitions reduced to their scaffolding. Deliberately errs
+    toward flagging borderline cases for a rewrite retry rather than missing
+    real ones; a false positive here just means one more rewrite attempt."""
+    return _content_word_count(quiz_definition) <= threshold
+
 
 # TODO(quizzable-derivative-false-positives): the common-root rule is purely
 # ORTHOGRAPHIC — it excludes any word whose _morph_root strips to a common root,
@@ -187,10 +290,15 @@ _COMMON_ROOT_ZIPF = 3.0
 # transparent ones (reveller -> "one who revels"). Needs the surface word passed
 # in, which compute_quizzable already has.
 def quizzable(definition: str, morph_root: str | None = None,
-              root_zipf: float | None = None) -> tuple[bool, str]:
-    """(quizzable, reason). False when the answer is trivially inferable."""
+              root_zipf: float | None = None, quiz_definition: str | None = None,
+              quiz_def_source: str | None = None) -> tuple[bool, str]:
+    """(quizzable, reason). False when the answer is trivially inferable, OR
+    (quiz_definition, quiz_def_source) shows redaction destroyed too much of
+    the definition's actual content to serve as a usable clue."""
     if _VARIANT_RE.search(definition or ""):
         return False, "grammatical/variant form"
     if morph_root and root_zipf is not None and root_zipf >= _COMMON_ROOT_ZIPF:
         return False, f"transparent derivative of common root '{morph_root}'"
+    if quiz_def_source == "redacted" and redaction_too_sparse(quiz_definition or ""):
+        return False, "redaction destroyed too much definitional content"
     return True, ""

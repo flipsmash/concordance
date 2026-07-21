@@ -1036,12 +1036,13 @@ def compute_quizzable(conn, schema: str = DEFAULT_SCHEMA) -> dict:
     s = _safe_schema(schema)
     dist: Counter = Counter()
     with conn.cursor() as cur:
-        cur.execute(f"SELECT id, lemma, definition FROM {s}.word WHERE coalesce(definition,'') <> ''")
+        cur.execute(f"SELECT id, lemma, definition, quiz_definition, quiz_def_source "
+                    f"FROM {s}.word WHERE coalesce(definition,'') <> ''")
         rows = cur.fetchall()
-        for wid, lemma, defn in rows:
+        for wid, lemma, defn, quiz_defn, quiz_def_source in rows:
             root = _morph_root(lemma)
             rz = zipf_frequency(root, "en") if root else None
-            ok, reason = quizdef.quizzable(defn, root, rz)
+            ok, reason = quizdef.quizzable(defn, root, rz, quiz_defn, quiz_def_source)
             dist["quizzable" if ok else "excluded"] += 1
             cur.execute(
                 f"""INSERT INTO {s}.word_difficulty (word_id, quizzable, quizzable_reason, updated_at)
