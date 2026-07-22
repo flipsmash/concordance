@@ -186,6 +186,24 @@ concordance deepen --web        # + web-search/LLM last resort (needs a model)
 - Neither command ever overwrites an existing definition — both only touch
   rows where `definition` is still blank.
 
+A **separate** human-review flag, `word.variant_flag_reason`/`variant_flag_note`/
+`variant_flagged_at`, marks a word that a source successfully defined but that
+looks like a foreign word or an archaic/OCR spelling of a common modern word
+(e.g. `acte`, an archaic-spelling `assunder`). This is deliberately NOT an
+auto-reject: a real-scale sweep of the existing vocabulary found the
+detector's false-positive rate too high to trust unattended (real words like
+`haft`, `glaive`, `thurible` got flagged too) — the word stays fully active
+and defined, just marked for a person to glance at:
+
+```sql
+SELECT lemma, variant_flag_reason, variant_flag_note
+FROM word WHERE variant_flag_reason IS NOT NULL ORDER BY lemma;
+```
+
+`scripts/sweep_variant_rejects.py` (dry-run by default, `--apply` to write
+the flags) runs the same check retroactively against words already active
+before the flag existed.
+
 Both commands accept `--schema`, `--limit`, `--database-url`.
 
 ## Enrichment & scoring (`classify`, `archaic`, `ngram`, `difficulty`, `quizdef`, `quizzable`)

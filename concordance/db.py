@@ -362,6 +362,21 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS validity_notes text")
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS suggested_correction text")
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS validity_checked_at timestamptz")
+        # A human-review queue, not an auto-reject: validity_score.variant_reject_reason
+        # (foreign-language / archaic-spelling-variant detection) was tried as a
+        # hard cast-out gate and found to flag ~21% of the live vocabulary with
+        # mostly false positives at real scale (haft/glaive/thurible/discomfit
+        # all wrongly flagged) -- edit-distance similarity and cross-language
+        # zipf comparison are both too weak a signal to auto-drop on. Flagging
+        # here instead: the word is accepted/defined normally, but marked for a
+        # human to glance at and manually prune via the review webapp if it's
+        # really junk. Never cleared automatically, same sticky-marker pattern
+        # as flagged_undefined.
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS variant_flag_reason text")
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS variant_flag_note text")
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS variant_flagged_at timestamptz")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS word_variant_flag_idx ON {s}.word (variant_flag_reason) "
+                    f"WHERE variant_flag_reason IS NOT NULL")
         cur.execute(
             f"""INSERT INTO {s}.app_settings (key, value) VALUES ('quiz_feedback_timing', '{{"mode": "immediate"}}')
                 ON CONFLICT (key) DO NOTHING""")
@@ -535,9 +550,11 @@ def sync_book_results(conn, book_title: str, kept: list, rejected: list,
                 f"""INSERT INTO {s}.word
                     (lemma, as_seen, definition, part_of_speech, ipa, sentence,
                      chapter, synonyms, etymology, definition_source, first_added,
-                     flagged_undefined, flagged_undefined_at)
+                     flagged_undefined, flagged_undefined_at,
+                     variant_flag_reason, variant_flag_note, variant_flagged_at)
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, CURRENT_DATE,
-                            %s, CASE WHEN %s THEN now() ELSE NULL END)
+                            %s, CASE WHEN %s THEN now() ELSE NULL END,
+                            NULLIF(%s,''), NULLIF(%s,''), CASE WHEN %s <> '' THEN now() ELSE NULL END)
                     ON CONFLICT (lemma_lc) DO UPDATE SET
                         as_seen=EXCLUDED.as_seen,
                         definition=COALESCE(NULLIF(EXCLUDED.definition,''), {s}.word.definition),
@@ -557,6 +574,9 @@ def sync_book_results(conn, book_title: str, kept: list, rejected: list,
                                 THEN now()
                             ELSE {s}.word.flagged_undefined_at
                         END,
+                        variant_flag_reason=COALESCE(EXCLUDED.variant_flag_reason, {s}.word.variant_flag_reason),
+                        variant_flag_note=COALESCE(EXCLUDED.variant_flag_note, {s}.word.variant_flag_note),
+                        variant_flagged_at=COALESCE(EXCLUDED.variant_flagged_at, {s}.word.variant_flagged_at),
                         updated_at=now()
                     RETURNING id, definition""",
                 (c.lemma, rep.surface if rep else "", definition,
@@ -564,7 +584,8 @@ def sync_book_results(conn, book_title: str, kept: list, rejected: list,
                  rep.sentence if rep else "", rep.chapter if rep else "",
                  list(c.synonyms), c.etymology,
                  c.definition_source or ", ".join(c.validity_sources),
-                 is_blank, is_blank))
+                 is_blank, is_blank,
+                 c.variant_flag_reason, c.variant_flag_note, c.variant_flag_reason))
             word_id, new_definition = cur.fetchone()
             stats["kept"] += 1
 
@@ -712,15 +733,15 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
                         resolve.apply_pos_repair(cand, lexicon)
 
             # validity_score.variant_reject_reason (foreign-word / archaic-
-            # spelling-variant detection) is deliberately NOT checked here:
-            # a real-scale dry-run sweep against the live word table found
-            # it flags ~21% of already-accepted vocabulary, and the flagged
-            # sample was mostly genuine rare words (haft, glaive, thurible,
-            # discomfit, kickshaw) rather than the junk it was built to
-            # catch. See pipeline.py's matching comment and
-            # validity_score.py's docstrings -- the detectors are real and
-            # tested, just not safe as an unattended hard gate yet.
+            # spelling-variant detection) is a human-review flag here too,
+            # same as pipeline.py: NOT a hard cast-out (a real-scale dry-run
+            # sweep against the live word table found it flags ~21% of
+            # already-accepted vocabulary, mostly genuine rare words --
+            # haft, glaive, thurible, discomfit, kickshaw -- rather than the
+            # junk it was built to catch) but still worth recording so a
+            # human can review + prune via the webapp.
             reason = junk_pos_reason(cand.part_of_speech) if found else None
+            variant = validity_score.variant_reject_reason(lemma) if (found and not reason) else None
             if reason:
                 cur.execute(
                     f"""UPDATE {s}.word SET
@@ -740,10 +761,15 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
                             ipa=COALESCE(NULLIF(%s,''), ipa),
                             etymology=COALESCE(NULLIF(%s,''), etymology),
                             synonyms=CASE WHEN %s THEN %s ELSE synonyms END,
+                            variant_flag_reason=COALESCE(%s, variant_flag_reason),
+                            variant_flag_note=COALESCE(%s, variant_flag_note),
+                            variant_flagged_at=CASE WHEN %s::text IS NOT NULL THEN now() ELSE variant_flagged_at END,
                             updated_at=now()
                         WHERE id=%s""",
                     (cand.definition, cand.definition_source, normalize_pos(cand.part_of_speech),
-                     cand.ipa, cand.etymology, bool(cand.synonyms), list(cand.synonyms), wid))
+                     cand.ipa, cand.etymology, bool(cand.synonyms), list(cand.synonyms),
+                     variant[0].value if variant else None, variant[1] if variant else None,
+                     variant[0].value if variant else None, wid))
                 stats["defined"] += 1
             else:
                 cur.execute(
@@ -775,7 +801,7 @@ def refill_definitions(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> di
     historical stat vocabulary (filled/still_missing) rather than
     fill_definitions' (defined/still_undefined) for backward compatibility
     with existing callers/scripts."""
-    from . import localdict, resolve
+    from . import localdict, resolve, validity_score
     from .dictionary import make_session
     from .model import Candidate, Occurrence, junk_pos_reason
 
@@ -803,6 +829,7 @@ def refill_definitions(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> di
                                                     surface=as_seen or lemma))
             resolve.resolve_definition(cand, max_tier=resolve.Tier.FREE, lexicon=lexicon, session=session)
             reason = junk_pos_reason(cand.part_of_speech)
+            variant = validity_score.variant_reject_reason(lemma) if (cand.definition and not reason) else None
             if reason:
                 cur.execute(
                     f"""UPDATE {s}.word SET
@@ -822,10 +849,15 @@ def refill_definitions(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> di
                             ipa=COALESCE(NULLIF(%s,''), ipa),
                             etymology=COALESCE(NULLIF(%s,''), etymology),
                             synonyms=CASE WHEN %s THEN %s ELSE synonyms END,
+                            variant_flag_reason=COALESCE(%s, variant_flag_reason),
+                            variant_flag_note=COALESCE(%s, variant_flag_note),
+                            variant_flagged_at=CASE WHEN %s::text IS NOT NULL THEN now() ELSE variant_flagged_at END,
                             updated_at=now()
                         WHERE id=%s""",
                     (cand.definition, cand.definition_source, normalize_pos(cand.part_of_speech),
-                     cand.ipa, cand.etymology, bool(cand.synonyms), list(cand.synonyms), wid))
+                     cand.ipa, cand.etymology, bool(cand.synonyms), list(cand.synonyms),
+                     variant[0].value if variant else None, variant[1] if variant else None,
+                     variant[0].value if variant else None, wid))
                 stats["filled"] += 1
             else:
                 stats["still_missing"] += 1

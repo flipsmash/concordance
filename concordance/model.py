@@ -60,6 +60,13 @@ class Candidate:
     etymology: str = ""
     definition_source: str = ""
 
+    # A human-review flag (never an auto-reject — see validity_score.
+    # variant_reject_reason's docstring for why): set when a definition
+    # source successfully defined the word, but it looks like a foreign
+    # word or an archaic/OCR spelling of a common modern word.
+    variant_flag_reason: str = ""
+    variant_flag_note: str = ""
+
     @property
     def count(self) -> int:
         return len(self.occurrences)

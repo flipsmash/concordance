@@ -7,7 +7,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from . import clean, db, extract, floor, judge, localdict, master, output, propernouns, resolve, tokenize, validity
+from . import clean, db, extract, floor, judge, localdict, master, output, propernouns, resolve, tokenize, validity, validity_score
 from .dictionary import make_session
 from .config import Config
 from .model import Candidate, RejectReason, Verdict, junk_pos_reason
@@ -157,21 +157,21 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
         # refill/deepen do for their own junk-POS resolutions.
         #
         # validity_score.variant_reject_reason (foreign-word / archaic-
-        # spelling-variant detection) is NOT wired in here as a hard
-        # cast-out: real-scale testing (a 31k-word dry-run sweep) found it
-        # flags ~21% of the live vocabulary, and a sample of the flagged
-        # words was mostly genuine rare vocabulary (haft, glaive, thurible,
-        # discomfit, kickshaw, outlawry) rather than the foreign/misspelling
-        # junk it was built to catch — edit-distance similarity doesn't
-        # imply a real spelling-variant relationship, and cross-language
-        # zipf can't separate a foreign word from an English word that's
-        # ALSO a word in that language (haft, argent, rood are all real
-        # English). See validity_score.py's docstrings for the detectors
-        # themselves, which are real and tested — just not safe as an
-        # unattended hard gate at this precision. Do not re-enable this
-        # cast-out without a materially more precise check or a
-        # human-review queue instead of a silent drop.
+        # spelling-variant detection) is NOT wired in as a hard cast-out
+        # here: real-scale testing (a 31k-word dry-run sweep) found it flags
+        # ~21% of the live vocabulary, and a sample of the flagged words was
+        # mostly genuine rare vocabulary (haft, glaive, thurible, discomfit,
+        # kickshaw, outlawry) rather than the foreign/misspelling junk it
+        # was built to catch — edit-distance similarity doesn't imply a real
+        # spelling-variant relationship, and cross-language zipf can't
+        # separate a foreign word from an English word that's ALSO a word
+        # in that language (haft, argent, rood are all real English).
+        # Instead it's a human-review flag: the word is kept/defined
+        # normally, and Candidate.variant_flag_reason/_note (picked up by
+        # sync_book_results) mark it for a person to glance at and manually
+        # prune via the review webapp if it really is junk.
         cast_out = 0
+        flagged = 0
         for cand in shortlist:
             reason = junk_pos_reason(cand.part_of_speech)
             if reason:
@@ -180,9 +180,17 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
                 cand.interesting_reason = (
                     f"dictionary lookup resolved this as {cand.part_of_speech!r} — cast out")
                 cast_out += 1
+                continue
+            variant = validity_score.variant_reject_reason(cand.lemma)
+            if variant:
+                cand.variant_flag_reason, cand.variant_flag_note = variant[0].value, variant[1]
+                flagged += 1
         if cast_out:
             console.print(f"[dim]{cast_out} more cast out post-enrichment "
                            "(symbol/proper-noun-only dictionary sense).[/dim]")
+        if flagged:
+            console.print(f"[dim]{flagged} flagged for human review "
+                           "(possible foreign word / archaic spelling variant).[/dim]")
 
     conn.close()
     return output.partition(candidates)

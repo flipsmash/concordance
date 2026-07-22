@@ -559,3 +559,91 @@ def test_fill_definitions_builds_the_lexicon_once_not_twice_per_word(monkeypatch
     conn.close()
 
 
+
+
+@pg
+def test_sync_book_results_writes_the_variant_review_flag():
+    # Candidate.variant_flag_reason/_note (set by pipeline.py when
+    # validity_score.variant_reject_reason fires on a KEPT word) must reach
+    # word.variant_flag_reason/_note/_at -- the human-review queue, not an
+    # auto-reject: the word stays active and defined either way.
+    from concordance.model import Candidate
+
+    schema = "cc_test_variant_flag"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    flagged = Candidate(lemma="acte", pos="NOUN")
+    flagged.definition = "a specific action or deed"
+    flagged.variant_flag_reason = "foreign_language"
+    flagged.variant_flag_note = "looks fr (zipf 4.8 there vs English)"
+    unflagged = Candidate(lemma="armiger", pos="NOUN")
+    unflagged.definition = "a person entitled to bear heraldic arms"
+
+    db.sync_book_results(conn, "Book One", kept=[flagged, unflagged], rejected=[], schema=schema)
+
+    with conn.cursor() as cur:
+        cur.execute(f"""select active, definition, variant_flag_reason, variant_flag_note,
+                                variant_flagged_at is not null
+                         from {schema}.word where lemma='acte'""")
+        assert cur.fetchone() == (True, "a specific action or deed", "foreign_language",
+                                   "looks fr (zipf 4.8 there vs English)", True)
+        cur.execute(f"""select variant_flag_reason, variant_flagged_at
+                         from {schema}.word where lemma='armiger'""")
+        assert cur.fetchone() == (None, None)
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_fill_definitions_flags_but_does_not_cast_out_a_variant_hit(monkeypatch):
+    # The reverted design: a foreign word / archaic-spelling variant that a
+    # source successfully defines gets FLAGGED for human review, not cast
+    # out -- stays active=true, defined normally, distinguishable only via
+    # variant_flag_reason.
+    from concordance import resolve
+    from concordance.model import Candidate
+
+    monkeypatch.setattr(resolve.localdict, "enrich", lambda cand, lex: False)
+
+    def fake_freedict(cand, session):
+        if cand.lemma == "acte":
+            cand.definition = "a specific action or deed"
+            cand.definition_source = "Free Dictionary API"
+            cand.part_of_speech = "noun"
+        elif cand.lemma == "armiger":
+            cand.definition = "a person entitled to bear heraldic arms"
+            cand.definition_source = "Free Dictionary API"
+            cand.part_of_speech = "noun"
+
+    monkeypatch.setattr(resolve.dictionary, "enrich", fake_freedict)
+
+    schema = "cc_test_variant_flag_fill"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    words = [Candidate(lemma=l, pos="NOUN") for l in ("acte", "armiger")]
+    db.sync_book_results(conn, "Book One", kept=words, rejected=[], schema=schema)
+
+    stats = db.fill_definitions(conn, schema)
+
+    assert stats["cast_out"] == 0
+    assert stats["defined"] == 2   # both accepted -- neither cast out
+
+    with conn.cursor() as cur:
+        cur.execute(f"select active, variant_flag_reason from {schema}.word where lemma='acte'")
+        assert cur.fetchone() == (True, "foreign_language")
+        cur.execute(f"select active, variant_flag_reason from {schema}.word where lemma='armiger'")
+        assert cur.fetchone() == (True, None)
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
