@@ -273,7 +273,19 @@ def redaction_too_sparse(quiz_definition: str, threshold: int = 3) -> bool:
     catches the unambiguous failures: near/fully-empty redactions and short
     template definitions reduced to their scaffolding. Deliberately errs
     toward flagging borderline cases for a rewrite retry rather than missing
-    real ones; a false positive here just means one more rewrite attempt."""
+    real ones; a false positive here just means one more rewrite attempt.
+
+    A definition with 2+ separate redaction sites (the target word's root
+    recurring, common in dictionary-style glosses: "a person who does X,
+    especially of one's own X" / "the X so created") is ALWAYS sparse
+    regardless of remaining content-word count -- confirmed against real
+    data: "The trickery used by a — to cheat in — games" (cardsharping) has
+    4 content words and clears the plain count threshold, but destroys the
+    only two words that actually identified the answer. redact() replaces
+    every leaking occurrence, so counting "—" in the output IS counting
+    redaction sites."""
+    if quiz_definition.count("—") >= 2:
+        return True
     return _content_word_count(quiz_definition) <= threshold
 
 

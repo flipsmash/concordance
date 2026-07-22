@@ -117,6 +117,18 @@ def test_redaction_too_sparse_keeps_content_rich_redaction():
         "A device for holding one or more lit — near a window during a storm.")
 
 
+def test_redaction_too_sparse_flags_multiple_redaction_sites():
+    # Regression, found live: "cardsharping" -> "The trickery used by a — to
+    # cheat in — games" clears the plain content-word-count threshold
+    # (trickery/used/cheat/games = 4 words) but redacts the word's root
+    # TWICE, destroying the only two words that actually identified the
+    # answer -- redact() blanks every leaking occurrence, so 2+ dashes means
+    # 2+ separate redaction sites regardless of what else survives.
+    assert quizdef.redaction_too_sparse("The trickery used by a — to cheat in — games.")
+    # A single redaction site with the same surrounding content is fine.
+    assert not quizdef.redaction_too_sparse("The trickery used by a — to cheat at games.")
+
+
 def test_quizzable_excludes_over_redacted_definition():
     ok, reason = quizdef.quizzable(
         "A male dealer in silk.", quiz_definition="A male dealer in —.", quiz_def_source="redacted")
