@@ -647,3 +647,132 @@ def test_fill_definitions_flags_but_does_not_cast_out_a_variant_hit(monkeypatch)
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
     conn.close()
+
+
+@pg
+def test_dedupe_plural_definitions_all_three_outcomes(monkeypatch):
+    from concordance import resolve
+    from concordance.model import Candidate
+
+    monkeypatch.setattr(resolve.localdict, "enrich", lambda cand, lex: False)
+    monkeypatch.setattr(resolve.deepdef, "wordnik_key", lambda: "")
+    monkeypatch.setattr(resolve.deepdef, "_from_yourdictionary", lambda cand, session: False)
+
+    def fake_freedict(cand, session):
+        if cand.lemma == "goblin":
+            cand.definition = "A grotesque, mischievous creature of folklore."
+            cand.definition_source = "Free Dictionary API"
+            cand.part_of_speech = "noun"
+        elif cand.lemma == "quisling":
+            cand.definition = "A traitor who collaborates with an enemy occupying force."
+            cand.definition_source = "Free Dictionary API"
+            cand.part_of_speech = "proper noun"  # deliberately junk -- should cast out
+
+    monkeypatch.setattr(resolve.dictionary, "enrich", fake_freedict)
+
+    schema = "cc_test_dedupe_plurals"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    # Case 1: "linked" -- singular already active.
+    fairy = Candidate(lemma="fairy", pos="NOUN")
+    fairy.definition = "A mythical being with magical powers."
+    fairies = Candidate(lemma="fairies", pos="NOUN")
+    fairies.definition = "plural of fairy"
+
+    # Case 2: "left_inactive" -- singular exists but is inactive (deliberately pruned).
+    troll = Candidate(lemma="troll", pos="NOUN")
+    troll.definition = "A cave-dwelling creature of folklore."
+    trolls = Candidate(lemma="trolls", pos="NOUN")
+    trolls.definition = "plural of troll"
+
+    # Case 3a: "created" -- singular doesn't exist, resolves cleanly.
+    goblins = Candidate(lemma="goblins", pos="NOUN")
+    goblins.definition = "Plural of goblin."
+
+    # Case 3b: "created" -> "cast_out" -- singular doesn't exist, resolves to junk POS.
+    quislings = Candidate(lemma="quislings", pos="NOUN")
+    quislings.definition = "Plural of quisling."
+
+    db.sync_book_results(conn, "Book One",
+                         kept=[fairy, fairies, troll, trolls, goblins, quislings],
+                         rejected=[], schema=schema)
+    with conn.cursor() as cur:
+        cur.execute(f"UPDATE {schema}.word SET active=false WHERE lemma='troll'")
+    conn.commit()
+
+    stats = db.dedupe_plural_definitions(conn, schema, use_web=False)
+
+    assert stats["attempted"] == 4  # fairies, trolls, goblins, quislings
+    assert stats["linked"] == 1
+    assert stats["left_inactive"] == 1
+    assert stats["created"] == 1
+    assert stats["cast_out"] == 1
+
+    with conn.cursor() as cur:
+        # fairy: untouched and still active; fairies: deactivated.
+        cur.execute(f"select active from {schema}.word where lemma='fairy'")
+        assert cur.fetchone() == (True,)
+        cur.execute(f"select active from {schema}.word where lemma='fairies'")
+        assert cur.fetchone() == (False,)
+
+        # troll: still inactive (not resurrected); trolls: also deactivated.
+        cur.execute(f"select active from {schema}.word where lemma='troll'")
+        assert cur.fetchone() == (False,)
+        cur.execute(f"select active from {schema}.word where lemma='trolls'")
+        assert cur.fetchone() == (False,)
+
+        # goblin: newly created, active, properly defined; goblins: deactivated.
+        cur.execute(f"select active, definition from {schema}.word where lemma='goblin'")
+        assert cur.fetchone() == (True, "A grotesque, mischievous creature of folklore.")
+        cur.execute(f"select active from {schema}.word where lemma='goblins'")
+        assert cur.fetchone() == (False,)
+
+        # quisling: created but cast out (junk POS); quislings: also deactivated.
+        cur.execute(f"select active, part_of_speech from {schema}.word where lemma='quisling'")
+        assert cur.fetchone() == (False, "proper noun")
+        cur.execute(f"select active from {schema}.word where lemma='quislings'")
+        assert cur.fetchone() == (False,)
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_dedupe_plural_definitions_is_idempotent(monkeypatch):
+    # A plural already deactivated by an earlier run must not be reselected.
+    from concordance import resolve
+    from concordance.model import Candidate
+
+    monkeypatch.setattr(resolve.localdict, "enrich", lambda cand, lex: False)
+    monkeypatch.setattr(resolve.dictionary, "enrich", lambda cand, session: None)
+    monkeypatch.setattr(resolve.deepdef, "wordnik_key", lambda: "")
+    monkeypatch.setattr(resolve.deepdef, "_from_yourdictionary", lambda cand, session: False)
+
+    schema = "cc_test_dedupe_idempotent"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    imp = Candidate(lemma="imp", pos="NOUN")
+    imp.definition = "A small, mischievous devil."
+    imps = Candidate(lemma="imps", pos="NOUN")
+    imps.definition = "plural of imp"
+    db.sync_book_results(conn, "Book One", kept=[imp, imps], rejected=[], schema=schema)
+
+    stats1 = db.dedupe_plural_definitions(conn, schema, use_web=False)
+    assert stats1["attempted"] == 1 and stats1["linked"] == 1
+
+    stats2 = db.dedupe_plural_definitions(conn, schema, use_web=False)
+    assert stats2["attempted"] == 0  # imps is already inactive -- not reselected
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()

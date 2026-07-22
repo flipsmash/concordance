@@ -416,6 +416,44 @@ def quizzable(
                   f"{dist.get('excluded',0)} excluded")
 
 
+@app.command("dedupe-plurals")
+def dedupe_plurals(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    web: bool = typer.Option(True, "--web/--no-web",
+                              help="Resolve a newly-created singular's definition through the full "
+                                   "cascade including web-search + grounded local-LLM extraction. "
+                                   "On by default, matching `deepen`; --no-web stops short of loading "
+                                   "a model (faster, no GPU use)."),
+    model: Optional[Path] = typer.Option(None, "--model", "-m", help="Model for --web extraction (defaults to the 14B)."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap words processed (0 = all)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Consolidate redundant plural-form entries ("warrs" -> "plural of warr")
+    into their singular. A "plural of X" definition isn't real vocabulary
+    content on its own -- quizdef.quizzable() already excludes these from
+    quizzes -- so this resolves/creates the singular X (via the same cascade
+    every other definition path uses) and soft-deletes the plural
+    (active=false, reversible via the review webapp, never a hard delete).
+    A singular that already exists but is currently inactive is always left
+    untouched -- that's very likely a deliberate prior decision (human or
+    automated), not something a plural merely existing should override."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    with console.status("[bold]Consolidating plural-form definitions…"):
+        stats = db.dedupe_plural_definitions(conn, schema, limit=limit, use_web=web,
+                                             model_path=str(model) if model else None)
+    conn.close()
+    console.print(f"[green]✓[/green] dedupe-plurals: [bold]{stats['attempted']}[/bold] plural definitions "
+                  f"examined ({stats['unparsed']} not a clean 'plural of X' pattern) — "
+                  f"[bold]{stats['linked']}[/bold] linked to an existing singular, "
+                  f"[bold]{stats['created']}[/bold] singulars created "
+                  f"({stats['still_undefined']} still undefined, {stats['cast_out']} cast out), "
+                  f"{stats['left_inactive']} left inactive (deliberate prior decision)")
+
+
 @app.command()
 def refill(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),

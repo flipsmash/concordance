@@ -878,6 +878,145 @@ def deepen_definitions(conn, schema: str = DEFAULT_SCHEMA, use_web: bool = False
                             model_path=model_path, recheck_after_days=0)
 
 
+_PLURAL_OF_RE = re.compile(
+    r"^(?:alternative |archaic |dialectal |obsolete )?plural (?:form )?of (\S+?)\.?$",
+    re.IGNORECASE,
+)
+
+
+def dedupe_plural_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
+                              use_web: bool = True, model_path: str | None = None) -> dict:
+    """`concordance dedupe-plurals`: a definition that just says "plural of X"
+    isn't real vocabulary content -- the word IS real (a dictionary vouched
+    for it as its own headword), but it's redundant scaffolding once X exists
+    as its own properly-defined entry. quizdef.quizzable() already excludes
+    these from quizzes (_VARIANT_RE matches "plural of"), so this isn't a
+    correctness fix -- it's consolidation: for every such word, resolve its
+    singular X and soft-delete the plural (active=false, same reversible
+    pattern as every other removal in this codebase -- never a hard delete).
+
+    Only considers currently-active words -- an already-pruned plural isn't
+    cluttering anything and doesn't need reprocessing. Idempotent: a plural
+    already deactivated by an earlier run won't be selected again.
+
+    Three outcomes per plural, tracked separately:
+      - `linked`    the singular already exists and is active -- just needed
+                     the plural deactivated.
+      - `left_inactive` the singular exists but is currently inactive.
+                     DELIBERATELY left untouched, whatever the reason it's
+                     inactive -- checked against real data before building
+                     this: every one of the handful of cases found already
+                     has a real definition (not a blank/unresolved one),
+                     meaning "inactive" here is near-certainly a deliberate
+                     decision (a human prune via the review webapp, or a
+                     justified automated cast-out) that a plural merely
+                     existing is not good evidence to override.
+      - `created`    the singular didn't exist at all -- a new word row,
+                     resolved through the full cascade (same as any newly
+                     ingested word), inheriting the plural's own
+                     sentence/chapter context since there's no literal book
+                     occurrence of the singular form to draw from. Cast out
+                     (active=false) rather than accepted if the resolution
+                     itself reveals a symbol/proper-noun sense
+                     (junk_pos_reason) -- same gate every other
+                     definition-acceptance path applies. Otherwise still
+                     gets flagged_undefined if the cascade can't define it,
+                     same as any other word -- refill/deepen will keep
+                     trying on later runs."""
+    from . import deepdef, localdict, resolve
+    from .config import Config
+    from .dictionary import make_session
+    from .model import Candidate, Occurrence, junk_pos_reason
+
+    s = _safe_schema(schema)
+    # Broad SQL prefilter (plain substring, case-insensitive) + precise
+    # Python-side regex match below -- NOT a direct `~*` on
+    # _PLURAL_OF_RE.pattern. Postgres's regex dialect is POSIX ERE, which
+    # doesn't support Python re's non-greedy `+?`, so the exact same pattern
+    # string silently matches a different (smaller) row set in each engine
+    # -- confirmed empirically. A plain literal substring has no such
+    # quantifiers so it's safe to run directly in Postgres as a superset
+    # filter; _PLURAL_OF_RE.match() (needed anyway, to parse the singular
+    # out) does the real, precise matching in Python.
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT id, lemma, definition, part_of_speech, sentence, chapter, as_seen
+                FROM {s}.word
+                WHERE active AND definition ~* 'plural of'
+                ORDER BY id""" + (f" LIMIT {int(limit)}" if limit else ""))
+        rows = cur.fetchall()
+
+    stats = {"attempted": len(rows), "linked": 0, "left_inactive": 0, "created": 0,
+             "cast_out": 0, "still_undefined": 0, "unparsed": 0}
+    if not rows:
+        return stats
+
+    parsed = []
+    for wid, lemma, defn, pos, sentence, chapter, as_seen in rows:
+        m = _PLURAL_OF_RE.match((defn or "").strip())
+        if not m:
+            stats["unparsed"] += 1
+            continue
+        singular = m.group(1).strip(".,;").lower()
+        parsed.append((wid, lemma, pos, sentence, chapter, as_seen, singular))
+    if not parsed:
+        return stats
+
+    lexicon = localdict.build_lexicon(conn, {sing for *_, sing in parsed})
+    session = make_session()
+    key = deepdef.wordnik_key()
+    max_tier = resolve.Tier.WEB if use_web else resolve.Tier.YOURDICT
+
+    llm = None
+    if use_web:
+        cfg = Config()
+        mp = model_path or cfg.model_path
+        if mp and Path(mp).exists():
+            from llama_cpp import Llama
+            llm = Llama(model_path=mp, n_gpu_layers=cfg.n_gpu_layers, n_ctx=cfg.n_ctx, verbose=False)
+
+    with conn.cursor() as cur:
+        for plural_id, plural_lemma, plural_pos, sentence, chapter, as_seen, singular in parsed:
+            cur.execute(f"SELECT id, active FROM {s}.word WHERE lemma_lc = %s", (singular,))
+            existing = cur.fetchone()
+
+            if existing and existing[1]:
+                stats["linked"] += 1
+
+            elif existing:
+                stats["left_inactive"] += 1
+
+            else:
+                cand = Candidate(lemma=singular, pos=_POS_TO_TAGGER.get((plural_pos or "").lower(), ""))
+                if sentence:
+                    cand.occurrences.append(Occurrence(sentence=sentence, chapter=chapter or "",
+                                                        surface=singular))
+                found = resolve.resolve_definition(
+                    cand, max_tier=max_tier, lexicon=lexicon, session=session,
+                    wordnik_key=key, llm=llm) is not None
+                reason = junk_pos_reason(cand.part_of_speech) if found else None
+                is_blank = not found
+                cur.execute(
+                    f"""INSERT INTO {s}.word
+                            (lemma, as_seen, definition, part_of_speech, sentence, chapter,
+                             definition_source, first_added, active, flagged_undefined, flagged_undefined_at)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s, CURRENT_DATE, %s, %s, CASE WHEN %s THEN now() ELSE NULL END)
+                        ON CONFLICT (lemma_lc) DO UPDATE SET active=EXCLUDED.active, updated_at=now()""",
+                    (singular, singular, cand.definition, normalize_pos(cand.part_of_speech),
+                     sentence or "", chapter or "", cand.definition_source,
+                     not reason, is_blank, is_blank))
+                if reason:
+                    stats["cast_out"] += 1
+                else:
+                    stats["created"] += 1
+                    if is_blank:
+                        stats["still_undefined"] += 1
+
+            cur.execute(f"UPDATE {s}.word SET active=false, updated_at=now() WHERE id=%s", (plural_id,))
+            conn.commit()
+    return stats
+
+
 def fetch_known_verdicts(conn, schema: str = DEFAULT_SCHEMA) -> dict[str, str]:
     """Map lemma_lc -> a cached verdict from EARLIER books, so the (expensive)
     LLM judge is only ever run on lemmas whose verdict isn't already known.
