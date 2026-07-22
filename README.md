@@ -160,8 +160,8 @@ re-running the deep pass on demand outside a full `maintain`.
 
 ```bash
 concordance refill              # cheap sources, same ones ingest already tried
-concordance deepen              # slower/deeper sources + a validity estimate
-concordance deepen --web        # + web-search/LLM last resort (needs a model)
+concordance deepen              # + Wordnik/yourdictionary/web-search + a validity estimate
+concordance deepen --no-web     # skip the web-search/LLM tier (faster, no model load)
 ```
 
 - **`refill`** re-tries the local Wiktionary dump and the free online
@@ -170,8 +170,14 @@ concordance deepen --web        # + web-search/LLM last resort (needs a model)
   limit, a network blip) rather than the word genuinely being undefinable.
 - **`deepen`** runs after `refill` and reaches further: **Wordnik** (Century
   Dictionary + Webster's, which carry archaic vocabulary — needs a free
-  `WORDNIK_API_KEY` in `.env`, falls back to yourdictionary-only without it)
-  and **yourdictionary.com**. Whatever *still* can't be defined gets a
+  `WORDNIK_API_KEY` in `.env`, falls back to yourdictionary-only without it),
+  **yourdictionary.com**, and (default on — pass `--no-web` to skip) **web
+  search + grounded local-LLM extraction** as the true last resort. This last
+  tier does almost all of the real work by the time a word reaches it: every
+  faster/cheaper source has already been tried and missed, so real-scale
+  testing found nearly all of a deepen run's actual yield comes from here —
+  it just costs a local 14B model load and is far slower per word than the
+  rest. Whatever *still* can't be defined gets a
   deterministic, explainable **validity estimate** written to `word.validity_label`
   (`likely-valid` / `uncertain` / `likely-artifact`), `validity_score` (0–1),
   `validity_notes`, and `suggested_correction` — signals are Google Books

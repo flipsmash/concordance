@@ -442,18 +442,22 @@ def refill(
 @app.command()
 def deepen(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
-    web: bool = typer.Option(False, "--web", help="Last resort: web-search + grounded LLM extraction."),
+    web: bool = typer.Option(True, "--web/--no-web",
+                              help="Web-search + grounded LLM extraction as the last resort. On by "
+                                   "default -- it's where most of a deepen run's real yield comes "
+                                   "from; pass --no-web to skip it (faster, no model load, but "
+                                   "misses most of the permanently-undefined tail)."),
     model: Optional[Path] = typer.Option(None, "--model", "-m", help="Model for --web extraction (defaults to the 14B)."),
     limit: int = typer.Option(0, "--limit", "-l", help="Cap words processed (0 = all)."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
-    """Run after `refill`: reach further (Wordnik, yourdictionary, optionally
-    --web) for words still undefined. Whatever STILL can't be defined gets a
-    validity estimate (real word vs OCR/variant/foreign/nonsense) written to
-    word.validity_* — pair with the flagged_undefined marker to find prune
-    candidates: flagged AND validity_label='likely-artifact' is the review
-    queue. Needs WORDNIK_API_KEY in .env for the Wordnik source; falls back to
-    yourdictionary-only without it."""
+    """Run after `refill`: reach further (Wordnik, yourdictionary, web-search
+    by default) for words still undefined. Whatever STILL can't be defined
+    gets a validity estimate (real word vs OCR/variant/foreign/nonsense)
+    written to word.validity_* — pair with the flagged_undefined marker to
+    find prune candidates: flagged AND validity_label='likely-artifact' is
+    the review queue. Needs WORDNIK_API_KEY in .env for the Wordnik source;
+    falls back to yourdictionary+web without it."""
     try:
         conn = db.connect(database_url)
     except Exception as exc:  # noqa: BLE001
@@ -633,8 +637,13 @@ def maintain(
                                    "(default: data/wiktextract-en.jsonl.gz)."),
     fasttext_model: Path = typer.Option(_FASTTEXT_MODEL_PATH, "--fasttext-model",
                                          help="Trained model from train-fasttext, for the embed step."),
-    deepen_web: bool = typer.Option(False, "--deepen-web",
-                                     help="Let the fill-definitions step fall back to web-search + LLM extraction."),
+    deepen_web: bool = typer.Option(True, "--deepen-web/--no-deepen-web",
+                                     help="Let fill-definitions fall back to web-search + LLM extraction "
+                                          "as the true last resort. On by default -- real-scale testing "
+                                          "found it's where nearly all of a deepen pass's yield actually "
+                                          "comes from (every other tier had already been tried by the "
+                                          "time a word reaches it). Loads a local 14B model and is far "
+                                          "slower per word than the other tiers; --no-deepen-web skips it."),
     recheck_after_days: int = typer.Option(14, "--recheck-after-days",
                                             help="Skip a word in fill-definitions if its last validity check "
                                                  "(i.e. its last failed resolution attempt) was more recent "
