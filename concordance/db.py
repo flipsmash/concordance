@@ -1017,6 +1017,193 @@ def dedupe_plural_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int 
     return stats
 
 
+# "Synonym of X" from a source that embedded a real gloss right there --
+# either quoted ("...") or bare -- e.g. 'Synonym of nithing ("a coward...").'
+_SYNONYM_OF_RE = re.compile(
+    r"^synonym of ([^(\n]+?)\s*(?:\(\s*[“\"]?(.+?)[”\"]?\s*\))?\.?\s*$", re.IGNORECASE)
+# Wiktionary REST occasionally leaves a raw CSS rule trailing a gloss --
+# ".mw-parser-output .defdate{font-size:smaller}" -- a copy-through of the
+# page's own stylesheet class, not content.
+_CSS_JUNK_RE = re.compile(r"\.mw-parser-output[^{]*\{[^}]*\}")
+
+
+def expand_synonym_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
+                               use_web: bool = True, model_path: str | None = None) -> dict:
+    """`concordance expand-synonyms`: a definition that just says "synonym of
+    X" is a real data-quality problem, not merely a quizzability one (unlike
+    "plural of X", quizdef._VARIANT_RE doesn't even exclude these from
+    quizzing today -- "synonym" was never in its word list). But the fix is
+    the OPPOSITE of dedupe-plurals': a synonym is a genuinely distinct
+    headword worth keeping on its own, not redundant scaffolding for another
+    surface form of the same word -- so this never deletes/deactivates the
+    word carrying the "synonym of X" definition. It replaces that
+    definition with real content, and separately assesses X (the synonym
+    target) for inclusion in the corpus, mirroring dedupe-plurals' handling
+    of a plural's singular.
+
+    Three ways a word's definition gets upgraded:
+      - the source already embedded a real gloss right in the cross-
+        reference -- 'Synonym of nithing ("a coward...").' -- extracted
+        directly, no lookup needed.
+      - the source put the real definition on a later line after the
+        "Synonym of X." sentence (seen in a couple of live rows) -- used
+        as-is.
+      - bare 'Synonym of X.' with nothing else -- X's OWN definition is
+        reused (or freshly resolved through the same cascade every other
+        definition-acceptance path uses, creating X as a new word if it
+        doesn't exist yet). Never done if X exists but is currently
+        inactive -- checked against real data before building this: the one
+        live case is inactive WITH a real definition already, meaning
+        "inactive" here is (as with dedupe-plurals) near-certain evidence of
+        a deliberate earlier decision that a bare synonym pointer is not
+        good reason to override, and definitely not good reason to import
+        that same word's content into a DIFFERENT word's definition.
+        Likewise never done if a fresh resolution of X reveals a
+        symbol/proper-noun sense (junk_pos_reason) -- X still gets created,
+        cast out (same as dedupe-plurals), but W's definition is left
+        untouched rather than "upgraded" with content that isn't real
+        vocabulary.
+
+    Whenever a word's own definition text actually changes, its stale
+    downstream artifacts (quiz_definition, USAS categories, definition
+    embedding) are invalidated via _invalidate_definition_dependents --
+    the same "changeful"-bug fix sync_book_results already applies, needed
+    here for the identical reason (this is a direct word.definition write,
+    not going through that upsert path)."""
+    from . import deepdef, localdict, resolve
+    from .config import Config
+    from .dictionary import make_session
+    from .model import Candidate, Occurrence, junk_pos_reason
+
+    s = _safe_schema(schema)
+    # Same POSIX-ERE-vs-Python-re caveat as dedupe_plural_definitions: a
+    # plain literal substring for the SQL prefilter, precise parsing here.
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT id, lemma, definition, part_of_speech, sentence, chapter, as_seen
+                FROM {s}.word
+                WHERE active AND definition ~* 'synonym of'
+                ORDER BY id""" + (f" LIMIT {int(limit)}" if limit else ""))
+        rows = cur.fetchall()
+
+    stats = {"attempted": len(rows), "extracted": 0, "reused_existing": 0, "target_created": 0,
+             "target_cast_out": 0, "target_inactive": 0, "target_still_undefined": 0, "unparsed": 0}
+    if not rows:
+        return stats
+
+    def _parse(raw: str) -> tuple[str, str | None] | None:
+        """(target, gloss_or_None) if `raw` cleanly parses, else None."""
+        d = _CSS_JUNK_RE.sub("", raw or "").strip()
+        if "\n" in d:
+            first, rest = d.split("\n", 1)
+            if rest.strip():
+                return "", rest.strip()  # real content on a later line -- no target needed
+            d = first.strip()
+        m = _SYNONYM_OF_RE.match(d)
+        if not m:
+            return None
+        target = m.group(1).strip().rstrip(".")
+        gloss = m.group(2)
+        return target, (gloss.strip() if gloss and len(gloss.strip()) >= 4 else None)
+
+    parsed = []
+    for wid, lemma, defn, pos, sentence, chapter, as_seen in rows:
+        result = _parse(defn)
+        if result is None:
+            stats["unparsed"] += 1
+            continue
+        target, gloss = result
+        parsed.append((wid, lemma, pos, sentence, chapter, target.lower() if target else "", gloss))
+
+    bare_targets = {t for *_, t, gloss in parsed if t and gloss is None}
+    lexicon = localdict.build_lexicon(conn, bare_targets)
+    session = make_session()
+    key = deepdef.wordnik_key()
+    max_tier = resolve.Tier.WEB if use_web else resolve.Tier.YOURDICT
+
+    llm = None
+    if use_web:
+        cfg = Config()
+        mp = model_path or cfg.model_path
+        if mp and Path(mp).exists():
+            from llama_cpp import Llama
+            llm = Llama(model_path=mp, n_gpu_layers=cfg.n_gpu_layers, n_ctx=cfg.n_ctx, verbose=False)
+
+    with conn.cursor() as cur:
+        for wid, lemma, pos, sentence, chapter, target, gloss in parsed:
+            if gloss is not None:
+                # Already-embedded content -- straight extraction, no lookup.
+                cur.execute(f"UPDATE {s}.word SET definition=%s, updated_at=now() WHERE id=%s",
+                            (gloss, wid))
+                _invalidate_definition_dependents(cur, s, wid)
+                stats["extracted"] += 1
+                conn.commit()
+                continue
+
+            cur.execute(f"SELECT active, coalesce(definition,''), definition_source "
+                        f"FROM {s}.word WHERE lemma_lc = %s", (target,))
+            existing = cur.fetchone()
+
+            if existing and not existing[0]:
+                stats["target_inactive"] += 1
+                conn.commit()
+                continue
+
+            if existing and existing[1]:
+                _, target_def, target_src = existing
+                cur.execute(f"UPDATE {s}.word SET definition=%s, "
+                            f"definition_source=%s, updated_at=now() WHERE id=%s",
+                            (target_def, f"{target_src} (synonym of '{target}')", wid))
+                _invalidate_definition_dependents(cur, s, wid)
+                stats["reused_existing"] += 1
+                conn.commit()
+                continue
+
+            # Target doesn't exist, or exists active with a blank definition
+            # (existing is (True, '', ...) at this point -- the inactive and
+            # active-with-content cases were both already handled above) --
+            # resolve it fresh, same cascade as any other definition-
+            # acceptance path. ON CONFLICT DO UPDATE actually fills in the
+            # definition/POS this time (not just active/updated_at) -- a
+            # plain no-op update here would silently drop a genuine
+            # resolution for an existing-but-blank target.
+            cand = Candidate(lemma=target, pos=_POS_TO_TAGGER.get((pos or "").lower(), ""))
+            if sentence:
+                cand.occurrences.append(Occurrence(sentence=sentence, chapter=chapter or "", surface=target))
+            found = resolve.resolve_definition(
+                cand, max_tier=max_tier, lexicon=lexicon, session=session,
+                wordnik_key=key, llm=llm) is not None
+            reason = junk_pos_reason(cand.part_of_speech) if found else None
+            is_blank = not found
+
+            cur.execute(
+                f"""INSERT INTO {s}.word
+                        (lemma, as_seen, definition, part_of_speech, sentence, chapter,
+                         definition_source, first_added, active, flagged_undefined, flagged_undefined_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s, CURRENT_DATE, %s, %s, CASE WHEN %s THEN now() ELSE NULL END)
+                    ON CONFLICT (lemma_lc) DO UPDATE SET
+                        definition=COALESCE(NULLIF(EXCLUDED.definition,''), {s}.word.definition),
+                        part_of_speech=COALESCE(NULLIF(EXCLUDED.part_of_speech,''), {s}.word.part_of_speech),
+                        definition_source=COALESCE(NULLIF(EXCLUDED.definition_source,''), {s}.word.definition_source),
+                        active=EXCLUDED.active, updated_at=now()""",
+                (target, target, cand.definition, normalize_pos(cand.part_of_speech),
+                 sentence or "", chapter or "", cand.definition_source,
+                 not reason, is_blank, is_blank))
+
+            if reason:
+                stats["target_cast_out"] += 1
+            elif is_blank:
+                stats["target_still_undefined"] += 1
+            else:
+                cur.execute(f"UPDATE {s}.word SET definition=%s, "
+                            f"definition_source=%s, updated_at=now() WHERE id=%s",
+                            (cand.definition, f"{cand.definition_source} (synonym of '{target}')", wid))
+                _invalidate_definition_dependents(cur, s, wid)
+                stats["target_created"] += 1
+            conn.commit()
+    return stats
+
+
 def fetch_known_verdicts(conn, schema: str = DEFAULT_SCHEMA) -> dict[str, str]:
     """Map lemma_lc -> a cached verdict from EARLIER books, so the (expensive)
     LLM judge is only ever run on lemmas whose verdict isn't already known.

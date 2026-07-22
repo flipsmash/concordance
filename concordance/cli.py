@@ -454,6 +454,50 @@ def dedupe_plurals(
                   f"{stats['left_inactive']} left inactive (deliberate prior decision)")
 
 
+@app.command("expand-synonyms")
+def expand_synonyms(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    web: bool = typer.Option(True, "--web/--no-web",
+                              help="Resolve a synonym target's definition through the full cascade "
+                                   "including web-search + grounded local-LLM extraction. On by "
+                                   "default, matching `deepen`/`dedupe-plurals`; --no-web stops short "
+                                   "of loading a model (faster, no GPU use)."),
+    model: Optional[Path] = typer.Option(None, "--model", "-m", help="Model for --web extraction (defaults to the 14B)."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap words processed (0 = all)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Fix a real data-quality gap, not just a quizzability one: a definition
+    that just says "synonym of X" ("ephebus" -> "Synonym of ephebe.") isn't
+    real content, and unlike "plural of X" it isn't even excluded from
+    quizzing today. Unlike dedupe-plurals, this never deletes/deactivates
+    the word -- a synonym is a genuinely distinct headword worth keeping on
+    its own, not redundant scaffolding for the same word. Instead it
+    replaces the cross-reference definition with real content (extracted
+    directly when the source already embedded a gloss, otherwise reused or
+    freshly resolved from X, which gets created as its own word if it
+    doesn't exist yet -- same cascade every other definition path uses). A
+    target that exists but is currently inactive is always left untouched,
+    and never used as a source to "upgrade" another word's definition --
+    likely a deliberate earlier decision a synonym pointer isn't good reason
+    to override."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    with console.status("[bold]Expanding synonym-only definitions…"):
+        stats = db.expand_synonym_definitions(conn, schema, limit=limit, use_web=web,
+                                              model_path=str(model) if model else None)
+    conn.close()
+    console.print(f"[green]✓[/green] expand-synonyms: [bold]{stats['attempted']}[/bold] synonym definitions "
+                  f"examined ({stats['unparsed']} not a clean 'synonym of X' pattern) — "
+                  f"[bold]{stats['extracted']}[/bold] had an embedded gloss extracted directly, "
+                  f"[bold]{stats['reused_existing']}[/bold] reused an existing target's definition, "
+                  f"[bold]{stats['target_created']}[/bold] targets newly resolved and created "
+                  f"({stats['target_still_undefined']} still undefined, {stats['target_cast_out']} cast out), "
+                  f"{stats['target_inactive']} left unchanged (target exists but inactive)")
+
+
 @app.command()
 def refill(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),

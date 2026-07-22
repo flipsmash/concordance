@@ -776,3 +776,154 @@ def test_dedupe_plural_definitions_is_idempotent(monkeypatch):
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
     conn.close()
+
+
+@pg
+def test_expand_synonym_definitions_all_outcomes(monkeypatch):
+    from concordance import resolve
+    from concordance.model import Candidate
+
+    monkeypatch.setattr(resolve.localdict, "enrich", lambda cand, lex: False)
+    monkeypatch.setattr(resolve.deepdef, "wordnik_key", lambda: "")
+    monkeypatch.setattr(resolve.deepdef, "_from_yourdictionary", lambda cand, session: False)
+
+    def fake_freedict(cand, session):
+        if cand.lemma == "grotesque":
+            cand.definition = "A fantastically distorted or ugly figure or creature."
+            cand.definition_source = "Free Dictionary API"
+            cand.part_of_speech = "noun"
+        elif cand.lemma == "quisling":
+            cand.definition = "A traitor who collaborates with an occupying enemy force."
+            cand.definition_source = "Free Dictionary API"
+            cand.part_of_speech = "proper noun"  # deliberately junk
+
+    monkeypatch.setattr(resolve.dictionary, "enrich", fake_freedict)
+
+    schema = "cc_test_expand_synonyms"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    words = []
+
+    # Case 1: embedded quoted gloss -- extracted directly, no lookup.
+    w1 = Candidate(lemma="niddering", pos="NOUN")
+    w1.definition = 'Synonym of nithing ("a coward, a dastard; a wretch").'
+    words.append(w1)
+
+    # Case 2: real content on a later line.
+    w2 = Candidate(lemma="assoilzie", pos="VERB")
+    w2.definition = "Synonym of assoil.\nTo absolve or release (someone) from blame or sin."
+    words.append(w2)
+
+    # Case 3: bare, target already active with a real definition -- reused.
+    target_active = Candidate(lemma="lapidary", pos="ADJ")
+    target_active.definition = "Relating to the engraving of gemstones."
+    w3 = Candidate(lemma="lapidarian", pos="ADJ")
+    w3.definition = "Synonym of lapidary."
+    words.extend([target_active, w3])
+
+    # Case 4: bare, target exists but inactive -- left unchanged.
+    target_inactive = Candidate(lemma="unadvisedly", pos="ADV")
+    target_inactive.definition = "In an unadvised manner."
+    w4 = Candidate(lemma="inadvisedly", pos="ADV")
+    w4.definition = "Synonym of unadvisedly."
+    words.extend([target_inactive, w4])
+
+    # Case 5: bare, target doesn't exist -- resolved and created cleanly.
+    w5 = Candidate(lemma="goblinesque", pos="ADJ")
+    w5.definition = "Synonym of grotesque."
+    words.append(w5)
+
+    # Case 6: bare, target doesn't exist -- resolves to junk POS, cast out.
+    w6 = Candidate(lemma="fifthcolumnist", pos="NOUN")
+    w6.definition = "Synonym of quisling."
+    words.append(w6)
+
+    db.sync_book_results(conn, "Book One", kept=words, rejected=[], schema=schema)
+    with conn.cursor() as cur:
+        cur.execute(f"UPDATE {schema}.word SET active=false WHERE lemma='unadvisedly'")
+    conn.commit()
+
+    stats = db.expand_synonym_definitions(conn, schema, use_web=False)
+
+    assert stats["attempted"] == 6
+    assert stats["extracted"] == 2       # niddering, assoilzie
+    assert stats["reused_existing"] == 1  # lapidarian
+    assert stats["target_inactive"] == 1  # inadvisedly
+    assert stats["target_created"] == 1   # goblinesque
+    assert stats["target_cast_out"] == 1  # fifthcolumnist
+
+    with conn.cursor() as cur:
+        cur.execute(f"select definition from {schema}.word where lemma='niddering'")
+        assert cur.fetchone() == ("a coward, a dastard; a wretch",)
+
+        cur.execute(f"select definition from {schema}.word where lemma='assoilzie'")
+        assert cur.fetchone() == ("To absolve or release (someone) from blame or sin.",)
+
+        cur.execute(f"select definition from {schema}.word where lemma='lapidarian'")
+        assert cur.fetchone() == ("Relating to the engraving of gemstones.",)
+
+        # inadvisedly left unchanged -- target is inactive.
+        cur.execute(f"select definition from {schema}.word where lemma='inadvisedly'")
+        assert cur.fetchone() == ("Synonym of unadvisedly.",)
+        cur.execute(f"select active from {schema}.word where lemma='unadvisedly'")
+        assert cur.fetchone() == (False,)  # not reactivated
+
+        # goblinesque upgraded; grotesque created active with the real definition.
+        cur.execute(f"select definition from {schema}.word where lemma='goblinesque'")
+        assert cur.fetchone() == ("A fantastically distorted or ugly figure or creature.",)
+        cur.execute(f"select active, definition from {schema}.word where lemma='grotesque'")
+        assert cur.fetchone() == (True, "A fantastically distorted or ugly figure or creature.")
+
+        # fifthcolumnist left unchanged; quisling created but cast out.
+        cur.execute(f"select definition from {schema}.word where lemma='fifthcolumnist'")
+        assert cur.fetchone() == ("Synonym of quisling.",)
+        cur.execute(f"select active, part_of_speech from {schema}.word where lemma='quisling'")
+        assert cur.fetchone() == (False, "proper noun")
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_expand_synonym_definitions_strips_css_junk_and_is_idempotent(monkeypatch):
+    # "idiocy" is pre-seeded as an active, defined word so this hits the
+    # reused_existing branch (no lookup/network needed) -- the point of this
+    # test is the CSS-junk stripping and idempotency, not resolution.
+    from concordance.model import Candidate
+
+    schema = "cc_test_expand_synonyms_css"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    idiocy = Candidate(lemma="idiocy", pos="NOUN")
+    idiocy.definition = "Extremely foolish behaviour."
+    w = Candidate(lemma="idiotcy", pos="NOUN")
+    w.definition = "Synonym of idiocy. .mw-parser-output .defdate{font-size:smaller}"
+    db.sync_book_results(conn, "Book One", kept=[idiocy, w], rejected=[], schema=schema)
+
+    stats = db.expand_synonym_definitions(conn, schema, use_web=False)
+    assert stats["attempted"] == 1
+    assert stats["reused_existing"] == 1
+
+    with conn.cursor() as cur:
+        cur.execute(f"select definition from {schema}.word where lemma='idiotcy'")
+        defn = cur.fetchone()[0]
+        assert ".mw-parser-output" not in defn
+        assert defn == "Extremely foolish behaviour."
+
+    # Second run: nothing left to do -- "synonym of" no longer appears anywhere.
+    stats2 = db.expand_synonym_definitions(conn, schema, use_web=False)
+    assert stats2["attempted"] == 0
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
