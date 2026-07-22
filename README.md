@@ -243,6 +243,57 @@ the Phase 5 commits for the full false-positive analysis if extending this.
 
 Both commands accept `--schema`, `--limit`, `--database-url`.
 
+## Definition-quality cleanup (`dedupe-plurals`, `expand-synonyms`)
+
+A dictionary source sometimes resolves a word to a bare cross-reference —
+"warrs" → "plural of warr", "ephebus" → "Synonym of ephebe" — instead of real
+content. Both commands find every live case and fix it, idempotently and
+safely re-runnable (new cross-references introduced by future books get
+picked up on the next run), but with **opposite** fixes, because a plural
+and a synonym aren't the same kind of redundancy:
+
+```bash
+concordance dedupe-plurals      # consolidate a plural into its singular
+concordance expand-synonyms     # give a synonym its own real definition
+```
+
+- **`dedupe-plurals`** — a plural form isn't separate vocabulary; it's the
+  *same* word in a different grammatical form, so `quizdef.quizzable()`
+  already excludes "plural of X" definitions from quizzing
+  (`_VARIANT_RE`). The fix here is consolidation: resolve the singular X
+  (reusing it if already active, creating and defining it via the same
+  cascade every other definition path uses if not) and soft-delete the
+  plural (`active = false`, reversible via the review webapp, never a hard
+  delete — every removal in this codebase works this way). A singular that
+  exists but is currently inactive is **always** left untouched, never
+  reactivated — checked against real data before building this: every such
+  case already had a real definition, meaning "inactive" is near-certain
+  evidence of an earlier deliberate decision (a human prune, or a justified
+  automated cast-out) that a plural merely existing isn't good reason to
+  override.
+- **`expand-synonyms`** — a synonym *is* separate vocabulary (two different
+  surface words that happen to share a meaning), so unlike a plural it's
+  never deleted. Unlike "plural of X", "Synonym of X" definitions were
+  never excluded from quizzing either (`_VARIANT_RE` never had "synonym" in
+  its word list) — a real data-quality gap, not just a missed quizzability
+  case. The fix: replace the cross-reference with real content instead.
+  Some sources already embed a real gloss right in the cross-reference
+  ("Synonym of nithing (“a coward, a dastard; a wretch”)") — extracted
+  directly, no lookup needed. Otherwise the target's own definition is
+  reused (or freshly resolved, creating the target as its own word if it
+  doesn't exist) — same conservative "never touch an inactive target" rule
+  as `dedupe-plurals`, and never used to "upgrade" a definition if the
+  target's own resolution turns out to be a symbol/proper-noun sense.
+
+Both default to `--web` (full cascade depth, including web-search + local
+LLM for anything that needs a fresh resolution — pass `--no-web` to stay on
+the free/keyless tiers only) and accept `--schema`, `--limit`,
+`--database-url`. Whenever a word's own definition text changes, its stale
+`quiz_definition`/USAS categories/definition embedding are invalidated so
+the next `maintain` run recomputes them from the new text — the same fix
+`sync_book_results` already applies for a re-ingested word whose sense
+changed, needed here too since this writes `word.definition` directly.
+
 ## Enrichment & scoring (`classify`, `archaic`, `ngram`, `difficulty`, `quizdef`, `quizzable`)
 
 A further pass of DB-only commands (no book/model pipeline; each just reads
