@@ -248,5 +248,17 @@ def _pick_sense(cand: Candidate, senses: list[tuple[str, str, list]]) -> tuple[s
 _COARSE_POS = {"NOUN": "noun", "VERB": "verb", "ADJ": "adjective", "ADV": "adverb"}
 
 
+# Zero-width/directional formatting marks Wiktionary's morpheme-boundary
+# notation embeds around "+" ("Contraction of it +<LRM> was") -- invisible
+# in a browser (where Wiktionary's own CSS presumably styles the "+"), but
+# left as literal control characters in the plain-text API response, so they
+# survive straight into word.definition unless stripped here. Explicit
+# \uXXXX escapes, not literal characters -- these are by definition
+# invisible in an editor, so a literal char here would be unverifiable.
+_INVISIBLE_FORMATTING = re.compile(
+    "[​‌‍‎‏﻿]"  # ZWSP, ZWNJ, ZWJ, LRM, RLM, BOM
+)
+
+
 def _strip_html(s: str) -> str:
-    return re.sub(r"<[^>]+>", "", s).strip()
+    return _INVISIBLE_FORMATTING.sub("", re.sub(r"<[^>]+>", "", s)).strip()

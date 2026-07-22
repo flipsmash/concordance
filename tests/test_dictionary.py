@@ -88,6 +88,17 @@ def test_parse_ipa():
     assert D._parse_ipa("no pronunciation here") == ""
 
 
+def test_strip_html_removes_wiktionary_morpheme_boundary_marks():
+    # Regression, found live in word.definition: Wiktionary's morpheme-
+    # boundary notation ("Contraction of it +<LRM> was") embeds a literal
+    # LEFT-TO-RIGHT MARK control character around the "+" that's invisible
+    # in a browser but survives into the plain-text API response.
+    dirty = "Contraction of it +‎ was, often at the beginning of a line."
+    clean = D._strip_html(dirty)
+    assert clean == "Contraction of it + was, often at the beginning of a line."
+    assert "‎" not in clean
+
+
 def test_enrich_falls_back_to_wiktionary(monkeypatch):
     """Freedict 404 -> Wiktionary supplies the definition; source is set."""
     monkeypatch.setattr(D, "_from_freedict", lambda c, s: False)
