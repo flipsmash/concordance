@@ -14,14 +14,14 @@ requirements & architecture spec for the full rationale.
 ```
 extract → clean → tokenize → frequency-floor → cross-book verdict cache
         → strip-proper-nouns → validity-gate → LLM-judge → dictionary-lookup
-        → Postgres (ingest) → (refill) → (deepen)
+        → Postgres (ingest) → maintain's fill-definitions (refill/deepen)
 ```
 
 - **frequency floor** — a stop-word-style cut of common words (never a rarity *ceiling*)
 - **cross-book verdict cache** — a lemma already kept/pruned/judge-rejected in an earlier book is pre-marked from `word`/`rejected_word` and never re-judged: the LLM judge's input is purely `(lemma, frequency band)`, so at temp 0 its verdict on a given lemma is always the same. This is what keeps per-book judge time from scaling with corpus size — cost tracks *distinct new rare words*, which saturates fast on a shared-vocabulary corpus.
 - **validity gate** — multi-source, keep-biased. A word is a real word if *any* authority vouches for it — the local `vocab.wiktionary` DB dump (~500k terms, checked first because it's free and carries no "Proper noun" POS to get confused by), then the SymSpell 82k wordlist, **WordNet**, or **NLTK's 234k dictionary corpus** (which carries the archaic vocabulary — *destrier, bartizan, cangue* — that trips up single-dictionary checks). A foreign-language-context check runs early too. Only then is misspelling considered, by *relative* near-neighbor frequency (with a recurrence escape hatch — a "misspelling" that keeps showing up is probably a real coinage). NLTK's `wordnet` and `words` data download automatically on first run.
 - **LLM judge** — a local model decides what's worth learning (stubbed until you point it at a model). To keep a weak local model honest it emits a *minimal* per-word verdict (`{"w","k"}`, no free-text reason) so it doesn't truncate its output and silently drop words; any word it omits is re-queried for up to three passes before the keep-biased fallback, so junk can't flood the list by omission. A corpus frequency hint (common / uncommon / rare) steadies its rarity sense but is never a hard cut. Frequency alone can't do this job — *tendril* is rarer than *refectory* yet everyone knows it — which is exactly why the judgment is the model's, not the floor's.
-- **dictionary lookup** — the local Wiktionary dump first, then free keyless network sources: Free Dictionary API, then Wiktionary online (which actually carries the rare/archaic words). Fills definition, part of speech, IPA, synonyms, and etymology. Bulk lookups retry with exponential backoff and honour `Retry-After`, so a run of a thousand words doesn't get silently emptied by rate limiting. Whatever's still blank after ingest gets a second, slower pass from `refill`/`deepen` (below).
+- **dictionary lookup** — one shared cascade (`concordance/resolve.py`), used identically by `ingest`, `maintain`'s `fill-definitions`, and the standalone `refill`/`deepen`/`lookup_word.py`: local Wiktionary dump → Free Dictionary API → Wiktionary online → Wordnik (paced internally to its 5 req/min free-tier cap) → yourdictionary.com → web-search + grounded local-LLM extraction as the true last resort. `ingest` only goes as deep as the free tier inline (speed); whatever's still blank afterward gets the full depth from `maintain`/`refill`/`deepen` (below). Bulk lookups retry with exponential backoff and honour `Retry-After`, so a run of a thousand words doesn't get silently emptied by rate limiting.
 - **review** — prune too-common/easy terms afterward in the [web app](#web-app-webapp) (a soft delete — `word.active = false` — nothing is destroyed)
 - nothing is ever silently dropped — every cut is logged to `rejected_word`, one row per (book, lemma)
 
@@ -192,14 +192,37 @@ concordance deepen --no-web     # skip the web-search/LLM tier (faster, no model
 - Neither command ever overwrites an existing definition — both only touch
   rows where `definition` is still blank.
 
-A **separate** human-review flag, `word.variant_flag_reason`/`variant_flag_note`/
-`variant_flagged_at`, marks a word that a source successfully defined but that
-looks like a foreign word or an archaic/OCR spelling of a common modern word
-(e.g. `acte`, an archaic-spelling `assunder`). This is deliberately NOT an
-auto-reject: a real-scale sweep of the existing vocabulary found the
-detector's false-positive rate too high to trust unattended (real words like
-`haft`, `glaive`, `thurible` got flagged too) — the word stays fully active
-and defined, just marked for a person to glance at:
+**Why a word count doesn't match `attempted`**: `fill-definitions`
+(`maintain`'s step, backed by `db.fill_definitions`) does NOT candidate every
+blank-definition word on every run — it also requires
+`validity_checked_at IS NULL OR validity_checked_at < now() - recheck_after_days`
+(default 14 days, `maintain --recheck-after-days N` to change it). A word
+already run through the full cascade recently (including web-search) and
+still blank got a fresh `validity_checked_at` stamp from that failed
+attempt, so it's skipped for the rest of the cooldown window rather than
+re-ground through Wordnik/web-search again immediately — without this,
+every `maintain` run would re-attempt the entire permanently-undefined tail
+from scratch, forever, once web-search became the default (see below). If
+`SELECT count(*) FROM word WHERE definition = ''` is bigger than what a run
+just reported as `attempted`, this cooldown is why — check
+`validity_checked_at` on the difference. **The standalone `concordance
+deepen` bypasses the cooldown entirely** (`recheck_after_days=0`) — it's the
+explicit, deliberate "retry the undefined tail right now regardless of when
+it was last checked" command; the cooldown only throttles `maintain`'s
+*automatic* re-grinding, not a one-off human-invoked run.
+
+A **separate** human-review flag — `word.variant_flag_reason`/
+`variant_flag_note`/`variant_flagged_at`, written by every one of `ingest`/
+`refill`/`deepen`/`fill-definitions` — marks a word that a source
+successfully defined but that looks like a foreign word or an archaic/OCR
+spelling of a common modern word (e.g. `acte`, an archaic-spelling
+`assunder`). This is deliberately NOT an auto-reject: a real-scale sweep of
+the existing vocabulary found the detector's false-positive rate too high to
+trust unattended (real words like `haft`, `glaive`, `thurible` got flagged
+too, and even naturalized English loanwords like `dénouement`/`matinée`/
+`séance` — spelled with their original accent, same category as café/résumé
+— got caught by the foreign-language check). The word stays fully active and
+defined either way, just marked for a person to glance at:
 
 ```sql
 SELECT lemma, variant_flag_reason, variant_flag_note
@@ -208,7 +231,15 @@ FROM word WHERE variant_flag_reason IS NOT NULL ORDER BY lemma;
 
 `scripts/sweep_variant_rejects.py` (dry-run by default, `--apply` to write
 the flags) runs the same check retroactively against words already active
-before the flag existed.
+before the flag existed — cross-checking each flagged word against the same
+curated authorities (local Wiktionary dump, WordNet, NLTK's words corpus)
+`validity.py`'s own ingest-time gate uses is a cheap, deterministic way to
+clear most false positives before a human ever needs to look (verified: this
+cleared ~95% of a 6,499-word retroactive flag pass on its own). What's left
+after that genuinely needs a human read — a word both edit-distance-close to
+a common word AND cross-language-frequency-close to another language isn't
+reliably resolvable by any signal this project has; see git history around
+the Phase 5 commits for the full false-positive analysis if extending this.
 
 Both commands accept `--schema`, `--limit`, `--database-url`.
 
@@ -253,6 +284,18 @@ concordance quizzable       # flag variant/inferable-derivative words as unquizz
 - **`quizzable`** — flags words whose only difference from an already-known
   base form is grammatical (plurals, inflections) or a transparently inferable
   derivative, so quizzing doesn't waste a card on something not actually new.
+
+`normalize-pos`/`archaic`/`difficulty`/`quizzable` all accept `--limit` for
+chunking a large backlog, but — unlike `refill`/`fill-definitions`'
+only-missing gating — they always **recompute every row in scope**, capped
+by the limit, not just rows missing a value: all four read mutable upstream
+columns (definition text, ngram trend, USAS domain, quiz_definition) with no
+separate signal to gate a re-check on, so an only-missing pass here would
+silently freeze a word's score the first time it computed and never notice
+if the underlying data later changed. They're cheap, pure-local computation
+(string/regex/wordfreq, no network/LLM), so recomputing everything on every
+`maintain` run is a fast, not-batched-for-performance choice — `--limit`
+exists purely for interface consistency with the slower steps.
 
 ### Pronunciation audio (`wordnik-pron`, `ipa`, `commons-search`, `commons-download`, `audio`, `audio-guess`)
 
@@ -539,14 +582,21 @@ note above). Beyond the base extract → judge → enrich pipeline:
 a cross-book verdict cache, a public review webapp, USAS domain tagging, an
 ex-ante difficulty scalar, quiz-safe definitions + a quizzable flag, a
 pronunciation-audio pipeline (real recordings first, IPA-guided synthesis
-otherwise), a two-stage definition backfill (`refill`/`deepen`, the latter
-also scoring the genuinely-undefinable tail for validity), and semantic-
-distance vectors (definition-embedding + corpus-trained FastText, queried
-via a pgvector HNSW index — infrastructure for future visualization and
-quiz-distractor generation, not those features themselves yet) are all in
-place. Deferred by choice: other languages, Anki export, scanned-PDF OCR, a
-curated names/gazetteer list to close the one known gap in proper-noun
-filtering (every validity authority is itself somewhat name-polluted).
+otherwise), a unified definition-lookup cascade (one `resolve.py` cascade
+behind `ingest`/`refill`/`deepen`/`fill-definitions`/`lookup_word.py`, with
+web-search + grounded local-LLM extraction as the default last resort — real-
+scale testing found it's where nearly all of a `deepen` run's actual yield
+comes from) plus a human-review flag (not an auto-reject — see "Backfilling
+definitions" above) for words that look foreign or like an archaic spelling
+of a common word, and semantic-distance vectors (definition-embedding +
+corpus-trained FastText, queried via a pgvector HNSW index — infrastructure
+for future visualization and quiz-distractor generation, not those features
+themselves yet) are all in place. Deferred by choice: other languages, Anki
+export, scanned-PDF OCR, a curated names/gazetteer list to close the one
+known gap in proper-noun filtering (every validity authority is itself
+somewhat name-polluted; deliberately not started — see
+`concordance/validity.py`'s module docstring for the shape of the gap if
+picking this up).
 
 CSV-based ingestion (`run` → hand-edit → `finalize` → `sync-db`) still works
 but is no longer the primary workflow — `ingest` writing straight to Postgres,
