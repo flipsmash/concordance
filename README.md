@@ -105,6 +105,7 @@ commands to remember and re-order by hand:
 ```bash
 concordance maintain   # fill-definitions -> classify -> normalize-pos -> ngram
                         # -> archaic -> difficulty -> quizdef -> quizzable
+                        # -> book-similarity -> author-similarity -> author-clustering
                         # -> wordnik-pron -> ipa -> embed
 ```
 
@@ -314,7 +315,14 @@ concordance quizzable       # flag variant/inferable-derivative words as unquizz
 - **`classify`** — assigns each word 1-3 USAS category codes (word + POS +
   definition + sentence), using the WordNet-Domains mapping as a candidate
   hint the model prunes/confirms against context rather than a hard seed.
-  `--only-missing` / `--batch` to backfill incrementally.
+  `--only-missing` / `--batch` to backfill incrementally. Commits every
+  `--commit-every` words (default 200), not once at the end — this is
+  often the single longest-running `maintain` step (a full backlog is an
+  hours-to-days local-LLM pass, one word at a time), so a crash mid-run
+  loses at most one partial chunk instead of every word classified so far.
+  Paired with `--only-missing`'s own re-select-what's-still-missing query,
+  a killed and restarted run resumes close to where it left off rather
+  than reclassifying from scratch.
 - **`archaic`** — an ordinal (current < dated < archaic < obsolete) with a
   0-1 confidence: a register label in the definition or the Wiktionary dump is
   high-confidence; a Google-Books recency decline alone is real but noisy
@@ -412,6 +420,65 @@ picker) and `/api/words/{id}/neighbors` (`signal=definition|fasttext`, with
 optional POS/quizzable/difficulty-band/USAS-domain filters and synonym
 exclusion) — query infrastructure for a future visualization UI and future
 distractor generation, not those features themselves.
+
+## Vocabulary relatedness (`book-similarity`, `author-similarity`, `author-clustering`)
+
+Which books and authors are related to each other by **literal shared
+vocabulary** — a different axis from the definition/FastText embeddings
+above, which measure *meaning* similarity between individual words. This is
+lexical bag-of-words cosine similarity, IDF-weighted so common words don't
+dominate the score the way raw Jaccard overlap would (a bug already on
+record in `browse.py`'s own comments: an earlier unweighted join made
+"every Shakespeare play pull in nearly the entire corpus as co-authors").
+
+```bash
+concordance book-similarity      # each book's top-k most vocabulary-related books
+concordance author-similarity    # same, one level up, for authors
+concordance author-clustering    # hierarchical clustering + 2D map over the top-N authors
+```
+
+- **`book-similarity`** / **`author-similarity`** — `idf = ln(N / df)` (N =
+  book/author count, df = how many books/authors use a word), cosine
+  similarity over each entity's IDF-weighted word-presence vector, storing
+  only each entity's **top-k** neighbors (default 12, `--top-k`) above a
+  `--min-shared-words` floor (default 3) — never the full O(n²) matrix, so
+  cost stays flat as the corpus grows. Words used by more than
+  `max_df_fraction` (default 50%) of entities are excluded from the metric
+  entirely, not just down-weighted — both a near-lossless approximation
+  (their IDF is already near zero) and a performance guard against
+  combinatorial cost from ubiquitous words. Both directions are stored as
+  separate rows so "X's related items" is always a single indexed lookup,
+  no UNION needed. Always recompute everything in scope on every run (no
+  only-missing gate) — IDF weights are corpus-wide and shift whenever *any*
+  entity's vocabulary changes, not just the one being looked at.
+  `author-similarity` excludes `PLACEHOLDER_AUTHORS` (`Various`, `Unknown
+  Author`, `Unknown`, `Anonymous`) entirely — aggregation labels, not real
+  authors; treating one as a real author produces a spuriously
+  well-connected phantom node (`Various` alone has 1,193 books, dwarfing
+  every real author).
+- **`author-clustering`** — hierarchical clustering (`ward` linkage,
+  `scipy.cluster.hierarchy`, `optimal_ordering=True` for matrix seriation)
+  plus a 2D projection (classical/Torgerson MDS via a single
+  `numpy.linalg.eigh` call — deterministic and fast, unlike sklearn's
+  iterative SMACOF) over the top `--top-n` (default 200) authors by book
+  count, same corpus-wide IDF weighting as `author-similarity` so the two
+  stay consistent. Distance is `sqrt(2 * (1 - cosine))`, a proper Euclidean
+  distance for L2-normalized vectors — raw `1 - cosine` fails the triangle
+  inequality and produces a non-PSD Gram matrix, forcing lossy eigenvalue
+  clipping in the MDS step; this one distance definition feeds both the
+  linkage (which assumes Euclidean input) and the projection, not decided
+  independently in two places. `fcluster(..., criterion='maxclust')`
+  (default `--n-clusters 12`) assigns cluster membership; eigenvector sign
+  is pinned deterministically (forcing each axis's highest-magnitude
+  component positive) so the map doesn't mirror-flip between runs. Writes
+  `author_cluster` (one row per author: cluster id, x, y) and the singleton
+  `author_cluster_run` (the full pairwise grid + the dendrogram tree, as
+  one blob) together in a single transaction — never partially, since the
+  map, matrix, and dendrogram views must always agree with each other.
+
+All three are wired into `maintain` (`--skip-book-similarity`,
+`--skip-author-similarity`, `--skip-author-clustering`) and reachable from
+the review webapp's **Visualizations** page — see below.
 
 ## Running the local model (RTX 3060, 12 GB)
 
@@ -561,6 +628,39 @@ mastery-tracking dashboard — the schema captures enough (question type,
 choice count, NOTA presence, per-answer correctness, timestamps) to add
 both later without a backfill.
 
+### Visualizations (`/app/visualizations`)
+
+Every relatedness view in one place, linked from the main Browse page:
+
+- **Books/authors by vocabulary overlap** — type-ahead search jumps
+  straight into that book's or author's own ego-anchored relatedness graph
+  (that entity plus its top-k related neighbors, `react-force-graph-2d`).
+  These are real graphs, not stars: neighbors are cross-linked to each
+  other too, wherever that link already happens to be stored (each also
+  being the other's own top-k match) — rendered dashed to visually
+  distinguish "why you're looking at this" edges from peer relationships.
+- **Words by meaning** — the same definition/FastText embedding graph the
+  word-detail page uses, embedded here with search enabled.
+- **The what, not just the why** — every relatedness view (a ranked list
+  row, an ego-graph edge, a matrix cell) can open a **shared-vocabulary
+  panel**: the actual overlapping rare words between two books or authors,
+  with definitions, rarest first — computed on demand and bounded to
+  exactly the pair being compared. The precomputed top-k tables above only
+  ever answer *how* related two things are; this is the only view that
+  answers *in what words*.
+- **All authors at once** (`/app/authors/relatedness`) — four tabs over one
+  shared `author-clustering` run: a **cluster map** (default — position and
+  color are principled, derived from real MDS/clustering over the
+  similarity structure, not a physics simulation's arbitrary compromise
+  layout), a **seriated similarity matrix** (a canvas heatmap, authors
+  ordered so related ones form visible blocks along the diagonal; click a
+  cell to open the shared-vocabulary panel for that pair), a **dendrogram**
+  (hand-rolled SVG tree, leaf dots colored to match the map's clusters so
+  the two views agree), and the original **force-directed graph** (kept as
+  a fourth, lower-priority option, not deleted). Map/matrix/dendrogram
+  cover only the top-N authors from `author-clustering` — deliberately not
+  a books equivalent: book count is unbounded and growing, so books stay
+  ego-anchored only, never a global all-books view.
 
 ### Public access — `vocab.brfinnegan.org`
 
@@ -642,7 +742,12 @@ definitions" above) for words that look foreign or like an archaic spelling
 of a common word, and semantic-distance vectors (definition-embedding +
 corpus-trained FastText, queried via a pgvector HNSW index — infrastructure
 for future visualization and quiz-distractor generation, not those features
-themselves yet) are all in place. Deferred by choice: other languages, Anki
+themselves yet) are all in place. Vocabulary-relatedness visualization is
+also live: book/author lexical-overlap similarity, real (cross-linked, not
+star-shaped) ego-graphs, a shared-vocabulary comparison view, and — for
+authors — hierarchical clustering surfaced as a cluster map, a seriated
+similarity matrix, and a dendrogram (see "Vocabulary relatedness" and
+"Visualizations" above). Deferred by choice: other languages, Anki
 export, scanned-PDF OCR, a curated names/gazetteer list to close the one
 known gap in proper-noun filtering (every validity authority is itself
 somewhat name-polluted; deliberately not started — see
