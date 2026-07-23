@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
+import SharedWordsPanel from './SharedWordsPanel'
 import { usePagedTable } from './usePagedTable'
 import './Authors.css'
 import './WorkDetail.css'
@@ -26,6 +27,7 @@ function AuthorWorks() {
   const { author } = useParams()
   const navigate = useNavigate()
   const [related, setRelated] = useState(null) // null = not loaded yet, [] = loaded, none found
+  const [compareAuthor, setCompareAuthor] = useState(null) // the related author currently being compared, or null
 
   const { items, total, page, setPage, loading, error, totalPages } = usePagedTable({
     endpoint: '/api/browse/books',
@@ -72,7 +74,19 @@ function AuthorWorks() {
               {related.map((a) => (
                 <li key={a.id} className="related-row" onClick={() => navigate(`/app/authors/${encodeURIComponent(a.id)}`)}>
                   <span className="related-name">{a.id}</span>
-                  <span className="related-shared">{a.shared_word_count} shared words</span>
+                  <span className="related-meta">
+                    <span className="related-shared">{a.shared_word_count} shared words</span>
+                    <button
+                      type="button"
+                      className="related-compare"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setCompareAuthor(a)
+                      }}
+                    >
+                      Compare
+                    </button>
+                  </span>
                 </li>
               ))}
             </ul>
@@ -84,6 +98,15 @@ function AuthorWorks() {
           <p className="muted">Not enough shared vocabulary with other authors yet.</p>
         )}
       </section>
+
+      {compareAuthor && (
+        <SharedWordsPanel
+          fetchUrl={`/api/browse/authors/${encodeURIComponent(author)}/shared-words/${encodeURIComponent(compareAuthor.id)}`}
+          titleA={author}
+          titleB={compareAuthor.id}
+          onClose={() => setCompareAuthor(null)}
+        />
+      )}
 
       {error && <div className="error-banner">{error}</div>}
 

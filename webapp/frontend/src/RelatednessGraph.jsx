@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ForceGraph2D from 'react-force-graph-2d'
 import { ZOOM_MS, ZOOM_PADDING, cssVar } from './graphUtils'
+import SharedWordsPanel from './SharedWordsPanel'
 import './GraphView.css'
 
 const TOP_K_OPTIONS = [5, 8, 12, 20]
@@ -24,10 +25,11 @@ const NODE_RADIUS_RELATED = 8
 // wants a *distance*, so it's inverted explicitly below rather than reusing
 // GraphView's assumption that the API's own number is already the right
 // one to hand the simulation.
-function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNavigate }) {
+function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNavigate, sharedWordsUrl }) {
   const [center, setCenter] = useState(null)
   const [rawGraph, setRawGraph] = useState({ nodes: [], edges: [] })
   const [topK, setTopK] = useState(8)
+  const [comparePair, setComparePair] = useState(null) // {sourceId, targetId, sourceLabel, targetLabel} | null
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [dims, setDims] = useState({ width: 0, height: 0 })
@@ -135,6 +137,7 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
         target: e.target,
         score: e.score,
         shared_word_count: e.shared_word_count,
+        is_center_edge: e.is_center_edge,
       })),
     }),
     [rawGraph],
@@ -144,6 +147,27 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
     (l) => `${l.shared_word_count} shared words · ${(l.score * 100).toFixed(0)}% overlap`,
     [],
   )
+
+  // react-force-graph mutates link.source/target from a raw id into the
+  // resolved node object once the simulation ticks -- handle either shape
+  // rather than assuming which one a click lands on.
+  function endpointId(endpoint) {
+    return endpoint && typeof endpoint === 'object' ? endpoint.id : endpoint
+  }
+
+  function handleLinkClick(link) {
+    if (!sharedWordsUrl) return
+    const sourceId = endpointId(link.source)
+    const targetId = endpointId(link.target)
+    const sourceNode = graphData.nodes.find((n) => n.id === sourceId)
+    const targetNode = graphData.nodes.find((n) => n.id === targetId)
+    setComparePair({
+      sourceId,
+      targetId,
+      sourceLabel: sourceNode ? getLabel(sourceNode) : String(sourceId),
+      targetLabel: targetNode ? getLabel(targetNode) : String(targetId),
+    })
+  }
 
   // Shared by both paintNode (visible canvas) and paintNodePointerArea
   // (force-graph's separate hit-test canvas, see below) so the clickable
@@ -234,8 +258,10 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
             nodePointerAreaPaint={paintNodePointerArea}
             linkColor={() => cssVar('--border', '#e5e4e7')}
             linkWidth={(l) => 0.5 + l.score * 2.5}
+            linkLineDash={(l) => (l.is_center_edge ? null : [4, 3])}
             linkLabel={linkLabel}
             onNodeClick={handleNodeClick}
+            onLinkClick={handleLinkClick}
             onEngineStop={handleEngineStop}
           />
         )}
@@ -243,6 +269,15 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
           <div className="graph-empty">Not enough shared vocabulary yet to show relationships.</div>
         )}
       </div>
+
+      {comparePair && sharedWordsUrl && (
+        <SharedWordsPanel
+          fetchUrl={sharedWordsUrl(comparePair.sourceId, comparePair.targetId)}
+          titleA={comparePair.sourceLabel}
+          titleB={comparePair.targetLabel}
+          onClose={() => setComparePair(null)}
+        />
+      )}
     </div>
   )
 }

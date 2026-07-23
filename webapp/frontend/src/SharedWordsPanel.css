@@ -1,0 +1,81 @@
+.shared-words-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 20px;
+}
+
+.shared-words-panel {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  max-width: 560px;
+  width: 100%;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 20px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+}
+
+.shared-words-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.shared-words-header h2 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-h);
+  margin: 0;
+}
+
+.shared-words-vs {
+  color: var(--accent);
+  font-weight: 400;
+}
+
+.shared-words-close {
+  border: none;
+  background: none;
+  color: var(--text);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.shared-words-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  /* flex-shrink defaults to allowing this to overflow its flex parent's
+     max-height instead of scrolling internally, since a flex item's
+     min-height defaults to the size of its content, not 0 -- without both
+     of these the whole panel silently clips (parent's overflow: hidden)
+     instead of showing a scrollbar. */
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.shared-words-lemma {
+  font-weight: 600;
+  color: var(--text-h);
+}
+
+.shared-words-def {
+  color: var(--text);
+}

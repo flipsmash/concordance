@@ -179,6 +179,21 @@
   font-variant-numeric: tabular-nums;
 }
 
+.related-compare {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--accent);
+  border-radius: 5px;
+  padding: 3px 8px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.related-compare:hover {
+  border-color: var(--accent);
+}
+
 .related-see-graph {
   align-self: flex-start;
   font-size: 13px;

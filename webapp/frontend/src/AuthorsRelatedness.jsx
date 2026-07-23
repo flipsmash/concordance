@@ -30,6 +30,9 @@ function AuthorsRelatedness() {
         getLabel={(n) => n.id}
         getSublabel={(n) => (n.book_count != null ? `${n.book_count} book${n.book_count === 1 ? '' : 's'}` : undefined)}
         onNodeNavigate={(node) => navigate(`/app/authors/${encodeURIComponent(node.id)}/relatedness`)}
+        sharedWordsUrl={(a, b) =>
+          `${API_BASE}/api/browse/authors/${encodeURIComponent(a)}/shared-words/${encodeURIComponent(b)}`
+        }
       />
     </div>
   )

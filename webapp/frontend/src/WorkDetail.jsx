@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import DifficultyHistogram from './DifficultyHistogram'
 import DomainDistribution from './DomainDistribution'
+import SharedWordsPanel from './SharedWordsPanel'
 import { usePagedTable } from './usePagedTable'
 import './Authors.css'
 import './Browse.css'
@@ -22,6 +23,7 @@ function WorkDetail() {
   const [book, setBook] = useState(null)
   const [bands, setBands] = useState([])
   const [related, setRelated] = useState(null) // null = not loaded yet, [] = loaded, none found
+  const [compareBook, setCompareBook] = useState(null) // the related book currently being compared, or null
 
   useEffect(() => {
     fetch(`${API_BASE}/api/browse/books?book_id=${bookId}`)
@@ -108,6 +110,16 @@ function WorkDetail() {
                   <span className="related-meta">
                     {b.author && <span>{b.author}</span>}
                     <span className="related-shared">{b.shared_word_count} shared words</span>
+                    <button
+                      type="button"
+                      className="related-compare"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setCompareBook(b)
+                      }}
+                    >
+                      Compare
+                    </button>
                   </span>
                 </li>
               ))}
@@ -120,6 +132,15 @@ function WorkDetail() {
           <p className="muted">Not enough shared vocabulary with other books yet.</p>
         )}
       </section>
+
+      {compareBook && (
+        <SharedWordsPanel
+          fetchUrl={`/api/browse/books/${bookId}/shared-words/${compareBook.id}`}
+          titleA={book?.title || 'This book'}
+          titleB={compareBook.title}
+          onClose={() => setCompareBook(null)}
+        />
+      )}
 
       {error && <div className="error-banner">{error}</div>}
 

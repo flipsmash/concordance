@@ -43,6 +43,7 @@ function BookRelatedness() {
         onNodeNavigate={(node) =>
           navigate(`/app/authors/${encodeURIComponent(node.author || '')}/${node.id}/relatedness`)
         }
+        sharedWordsUrl={(a, b) => `${API_BASE}/api/browse/books/${a}/shared-words/${b}`}
       />
     </div>
   )

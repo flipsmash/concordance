@@ -35,6 +35,7 @@ Mixing these up in either direction is the bug to avoid.
 
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -326,6 +327,14 @@ class BookGraphEdge(BaseModel):
                              # must invert this (link length ~ 1 - score),
                              # not reuse distance-is-already-right assumptions.
     shared_word_count: int
+    is_center_edge: bool    # True: center<->neighbor ("why you're looking at
+                             # this"). False: a cross-link BETWEEN two of the
+                             # displayed neighbors -- surfaced only when it
+                             # already happens to be stored (each also made
+                             # the other's own top-k), not newly computed. A
+                             # neighbor pair that's real but too weak for
+                             # either side's top-k cutoff won't appear here;
+                             # that's an honest gap, not a bug.
 
 
 class BookRelatedResponse(BaseModel):
@@ -367,14 +376,96 @@ def book_related(
                         ORDER BY bs.score DESC LIMIT %s""", (book_id, top_k))
         related = cur.fetchall()
 
+        # Cross-links: real edges BETWEEN two displayed neighbors, not just
+        # center-to-neighbor -- without this, book_related is a literal star
+        # graph (zero topological information beyond "these are the
+        # neighbors"). Only surfaces links already stored because a neighbor
+        # also has another displayed neighbor in ITS OWN top-k -- no new
+        # similarity computation, same query shape authors_relatedness
+        # already uses for its own cross-author edges.
+        displayed = [book_id] + [r[0] for r in related]
+        cur.execute(f"""SELECT book_a_id, book_b_id, score, shared_word_count
+                        FROM {_main.SCHEMA}.book_similarity
+                        WHERE book_a_id = ANY(%s) AND book_b_id = ANY(%s)
+                          AND book_a_id <> %s AND book_b_id <> %s""",
+                    (displayed, displayed, book_id, book_id))
+        cross_rows = cur.fetchall()
+
     nodes = [center] + [
         BookGraphNode(id=r[0], title=r[1], author=r[2], ring=1, word_count=None) for r in related
     ]
     edges = [
-        BookGraphEdge(source=book_id, target=r[0], score=r[3], shared_word_count=r[4])
+        BookGraphEdge(source=book_id, target=r[0], score=r[3], shared_word_count=r[4], is_center_edge=True)
         for r in related
     ]
+    seen_pairs: set[frozenset] = set()
+    for a, b, score, shared in cross_rows:
+        pair = frozenset((a, b))
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        edges.append(BookGraphEdge(source=a, target=b, score=score, shared_word_count=shared, is_center_edge=False))
     return BookRelatedResponse(center=center, nodes=nodes, edges=edges)
+
+
+class SharedWord(BaseModel):
+    id: int
+    lemma: str
+    definition: str | None
+    idf: float          # same ln(N/df) weighting compute_book_similarity/
+                         # compute_author_similarity score on -- higher idf
+                         # means this word contributed more to the score.
+
+
+class SharedWordsResponse(BaseModel):
+    shared_words: list[SharedWord]   # sorted by idf desc -- rarest/most
+                                      # distinctive shared word first
+    total_shared: int
+
+
+@router.get("/api/browse/books/{book_id_a}/shared-words/{book_id_b}", response_model=SharedWordsResponse)
+def book_shared_words(
+    book_id_a: int,
+    book_id_b: int,
+    _: dict = Depends(_main.require_viewer),
+) -> SharedWordsResponse:
+    """The actual overlapping active vocabulary between two books -- "the
+    what" behind book_related's score/shared_word_count ("the why"). Only
+    words that pass compute_book_similarity's own max_df_fraction=0.5
+    cutoff are returned, so this is consistent with the score: every word
+    shown here is one that actually counted toward it, not a superset.
+    Computed entirely on demand, bounded to exactly two books' shared
+    vocabulary (tens to low hundreds of words) -- nothing like the earlier
+    all-authors on-demand mistake, which broke because it recomputed the
+    entire corpus per request."""
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"""SELECT count(DISTINCT wb.book_id) FROM {_main.SCHEMA}.word_book wb
+                        JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id WHERE w.active""")
+        n_books = cur.fetchone()[0]
+        max_df = 0.5 * n_books if n_books else 0
+
+        cur.execute(f"""WITH shared AS (
+                            SELECT w.id, w.lemma, w.definition
+                            FROM {_main.SCHEMA}.word w
+                            WHERE w.active
+                              AND EXISTS (SELECT 1 FROM {_main.SCHEMA}.word_book wb1
+                                          WHERE wb1.word_id = w.id AND wb1.book_id = %s)
+                              AND EXISTS (SELECT 1 FROM {_main.SCHEMA}.word_book wb2
+                                          WHERE wb2.word_id = w.id AND wb2.book_id = %s)
+                        )
+                        SELECT s.id, s.lemma, s.definition, count(DISTINCT wb.book_id) AS df
+                        FROM shared s
+                        JOIN {_main.SCHEMA}.word_book wb ON wb.word_id = s.id
+                        JOIN {_main.SCHEMA}.word w2 ON w2.id = wb.word_id AND w2.active
+                        GROUP BY s.id, s.lemma, s.definition""", (book_id_a, book_id_b))
+        rows = cur.fetchall()
+
+    shared = sorted(
+        (SharedWord(id=r[0], lemma=r[1], definition=r[2], idf=math.log(n_books / r[3]))
+         for r in rows if r[3] <= max_df),
+        key=lambda s: s.idf, reverse=True,
+    )
+    return SharedWordsResponse(shared_words=shared, total_shared=len(shared))
 
 
 # --- /api/browse/authors/{author}/related, /api/browse/authors/relatedness -----
@@ -404,6 +495,8 @@ class AuthorGraphEdge(BaseModel):
                                 # convention (and same frontend link-length
                                 # inversion requirement) as BookGraphEdge.score
     shared_word_count: int
+    is_center_edge: bool       # see BookGraphEdge.is_center_edge -- same
+                                # meaning, same honest-gap caveat, one level up.
 
 
 class AuthorRelatedResponse(BaseModel):
@@ -449,14 +542,80 @@ def author_related(
                         ORDER BY score DESC LIMIT %s""", (author, top_k))
         related = cur.fetchall()
 
+        # Cross-links -- see book_related's identical reasoning/caveat.
+        displayed = [author] + [r[0] for r in related]
+        cur.execute(f"""SELECT author_a, author_b, score, shared_word_count
+                        FROM {_main.SCHEMA}.author_similarity
+                        WHERE author_a = ANY(%s) AND author_b = ANY(%s)
+                          AND author_a <> %s AND author_b <> %s""",
+                    (displayed, displayed, author, author))
+        cross_rows = cur.fetchall()
+
     nodes = [center] + [
         AuthorGraphNode(id=r[0], ring=1, book_count=None, word_count=None) for r in related
     ]
     edges = [
-        AuthorGraphEdge(source=author, target=r[0], score=r[1], shared_word_count=r[2])
+        AuthorGraphEdge(source=author, target=r[0], score=r[1], shared_word_count=r[2], is_center_edge=True)
         for r in related
     ]
+    seen_pairs: set[frozenset] = set()
+    for a, b, score, shared in cross_rows:
+        pair = frozenset((a, b))
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        edges.append(AuthorGraphEdge(source=a, target=b, score=score, shared_word_count=shared, is_center_edge=False))
     return AuthorRelatedResponse(center=center, nodes=nodes, edges=edges)
+
+
+@router.get("/api/browse/authors/{author_a}/shared-words/{author_b}", response_model=SharedWordsResponse)
+def author_shared_words(
+    author_a: str,
+    author_b: str,
+    _: dict = Depends(_main.require_viewer),
+) -> SharedWordsResponse:
+    """Same as book_shared_words, one level up: the actual overlapping
+    active vocabulary between two authors (a word counts if EITHER author
+    used it in any of their books), respecting compute_author_similarity's
+    own max_df_fraction=0.5 cutoff and PLACEHOLDER_AUTHORS exclusion so
+    author-df here means the same thing it means there."""
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"""SELECT count(DISTINCT b.author) FROM {_main.SCHEMA}.word_book wb
+                        JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id
+                        JOIN {_main.SCHEMA}.book b ON b.id = wb.book_id
+                        WHERE w.active AND b.author IS NOT NULL AND b.author <> ''
+                          AND NOT (b.author = ANY(%s))""", (list(PLACEHOLDER_AUTHORS),))
+        n_authors = cur.fetchone()[0]
+        max_df = 0.5 * n_authors if n_authors else 0
+
+        cur.execute(f"""WITH shared AS (
+                            SELECT w.id, w.lemma, w.definition
+                            FROM {_main.SCHEMA}.word w
+                            WHERE w.active
+                              AND EXISTS (SELECT 1 FROM {_main.SCHEMA}.word_book wb1
+                                          JOIN {_main.SCHEMA}.book b1 ON b1.id = wb1.book_id
+                                          WHERE wb1.word_id = w.id AND b1.author = %s)
+                              AND EXISTS (SELECT 1 FROM {_main.SCHEMA}.word_book wb2
+                                          JOIN {_main.SCHEMA}.book b2 ON b2.id = wb2.book_id
+                                          WHERE wb2.word_id = w.id AND b2.author = %s)
+                        )
+                        SELECT s.id, s.lemma, s.definition, count(DISTINCT b.author) AS df
+                        FROM shared s
+                        JOIN {_main.SCHEMA}.word_book wb ON wb.word_id = s.id
+                        JOIN {_main.SCHEMA}.book b ON b.id = wb.book_id
+                        JOIN {_main.SCHEMA}.word w2 ON w2.id = wb.word_id AND w2.active
+                        WHERE b.author IS NOT NULL AND b.author <> ''
+                          AND NOT (b.author = ANY(%s))
+                        GROUP BY s.id, s.lemma, s.definition""",
+                    (author_a, author_b, list(PLACEHOLDER_AUTHORS)))
+        rows = cur.fetchall()
+
+    shared = sorted(
+        (SharedWord(id=r[0], lemma=r[1], definition=r[2], idf=math.log(n_authors / r[3]))
+         for r in rows if r[3] <= max_df),
+        key=lambda s: s.idf, reverse=True,
+    )
+    return SharedWordsResponse(shared_words=shared, total_shared=len(shared))
 
 
 @router.get("/api/browse/authors/relatedness", response_model=AuthorRelatednessGraph)
@@ -502,7 +661,9 @@ def authors_relatedness(
         if pair in seen_pairs:
             continue
         seen_pairs.add(pair)
-        edges.append(AuthorGraphEdge(source=a, target=b, score=score, shared_word_count=shared))
+        # No "center" concept on the global graph -- every edge here is a
+        # peer relationship, so is_center_edge is always False.
+        edges.append(AuthorGraphEdge(source=a, target=b, score=score, shared_word_count=shared, is_center_edge=False))
     return AuthorRelatednessGraph(nodes=nodes, edges=edges)
 
 

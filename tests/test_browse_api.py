@@ -501,6 +501,97 @@ def test_book_related_returns_precomputed_neighbors_sorted_by_score():
 
 
 @pg
+def test_book_related_includes_cross_links_between_neighbors():
+    schema = "cc_test_book_cross_links"
+    client, conn, restore = _setup(schema)
+    try:
+        from concordance import db as _db
+
+        book_a = _insert_book(conn, schema, "Book A", author="Author A")
+        book_b = _insert_book(conn, schema, "Book B", author="Author B")
+        book_c = _insert_book(conn, schema, "Book C", author="Author C")
+        book_d = _insert_book(conn, schema, "Book D", author="Author D")
+        _link(conn, schema, _insert_word(conn, schema, "fillerword"), book_d)
+
+        # A-B, A-C, AND B-C each share 3 words of their own (disjoint sets) --
+        # so B and C should each be A's neighbor AND be linked to each other,
+        # turning book_related(A) from a star into a real (small) graph.
+        for i in range(3):
+            w = _insert_word(conn, schema, f"ab{i}")
+            _link(conn, schema, w, book_a)
+            _link(conn, schema, w, book_b)
+        for i in range(3):
+            w = _insert_word(conn, schema, f"ac{i}")
+            _link(conn, schema, w, book_a)
+            _link(conn, schema, w, book_c)
+        for i in range(3):
+            w = _insert_word(conn, schema, f"bc{i}")
+            _link(conn, schema, w, book_b)
+            _link(conn, schema, w, book_c)
+        conn.commit()
+
+        _db.compute_book_similarity(conn, schema)
+
+        resp = client.get(f"/api/browse/books/{book_a}/related")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        related_ids = {n["id"] for n in data["nodes"] if n["ring"] == 1}
+        assert related_ids == {book_b, book_c}
+
+        center_edges = [e for e in data["edges"] if e["is_center_edge"]]
+        cross_edges = [e for e in data["edges"] if not e["is_center_edge"]]
+        assert len(center_edges) == 2  # A-B, A-C
+        assert len(cross_edges) == 1   # B-C, surfaced from book_similarity's own stored row
+        edge = cross_edges[0]
+        assert {edge["source"], edge["target"]} == {book_b, book_c}
+        assert edge["shared_word_count"] == 3
+    finally:
+        restore()
+
+
+@pg
+def test_book_shared_words_returns_overlap_sorted_by_idf():
+    schema = "cc_test_book_shared_words"
+    client, conn, restore = _setup(schema)
+    try:
+        book_a = _insert_book(conn, schema, "Book A", author="Author A")
+        book_b = _insert_book(conn, schema, "Book B", author="Author B")
+        book_c = _insert_book(conn, schema, "Book C", author="Author C")
+        book_d = _insert_book(conn, schema, "Book D", author="Author D")
+
+        # Common word in all 4 books: df=4, max_df_fraction=0.5 * 4 = 2 --
+        # excluded from "the what" even though it's technically shared,
+        # same cutoff the similarity score itself uses.
+        common = _insert_word(conn, schema, "commonword")
+        for b in (book_a, book_b, book_c, book_d):
+            _link(conn, schema, common, b)
+
+        # Two rare words shared only by A and B (df=2, passes the cutoff).
+        rare1 = _insert_word(conn, schema, "rareone")
+        rare2 = _insert_word(conn, schema, "raretwo")
+        for w in (rare1, rare2):
+            _link(conn, schema, w, book_a)
+            _link(conn, schema, w, book_b)
+
+        # Word only in A, not shared -- must not appear.
+        _link(conn, schema, _insert_word(conn, schema, "onlya"), book_a)
+        conn.commit()
+
+        resp = client.get(f"/api/browse/books/{book_a}/shared-words/{book_b}")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        lemmas = {w["lemma"] for w in data["shared_words"]}
+        assert lemmas == {"rareone", "raretwo"}
+        assert data["total_shared"] == 2
+        idfs = [w["idf"] for w in data["shared_words"]]
+        assert idfs == sorted(idfs, reverse=True)
+    finally:
+        restore()
+
+
+@pg
 def test_author_related_returns_neighbors_sorted_by_score():
     schema = "cc_test_author_related"
     client, conn, restore = _setup(schema)
@@ -555,6 +646,89 @@ def test_author_related_returns_neighbors_sorted_by_score():
 
         # Unknown author -> 404, not a silent empty response.
         assert client.get(f"/api/browse/authors/{quote('Nobody')}/related").status_code == 404
+    finally:
+        restore()
+
+
+@pg
+def test_author_related_includes_cross_links_between_neighbors():
+    schema = "cc_test_author_cross_links"
+    client, conn, restore = _setup(schema)
+    try:
+        from concordance import db as _db
+
+        book_a = _insert_book(conn, schema, "Book A", author="Author A")
+        book_b = _insert_book(conn, schema, "Book B", author="Author B")
+        book_c = _insert_book(conn, schema, "Book C", author="Author C")
+        book_d = _insert_book(conn, schema, "Book D", author="Author D")
+        _link(conn, schema, _insert_word(conn, schema, "fillerword"), book_d)
+
+        for i in range(3):
+            w = _insert_word(conn, schema, f"ab{i}")
+            _link(conn, schema, w, book_a)
+            _link(conn, schema, w, book_b)
+        for i in range(3):
+            w = _insert_word(conn, schema, f"ac{i}")
+            _link(conn, schema, w, book_a)
+            _link(conn, schema, w, book_c)
+        for i in range(3):
+            w = _insert_word(conn, schema, f"bc{i}")
+            _link(conn, schema, w, book_b)
+            _link(conn, schema, w, book_c)
+        conn.commit()
+
+        _db.compute_author_similarity(conn, schema)
+
+        resp = client.get(f"/api/browse/authors/{quote('Author A')}/related")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        related_ids = {n["id"] for n in data["nodes"] if n["ring"] == 1}
+        assert related_ids == {"Author B", "Author C"}
+
+        center_edges = [e for e in data["edges"] if e["is_center_edge"]]
+        cross_edges = [e for e in data["edges"] if not e["is_center_edge"]]
+        assert len(center_edges) == 2
+        assert len(cross_edges) == 1
+        edge = cross_edges[0]
+        assert {edge["source"], edge["target"]} == {"Author B", "Author C"}
+        assert edge["shared_word_count"] == 3
+    finally:
+        restore()
+
+
+@pg
+def test_author_shared_words_returns_overlap_sorted_by_idf():
+    schema = "cc_test_author_shared_words"
+    client, conn, restore = _setup(schema)
+    try:
+        book_a = _insert_book(conn, schema, "Book A", author="Author A")
+        book_b = _insert_book(conn, schema, "Book B", author="Author B")
+        book_c = _insert_book(conn, schema, "Book C", author="Author C")
+        book_d = _insert_book(conn, schema, "Book D", author="Author D")
+
+        common = _insert_word(conn, schema, "commonword")
+        for b in (book_a, book_b, book_c, book_d):
+            _link(conn, schema, common, b)
+
+        rare1 = _insert_word(conn, schema, "rareone")
+        rare2 = _insert_word(conn, schema, "raretwo")
+        for w in (rare1, rare2):
+            _link(conn, schema, w, book_a)
+            _link(conn, schema, w, book_b)
+
+        _link(conn, schema, _insert_word(conn, schema, "onlya"), book_a)
+        conn.commit()
+
+        resp = client.get(f"/api/browse/authors/{quote('Author A')}/shared-words/{quote('Author B')}")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        lemmas = {w["lemma"] for w in data["shared_words"]}
+        assert lemmas == {"rareone", "raretwo"}
+        assert data["total_shared"] == 2
+        idfs = [w["idf"] for w in data["shared_words"]]
+        assert idfs == sorted(idfs, reverse=True)
     finally:
         restore()
 
