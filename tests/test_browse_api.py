@@ -779,3 +779,44 @@ def test_authors_relatedness_global_graph_dedupes_mutual_edges():
         assert matching[0]["shared_word_count"] == 3
     finally:
         restore()
+
+
+@pg
+def test_authors_map_returns_precomputed_clusters():
+    schema = "cc_test_authors_map"
+    client, conn, restore = _setup(schema)
+    try:
+        from concordance import db as _db
+
+        alpha_authors = [f"Alpha{i}" for i in range(5)]
+        beta_authors = [f"Beta{i}" for i in range(5)]
+        alpha_words = [_insert_word(conn, schema, f"alphaword{i}") for i in range(10)]
+        beta_words = [_insert_word(conn, schema, f"betaword{i}") for i in range(10)]
+        for i, author in enumerate(alpha_authors):
+            book = _insert_book(conn, schema, f"Alpha Book {i}", author=author)
+            for w in alpha_words:
+                _link(conn, schema, w, book)
+        for i, author in enumerate(beta_authors):
+            book = _insert_book(conn, schema, f"Beta Book {i}", author=author)
+            for w in beta_words:
+                _link(conn, schema, w, book)
+        conn.commit()
+
+        _db.compute_author_clustering(conn, schema, top_n=200, n_clusters=2)
+
+        resp = client.get("/api/browse/authors/map")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        by_author = {n["author"]: n for n in data["nodes"]}
+        assert set(by_author.keys()) == set(alpha_authors) | set(beta_authors)
+
+        alpha_clusters = {by_author[a]["cluster_id"] for a in alpha_authors}
+        beta_clusters = {by_author[b]["cluster_id"] for b in beta_authors}
+        assert len(alpha_clusters) == 1
+        assert len(beta_clusters) == 1
+        assert alpha_clusters != beta_clusters
+        assert all(isinstance(by_author[a]["x"], float) for a in alpha_authors)
+        assert by_author["Alpha0"]["book_count"] == 1
+    finally:
+        restore()

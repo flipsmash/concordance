@@ -472,6 +472,33 @@ def author_similarity(
                   f"-> [bold]{stats['pairs_stored']}[/bold] related-author pairs stored")
 
 
+@app.command("author-clustering")
+def author_clustering(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    top_n: int = typer.Option(200, "--top-n", help="Number of authors (by book count) to cluster."),
+    n_clusters: int = typer.Option(12, "--n-clusters", help="Target cluster count (fcluster maxclust)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Hierarchical clustering + 2D (classical MDS) projection over the
+    top-N authors by book count -- the data behind the cluster map,
+    similarity matrix, and dendrogram views. Same IDF-weighted cosine
+    metric as author-similarity (corpus-wide, not scoped to the top-N), so
+    the map's positions and author-similarity's scores stay consistent.
+    Always recomputes the whole top-N set in one pass -- see
+    compute_author_clustering's docstring for why a partial write here
+    would be worse than in book-similarity/author-similarity."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    with console.status("[bold]Clustering authors by vocabulary overlap…"):
+        stats = db.compute_author_clustering(conn, schema, top_n=top_n, n_clusters=n_clusters)
+    conn.close()
+    console.print(f"[green]✓[/green] author-clustering: [bold]{stats['authors']}[/bold] authors "
+                  f"-> [bold]{stats['clusters']}[/bold] clusters")
+
+
 @app.command("dedupe-plurals")
 def dedupe_plurals(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
@@ -807,6 +834,7 @@ def maintain(
     skip_quizzable: bool = typer.Option(False, "--skip-quizzable"),
     skip_book_similarity: bool = typer.Option(False, "--skip-book-similarity"),
     skip_author_similarity: bool = typer.Option(False, "--skip-author-similarity"),
+    skip_author_clustering: bool = typer.Option(False, "--skip-author-clustering"),
     skip_wordnik: bool = typer.Option(False, "--skip-wordnik", help="Skip the wordnik-pron fetch step."),
     skip_ipa: bool = typer.Option(False, "--skip-ipa", help="Skip the ipa backfill step."),
     skip_embed: bool = typer.Option(False, "--skip-embed"),
@@ -815,8 +843,8 @@ def maintain(
     """Run the full post-ingest maintenance chain in dependency order:
     fill-definitions -> classify -> normalize-pos -> ngram -> archaic ->
     difficulty -> quizdef -> quizzable -> book-similarity ->
-    author-similarity -> wordnik-pron -> ipa -> embed. This is the whole
-    documented sequence from the README's
+    author-similarity -> author-clustering -> wordnik-pron -> ipa -> embed.
+    This is the whole documented sequence from the README's
     "Backfilling definitions" / "Enrichment & scoring" / "Definition-quality
     cleanup" / "Pronunciation audio" / "Semantic distance" sections, chained
     into one command instead of twelve to remember and re-order by hand.
@@ -927,6 +955,14 @@ def maintain(
                       f"-> [bold]{stats['pairs_stored']}[/bold] related-author pairs stored")
     else:
         console.print("[dim]author-similarity skipped.[/dim]")
+
+    if not skip_author_clustering:
+        with console.status("[bold]Clustering authors by vocabulary overlap…"):
+            stats = db.compute_author_clustering(conn, schema)
+        console.print(f"[green]✓[/green] author-clustering: [bold]{stats['authors']}[/bold] authors "
+                      f"-> [bold]{stats['clusters']}[/bold] clusters")
+    else:
+        console.print("[dim]author-clustering skipped.[/dim]")
 
     if not skip_wordnik:
         stats = db.fetch_wordnik_pronunciations(conn, schema, only_missing=True, limit=limit)

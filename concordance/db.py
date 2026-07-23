@@ -157,6 +157,36 @@ CREATE TABLE IF NOT EXISTS {s}.author_similarity (
 CREATE INDEX IF NOT EXISTS author_similarity_rank_idx
     ON {s}.author_similarity (author_a, score DESC);
 
+-- Hierarchical clustering + 2D projection over the top-N (by book count)
+-- authors -- see compute_author_clustering. Unlike author_similarity
+-- (every author, top-k neighbors only), this covers a bounded, smaller set
+-- in full: cluster_id/mds_x/mds_y are meaningful only relative to everyone
+-- else in the SAME computed run, so this table always holds exactly one
+-- run's worth of authors, truncated and repopulated wholesale each time.
+CREATE TABLE IF NOT EXISTS {s}.author_cluster (
+    author       text PRIMARY KEY,
+    cluster_id   integer NOT NULL,
+    mds_x        double precision NOT NULL,
+    mds_y        double precision NOT NULL,
+    book_count   integer NOT NULL,
+    computed_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- Singleton (id always 1): the full pairwise similarity grid and the
+-- dendrogram tree are read as whole blobs (the /matrix and /dendrogram
+-- endpoints never query a single pair or subtree server-side), and both
+-- must come from the exact same computation pass as author_cluster above --
+-- a blob avoids three separately-writable tables silently drifting apart
+-- (e.g. a crash between writing clusters and writing the tree would
+-- otherwise leave the map and matrix reflecting different runs).
+CREATE TABLE IF NOT EXISTS {s}.author_cluster_run (
+    id           integer PRIMARY KEY CHECK (id = 1),
+    leaf_order   text[] NOT NULL,   -- seriated author order, for matrix display
+    grid         jsonb NOT NULL,    -- NxN [[score, shared_word_count], ...] in leaf_order
+    tree_json    jsonb NOT NULL,    -- nested linkage tree, for the dendrogram
+    computed_at  timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS {s}.word_audio (
     word_id      integer PRIMARY KEY REFERENCES {s}.word(id) ON DELETE CASCADE,
     source       text,          -- 'commons' | 'azure' | 'none' (looked up, nothing found)
@@ -1782,6 +1812,215 @@ def compute_author_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int 
                 conn.commit()
     conn.commit()
     return {"authors": len(author_names), "pairs_stored": stored}
+
+
+def _linkage_to_tree(Z, labels: list[str]) -> dict:
+    """scipy.cluster.hierarchy.linkage's output (an (n-1)x4 array: each row
+    [left, right, distance, size], where left/right index either an
+    original leaf (0..n-1) or a previously-built internal node (n..)) into
+    a nested, JSON-serializable tree for the frontend dendrogram -- one
+    bottom-up pass, no recursion needed since Z is already in merge order."""
+    n = len(labels)
+    nodes: dict[int, dict] = {i: {"author": labels[i], "size": 1} for i in range(n)}
+    for i, (a, b, dist, size) in enumerate(Z):
+        nodes[n + i] = {
+            "left": nodes[int(a)],
+            "right": nodes[int(b)],
+            "distance": float(dist),
+            "size": int(size),
+        }
+    return nodes[n + len(Z) - 1]
+
+
+def compute_author_clustering(conn, schema: str = DEFAULT_SCHEMA, *, top_n: int = 200,
+                              max_df_fraction: float = 0.5, n_clusters: int = 12) -> dict:
+    """`concordance author-clustering` / `maintain`'s clustering step: the
+    data behind the cluster map, similarity matrix, and dendrogram views for
+    the top `top_n` authors by book count.
+
+    Reuses the exact corpus-wide author-df IDF setup compute_author_similarity
+    uses (same n_authors/df/max_df_fraction computation over ALL authors,
+    not just the top_n) -- so "the why" (author_similarity's scores) and
+    "the map" (cluster positions here) share one consistent notion of
+    similarity; only WHICH authors enter the pairwise/clustering step is
+    restricted to top_n, not how a shared word is weighted.
+
+    PLACEHOLDER_AUTHORS ("Various", "Unknown Author", ...) are filtered in
+    the SAME WHERE clause as the top_n ORDER BY/LIMIT, not afterward --
+    they dwarf every real author by book count (Various alone: 1193 books
+    vs. ~125 for the top real author), so a post-hoc filter would silently
+    burn top_n slots on aggregation labels instead of real authors.
+
+    Distance is `sqrt(2 * (1 - cosine))`, a proper Euclidean distance for
+    L2-normalized vectors -- not raw `1 - cosine`, which fails the triangle
+    inequality and produces a non-PSD Gram matrix (forcing lossy eigenvalue
+    clipping in the MDS step below). This one distance definition feeds
+    both `ward` linkage (which assumes squared-Euclidean input -- not valid
+    for raw cosine distance) and classical MDS, rather than being decided
+    independently in two places.
+
+    n_clusters=12 (via `fcluster(..., criterion='maxclust')`) is a starting
+    default, not a permanent one -- validate cluster-size distribution
+    against the real corpus (not all-one-cluster, not all-singletons)
+    before treating it as final.
+
+    Classical (Torgerson) MDS is computed directly via a single
+    numpy.linalg.eigh on the double-centered squared-distance Gram matrix
+    (no sklearn) -- fast and deterministic at this scale, unlike sklearn's
+    default iterative SMACOF. eigh's eigenvector sign is otherwise
+    arbitrary and can flip between runs on near-identical input (the same
+    instability class as the force-graph bugs already found and fixed
+    elsewhere in this project), so each axis's sign is pinned deterministically.
+    Authors landing on the exact same point (identical qualifying word
+    sets) get a small, deterministic (name-hash-seeded) jitter so they stay
+    individually clickable.
+
+    Writes author_cluster and the singleton author_cluster_run in one
+    transaction at the end -- no partial/interleaved commits (unlike
+    compute_book_similarity's every-200-rows batching): top_n=200 is small
+    enough that one clean transaction is trivial, and a partial write here
+    would be worse than there, since the map/matrix/dendrogram must never
+    disagree with each other -- they all derive from one computation pass."""
+    import hashlib
+    import math
+
+    import numpy as np
+    from scipy.cluster.hierarchy import fcluster, leaves_list, linkage
+    from scipy.spatial.distance import squareform
+    from scipy.sparse import csr_matrix
+
+    s = _safe_schema(schema)
+    placeholders = list(PLACEHOLDER_AUTHORS)
+
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT count(DISTINCT b.author) FROM {s}.word_book wb
+                        JOIN {s}.word w ON w.id = wb.word_id
+                        JOIN {s}.book b ON b.id = wb.book_id
+                        WHERE w.active AND b.author IS NOT NULL AND b.author <> ''
+                          AND NOT (b.author = ANY(%s))""", (placeholders,))
+        n_authors = cur.fetchone()[0]
+        if n_authors < 3:
+            conn.commit()  # see compute_book_similarity's own early-return commit note
+            return {"authors": 0, "clusters": 0}
+
+        cur.execute(f"""SELECT wb.word_id, count(DISTINCT b.author) AS df
+                        FROM {s}.word_book wb
+                        JOIN {s}.word w ON w.id = wb.word_id
+                        JOIN {s}.book b ON b.id = wb.book_id
+                        WHERE w.active AND b.author IS NOT NULL AND b.author <> ''
+                          AND NOT (b.author = ANY(%s))
+                        GROUP BY wb.word_id""", (placeholders,))
+        max_df = max_df_fraction * n_authors
+        idf = {wid: math.log(n_authors / df) for wid, df in cur.fetchall() if df <= max_df}
+        if not idf:
+            conn.commit()
+            return {"authors": 0, "clusters": 0}
+
+        cur.execute(f"""SELECT b.author, count(DISTINCT b.id) AS book_count
+                        FROM {s}.book b
+                        WHERE b.author IS NOT NULL AND b.author <> ''
+                          AND NOT (b.author = ANY(%s))
+                        GROUP BY b.author
+                        ORDER BY book_count DESC
+                        LIMIT %s""", (placeholders, top_n))
+        top_authors = cur.fetchall()
+        top_author_names = [r[0] for r in top_authors]
+        book_count_by_author = {r[0]: r[1] for r in top_authors}
+
+        if len(top_author_names) < 3:
+            conn.commit()
+            return {"authors": 0, "clusters": 0}
+
+        cur.execute(f"""SELECT DISTINCT wb.word_id, b.author FROM {s}.word_book wb
+                        JOIN {s}.word w ON w.id = wb.word_id
+                        JOIN {s}.book b ON b.id = wb.book_id
+                        WHERE w.active AND b.author = ANY(%s)
+                          AND wb.word_id = ANY(%s)""",
+                    (top_author_names, list(idf.keys())))
+        rows = cur.fetchall()
+
+    n = len(top_author_names)
+    author_index = {a: i for i, a in enumerate(top_author_names)}
+    word_index: dict[int, int] = {}
+    row_idx, col_idx, weighted_data = [], [], []
+    for wid, author in rows:
+        j = word_index.setdefault(wid, len(word_index))
+        row_idx.append(author_index[author])
+        col_idx.append(j)
+        weighted_data.append(idf[wid])
+
+    matrix = csr_matrix((weighted_data, (row_idx, col_idx)), shape=(n, len(word_index)))
+    binary = csr_matrix(([1] * len(row_idx), (row_idx, col_idx)), shape=(n, len(word_index)))
+    shared_counts = (binary @ binary.T).toarray().astype(int)
+
+    norms = np.sqrt(np.asarray(matrix.multiply(matrix).sum(axis=1))).reshape(-1)
+    norms[norms == 0] = 1.0  # an author with zero qualifying words (all excluded by max_df) -- avoid /0
+    normalized = matrix.multiply(1 / norms[:, None]).tocsr()
+    cosine = (normalized @ normalized.T).toarray()
+    np.clip(cosine, -1.0, 1.0, out=cosine)  # guard float round-off past 1 on a self-pair
+
+    dist = np.sqrt(np.clip(2 * (1 - cosine), 0, None))
+    np.fill_diagonal(dist, 0.0)
+
+    condensed = squareform(dist, checks=False)
+    tree = linkage(condensed, method="ward", optimal_ordering=True)
+    leaf_order_idx = leaves_list(tree)
+    leaf_order = [top_author_names[i] for i in leaf_order_idx]
+    cluster_ids = fcluster(tree, t=n_clusters, criterion="maxclust")
+
+    # Classical (Torgerson) MDS: double-center the squared-distance matrix,
+    # take the top-2 eigenvectors of the resulting Gram matrix.
+    d2 = dist ** 2
+    centering = np.eye(n) - np.ones((n, n)) / n
+    gram = -0.5 * centering @ d2 @ centering
+    eigvals, eigvecs = np.linalg.eigh(gram)
+    top2 = np.argsort(eigvals)[::-1][:2]
+    coords = eigvecs[:, top2] * np.sqrt(np.clip(eigvals[top2], 0, None))
+
+    for axis in range(coords.shape[1]):
+        col = coords[:, axis]
+        if col[np.argmax(np.abs(col))] < 0:
+            coords[:, axis] = -col
+
+    seen_points: dict[tuple, list[int]] = {}
+    for i in range(n):
+        key = (round(float(coords[i, 0]), 6), round(float(coords[i, 1]), 6))
+        seen_points.setdefault(key, []).append(i)
+    spread = max(float(np.abs(coords).max()), 1.0)
+    for idxs in seen_points.values():
+        if len(idxs) < 2:
+            continue
+        for k, i in enumerate(idxs):
+            h = int(hashlib.sha256(top_author_names[i].encode()).hexdigest(), 16)
+            angle = (h % 360) * math.pi / 180
+            radius = 0.02 * (k + 1) * spread
+            coords[i, 0] += radius * math.cos(angle)
+            coords[i, 1] += radius * math.sin(angle)
+
+    grid = [[[float(cosine[i, j]), int(shared_counts[i, j])] for j in leaf_order_idx] for i in leaf_order_idx]
+    tree_json = _linkage_to_tree(tree, top_author_names)
+
+    from psycopg.types.json import Json
+
+    with conn.cursor() as cur:
+        cur.execute(f"TRUNCATE {s}.author_cluster")
+        for i, author in enumerate(top_author_names):
+            cur.execute(
+                f"""INSERT INTO {s}.author_cluster (author, cluster_id, mds_x, mds_y, book_count, computed_at)
+                    VALUES (%s,%s,%s,%s,%s, now())""",
+                (author, int(cluster_ids[i]), float(coords[i, 0]), float(coords[i, 1]),
+                 book_count_by_author[author]),
+            )
+        cur.execute(
+            f"""INSERT INTO {s}.author_cluster_run (id, leaf_order, grid, tree_json, computed_at)
+                VALUES (1, %s, %s, %s, now())
+                ON CONFLICT (id) DO UPDATE SET
+                    leaf_order=EXCLUDED.leaf_order, grid=EXCLUDED.grid,
+                    tree_json=EXCLUDED.tree_json, computed_at=now()""",
+            (leaf_order, Json(grid), Json(tree_json)),
+        )
+    conn.commit()
+    return {"authors": n, "clusters": int(cluster_ids.max()) if n else 0}
 
 
 def compute_definition_embeddings(conn, schema: str = DEFAULT_SCHEMA, only_missing: bool = True,

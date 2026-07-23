@@ -1148,3 +1148,122 @@ def test_compute_author_similarity_dedupes_shared_words_across_an_authors_own_bo
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
     conn.close()
+
+
+@pg
+def test_compute_author_clustering_separates_two_clear_clusters():
+    # 10 authors, two disjoint 10-word vocabularies (5 authors each) -- the
+    # clearest possible synthetic multi-cluster fixture: any reasonable
+    # clustering must put all 5 "alpha" authors in one cluster and all 5
+    # "beta" authors in another, and MDS must place them on opposite sides
+    # of the map (opposite-signed x-coordinates), not just "different
+    # clusters" -- the two views (color, position) must agree.
+    from concordance.model import Candidate
+
+    schema = "cc_test_author_clustering"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    def word(lemma):
+        c = Candidate(lemma=lemma, pos="NOUN")
+        c.definition = f"definition of {lemma}"
+        return c
+
+    alpha_words = [word(f"alphaword{i}") for i in range(10)]
+    beta_words = [word(f"betaword{i}") for i in range(10)]
+    for i in range(5):
+        db.sync_book_results(conn, f"Alpha Book {i}", kept=alpha_words, rejected=[], schema=schema, author=f"Alpha{i}")
+    for i in range(5):
+        db.sync_book_results(conn, f"Beta Book {i}", kept=beta_words, rejected=[], schema=schema, author=f"Beta{i}")
+
+    stats = db.compute_author_clustering(conn, schema, top_n=200, n_clusters=2)
+    assert stats["authors"] == 10
+    assert stats["clusters"] == 2
+
+    with conn.cursor() as cur:
+        cur.execute(f"select author, cluster_id, mds_x from {schema}.author_cluster order by author")
+        rows = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+
+        alpha_clusters = {rows[f"Alpha{i}"][0] for i in range(5)}
+        beta_clusters = {rows[f"Beta{i}"][0] for i in range(5)}
+        assert len(alpha_clusters) == 1          # all 5 alphas in the same cluster
+        assert len(beta_clusters) == 1            # all 5 betas in the same cluster
+        assert alpha_clusters != beta_clusters    # and it's a DIFFERENT cluster from the alphas
+
+        alpha_x = [rows[f"Alpha{i}"][1] for i in range(5)]
+        beta_x = [rows[f"Beta{i}"][1] for i in range(5)]
+        # Same sign within each group, opposite sign between groups -- MDS
+        # actually separated them spatially, not just by cluster label.
+        assert all((x > 0) == (alpha_x[0] > 0) for x in alpha_x)
+        assert all((x > 0) == (beta_x[0] > 0) for x in beta_x)
+        assert (alpha_x[0] > 0) != (beta_x[0] > 0)
+
+        cur.execute(f"select leaf_order from {schema}.author_cluster_run where id=1")
+        leaf_order = cur.fetchone()[0]
+        assert set(leaf_order) == set(rows.keys())
+        # Seriation groups same-cluster authors together, not interleaved --
+        # every Alpha should be contiguous in leaf_order, likewise Beta.
+        alpha_positions = sorted(leaf_order.index(f"Alpha{i}") for i in range(5))
+        assert alpha_positions == list(range(alpha_positions[0], alpha_positions[0] + 5))
+
+        cur.execute(f"select grid, tree_json from {schema}.author_cluster_run where id=1")
+        grid, tree = cur.fetchone()
+        assert len(grid) == 10 and len(grid[0]) == 10
+        assert "distance" in tree and "size" in tree
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_compute_author_clustering_is_idempotent_and_deterministic():
+    from concordance.model import Candidate
+
+    schema = "cc_test_author_clustering_idempotent"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    def word(lemma):
+        c = Candidate(lemma=lemma, pos="NOUN")
+        c.definition = f"definition of {lemma}"
+        return c
+
+    alpha_words = [word(f"alphaword{i}") for i in range(10)]
+    beta_words = [word(f"betaword{i}") for i in range(10)]
+    for i in range(5):
+        db.sync_book_results(conn, f"Alpha Book {i}", kept=alpha_words, rejected=[], schema=schema, author=f"Alpha{i}")
+    for i in range(5):
+        db.sync_book_results(conn, f"Beta Book {i}", kept=beta_words, rejected=[], schema=schema, author=f"Beta{i}")
+
+    db.compute_author_clustering(conn, schema, top_n=200, n_clusters=2)
+    with conn.cursor() as cur:
+        cur.execute(f"select author, cluster_id, mds_x, mds_y from {schema}.author_cluster order by author")
+        run1 = cur.fetchall()
+        cur.execute(f"select count(*) from {schema}.author_cluster")
+        count1 = cur.fetchone()[0]
+
+    db.compute_author_clustering(conn, schema, top_n=200, n_clusters=2)
+    with conn.cursor() as cur:
+        cur.execute(f"select author, cluster_id, mds_x, mds_y from {schema}.author_cluster order by author")
+        run2 = cur.fetchall()
+        cur.execute(f"select count(*) from {schema}.author_cluster")
+        count2 = cur.fetchone()[0]
+
+        # Re-running must truncate + repopulate, not append -- same row
+        # count both times, not double.
+        assert count1 == count2 == 10
+        # Eigenvector sign is pinned deterministically, so a re-run on
+        # unchanged data must reproduce bit-identical coordinates, not
+        # mirror-flip.
+        assert run1 == run2
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()

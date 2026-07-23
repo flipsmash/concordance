@@ -667,6 +667,38 @@ def authors_relatedness(
     return AuthorRelatednessGraph(nodes=nodes, edges=edges)
 
 
+class AuthorMapNode(BaseModel):
+    author: str
+    cluster_id: int
+    x: float
+    y: float
+    book_count: int
+
+
+class AuthorMapResponse(BaseModel):
+    nodes: list[AuthorMapNode]
+
+
+@router.get("/api/browse/authors/map", response_model=AuthorMapResponse)
+def authors_map(_: dict = Depends(_main.require_viewer)) -> AuthorMapResponse:
+    """The cluster map: every author in the precomputed author_cluster table
+    (top-N by book count -- see concordance/db.py's compute_author_clustering),
+    positioned by classical MDS over the same IDF-weighted cosine distance
+    author_similarity's scores use, colored by hierarchical cluster
+    membership. Default tab on the global authors page -- position and
+    color here are both principled (derived from the actual similarity
+    structure via clustering + MDS), unlike the force-directed graph's
+    physics-simulation compromise layout, which carries no such guarantee
+    and (per real usage) becomes an unstable hairball at this many nodes."""
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"""SELECT author, cluster_id, mds_x, mds_y, book_count
+                        FROM {_main.SCHEMA}.author_cluster
+                        ORDER BY cluster_id, author""")
+        rows = cur.fetchall()
+    nodes = [AuthorMapNode(author=r[0], cluster_id=r[1], x=r[2], y=r[3], book_count=r[4]) for r in rows]
+    return AuthorMapResponse(nodes=nodes)
+
+
 # --- /api/browse/words ----------------------------------------------------------
 
 class BrowseWordRow(BaseModel):
