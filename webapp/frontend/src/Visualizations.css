@@ -1,0 +1,27 @@
+.viz-section {
+  gap: 10px;
+}
+
+.viz-heading {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-h);
+  margin: 0;
+}
+
+.viz-description {
+  font-size: 13px;
+  color: var(--text);
+  margin: 0;
+}
+
+.viz-author-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.viz-graph-embed {
+  margin-top: 4px;
+}

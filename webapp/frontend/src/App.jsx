@@ -23,6 +23,7 @@ const WorkDetail = lazy(() => import('./WorkDetail'))
 const BookRelatedness = lazy(() => import('./BookRelatedness'))
 const AuthorRelatedness = lazy(() => import('./AuthorRelatedness'))
 const AuthorsRelatedness = lazy(() => import('./AuthorsRelatedness'))
+const Visualizations = lazy(() => import('./Visualizations'))
 
 function tabClass({ isActive }) {
   return isActive ? 'tab active' : 'tab'
@@ -103,6 +104,14 @@ function App() {
             element={
               <Suspense fallback={<div className="page-loading">Loading…</div>}>
                 <WordDetail backTo="/app" />
+              </Suspense>
+            }
+          />
+          <Route
+            path="visualizations"
+            element={
+              <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                <Visualizations />
               </Suspense>
             }
           />
