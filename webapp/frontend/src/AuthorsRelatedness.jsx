@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import AuthorClusterMap from './AuthorClusterMap'
+import AuthorDendrogram from './AuthorDendrogram'
+import AuthorMatrix from './AuthorMatrix'
 import RelatednessGraph from './RelatednessGraph'
 import './Authors.css'
 import './GraphView.css' // .graph-signal-toggle, reused here directly for the tab strip
@@ -9,18 +11,22 @@ const API_BASE = ''
 
 const TABS = [
   { id: 'map', label: 'Map' },
+  { id: 'matrix', label: 'Matrix' },
+  { id: 'dendrogram', label: 'Dendrogram' },
   { id: 'graph', label: 'Graph' },
 ]
 
 // Secondary page (per the relatedness plan -- lower priority than the
 // per-author drilldown): every author at once, tractable because there are
 // only dozens of them (well, the top few hundred by book count -- see
-// compute_author_clustering's own top_n). Tabbed: Map (cluster map, the
-// "co-citation-style" view -- default, since position/color here are
-// principled, derived from real MDS/clustering over the similarity
-// structure, unlike the force graph's physics-simulation compromise
-// layout) and Graph (the original force-directed view, kept -- still a
-// valid lower-priority option, not deleted).
+// compute_author_clustering's own top_n). Four tabs, all reading the same
+// underlying clustering run (see compute_author_clustering): Map (default
+// -- position/color are principled, derived from real MDS/clustering over
+// the similarity structure, unlike the force graph's physics-simulation
+// compromise layout), Matrix (precise pairwise lookup, seriated so related
+// authors form visible blocks), Dendrogram (the clearest hierarchical
+// narrative), and Graph (the original force-directed view, kept -- still
+// a valid lower-priority option, not deleted).
 function AuthorsRelatedness() {
   const navigate = useNavigate()
   const [tab, setTab] = useState('map')
@@ -47,6 +53,12 @@ function AuthorsRelatedness() {
 
       {tab === 'map' && (
         <AuthorClusterMap onAuthorClick={(author) => navigate(`/app/authors/${encodeURIComponent(author)}/relatedness`)} />
+      )}
+
+      {tab === 'matrix' && <AuthorMatrix />}
+
+      {tab === 'dendrogram' && (
+        <AuthorDendrogram onAuthorClick={(author) => navigate(`/app/authors/${encodeURIComponent(author)}/relatedness`)} />
       )}
 
       {tab === 'graph' && (

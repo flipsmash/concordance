@@ -1,0 +1,26 @@
+.author-matrix {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.author-matrix-canvas-wrap {
+  width: 100%;
+  height: calc(100vh - 300px);
+  min-height: 360px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.author-matrix-canvas-wrap canvas {
+  cursor: pointer;
+}
+
+.author-matrix-tooltip {
+  min-height: 18px;
+  font-size: 13px;
+}

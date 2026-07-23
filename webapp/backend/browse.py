@@ -699,6 +699,71 @@ def authors_map(_: dict = Depends(_main.require_viewer)) -> AuthorMapResponse:
     return AuthorMapResponse(nodes=nodes)
 
 
+class AuthorMatrixCell(BaseModel):
+    score: float
+    shared_word_count: int
+
+
+class AuthorMatrixResponse(BaseModel):
+    authors: list[str]              # seriated (leaf) order -- row/column labels, in order
+    grid: list[list[AuthorMatrixCell]]  # grid[i][j] compares authors[i] to authors[j]
+
+
+@router.get("/api/browse/authors/matrix", response_model=AuthorMatrixResponse)
+def authors_matrix(_: dict = Depends(_main.require_viewer)) -> AuthorMatrixResponse:
+    """The seriated similarity matrix/heatmap: the same top-N authors as
+    the cluster map, ordered by compute_author_clustering's hierarchical-
+    clustering leaf order so similar authors sit near each other and form
+    visible blocks -- an alphabetical or random order would scatter
+    related authors across the grid instead. Unlike author_similarity's
+    own top-k-only storage, every cell here is a genuine pairwise score,
+    including pairs that missed both sides' top-k cutoff -- this is the
+    one place that question has an answer at all. Reads straight from
+    author_cluster_run, computed once alongside the map and dendrogram
+    (no new computation)."""
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"SELECT leaf_order, grid FROM {_main.SCHEMA}.author_cluster_run WHERE id = 1")
+        row = cur.fetchone()
+    if row is None:
+        return AuthorMatrixResponse(authors=[], grid=[])
+    leaf_order, grid = row
+    cells = [[AuthorMatrixCell(score=c[0], shared_word_count=c[1]) for c in grid_row] for grid_row in grid]
+    return AuthorMatrixResponse(authors=leaf_order, grid=cells)
+
+
+class DendrogramNode(BaseModel):
+    author: str | None = None       # set on leaves only
+    size: int                       # number of leaves in this subtree
+    distance: float | None = None   # merge height -- unset on leaves (they merge at nothing)
+    left: "DendrogramNode | None" = None
+    right: "DendrogramNode | None" = None
+
+
+DendrogramNode.model_rebuild()
+
+
+class AuthorDendrogramResponse(BaseModel):
+    tree: DendrogramNode | None     # None if no clustering run has completed yet
+    leaf_order: list[str]
+
+
+@router.get("/api/browse/authors/dendrogram", response_model=AuthorDendrogramResponse)
+def authors_dendrogram(_: dict = Depends(_main.require_viewer)) -> AuthorDendrogramResponse:
+    """The dendrogram: the same clustering run's linkage tree, straight
+    from author_cluster_run (no new computation) -- the clearest
+    hierarchical narrative of the three global views ("this author's
+    whole branch shares X"), and the one that scales best to more authors
+    since a deep tree can be explored by collapsing subtrees rather than
+    needing every leaf visible at once like the map or matrix do."""
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"SELECT tree_json, leaf_order FROM {_main.SCHEMA}.author_cluster_run WHERE id = 1")
+        row = cur.fetchone()
+    if row is None:
+        return AuthorDendrogramResponse(tree=None, leaf_order=[])
+    tree_json, leaf_order = row
+    return AuthorDendrogramResponse(tree=tree_json, leaf_order=leaf_order)
+
+
 # --- /api/browse/words ----------------------------------------------------------
 
 class BrowseWordRow(BaseModel):

@@ -820,3 +820,48 @@ def test_authors_map_returns_precomputed_clusters():
         assert by_author["Alpha0"]["book_count"] == 1
     finally:
         restore()
+
+
+@pg
+def test_authors_matrix_and_dendrogram_read_the_same_clustering_run():
+    schema = "cc_test_authors_matrix_dendrogram"
+    client, conn, restore = _setup(schema)
+    try:
+        from concordance import db as _db
+
+        alpha_authors = [f"Alpha{i}" for i in range(5)]
+        beta_authors = [f"Beta{i}" for i in range(5)]
+        alpha_words = [_insert_word(conn, schema, f"alphaword{i}") for i in range(10)]
+        beta_words = [_insert_word(conn, schema, f"betaword{i}") for i in range(10)]
+        for i, author in enumerate(alpha_authors):
+            book = _insert_book(conn, schema, f"Alpha Book {i}", author=author)
+            for w in alpha_words:
+                _link(conn, schema, w, book)
+        for i, author in enumerate(beta_authors):
+            book = _insert_book(conn, schema, f"Beta Book {i}", author=author)
+            for w in beta_words:
+                _link(conn, schema, w, book)
+        conn.commit()
+
+        _db.compute_author_clustering(conn, schema, top_n=200, n_clusters=2)
+
+        matrix_resp = client.get("/api/browse/authors/matrix")
+        assert matrix_resp.status_code == 200
+        matrix = matrix_resp.json()
+        assert len(matrix["authors"]) == 10
+        assert len(matrix["grid"]) == 10 and len(matrix["grid"][0]) == 10
+        # An author compared with itself: perfect overlap.
+        self_idx = matrix["authors"].index("Alpha0")
+        assert matrix["grid"][self_idx][self_idx]["score"] == pytest.approx(1.0, abs=1e-6)
+
+        dendro_resp = client.get("/api/browse/authors/dendrogram")
+        assert dendro_resp.status_code == 200
+        dendro = dendro_resp.json()
+        assert set(dendro["leaf_order"]) == set(alpha_authors) | set(beta_authors)
+        # Same leaf set as the matrix -- both endpoints reading the same
+        # author_cluster_run row, not two different computations.
+        assert set(dendro["leaf_order"]) == set(matrix["authors"])
+        assert dendro["tree"]["size"] == 10
+        assert dendro["tree"]["left"] is not None and dendro["tree"]["right"] is not None
+    finally:
+        restore()
