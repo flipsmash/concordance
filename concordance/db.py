@@ -1618,7 +1618,18 @@ def compute_book_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 
 
     stored = 0
     with conn.cursor() as cur:
-        cur.execute(f"DELETE FROM {s}.book_similarity WHERE book_a_id = ANY(%s)", (book_ids,))
+        # Unqualified (limit=0, the normal/maintain case): truncate the whole
+        # table, not just WHERE book_a_id = ANY(book_ids) -- a book that HAD
+        # rows last run but is no longer in scope this run (word_book fully
+        # emptied, an exclusion filter added, etc.) would otherwise keep its
+        # stale rows forever, since it'd never again appear on either side of
+        # a targeted delete. Only skip the full wipe when --limit narrows
+        # this run to a deliberate subset, where nuking everyone else's rows
+        # would be destructive instead of correct.
+        if limit:
+            cur.execute(f"DELETE FROM {s}.book_similarity WHERE book_a_id = ANY(%s)", (book_ids,))
+        else:
+            cur.execute(f"DELETE FROM {s}.book_similarity")
         for i, a in enumerate(book_ids, 1):
             candidates = [
                 (b, dot[a][b] / (norm[a] * norm[b]), shared[a][b])
@@ -1637,6 +1648,16 @@ def compute_book_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 
                 conn.commit()
     conn.commit()
     return {"books": len(book_ids), "pairs_stored": stored}
+
+
+# book.author values that are an aggregation label, not an actual author --
+# an anthology's shared vocabulary owes nothing to any individual writer, so
+# treating "Various"/"Unknown Author"/etc. as a real author in the
+# relatedness graph produces spurious, meaningless similarity scores (a
+# high-book-count phantom author that ends up "related" to nearly everyone).
+# Checked against the real corpus (2026-07-23): these four cover every
+# non-name book.author value.
+PLACEHOLDER_AUTHORS = frozenset({"Various", "Unknown Author", "Unknown", "Anonymous"})
 
 
 def compute_author_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
@@ -1673,11 +1694,13 @@ def compute_author_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int 
     from collections import defaultdict
 
     s = _safe_schema(schema)
+    placeholders = list(PLACEHOLDER_AUTHORS)
     with conn.cursor() as cur:
         cur.execute(f"""SELECT count(DISTINCT b.author) FROM {s}.word_book wb
                         JOIN {s}.word w ON w.id = wb.word_id
                         JOIN {s}.book b ON b.id = wb.book_id
-                        WHERE w.active AND b.author IS NOT NULL AND b.author <> ''""")
+                        WHERE w.active AND b.author IS NOT NULL AND b.author <> ''
+                          AND NOT (b.author = ANY(%s))""", (placeholders,))
         n_authors = cur.fetchone()[0]
         if n_authors < 2:
             conn.commit()  # see compute_book_similarity's own early-return commit note
@@ -1688,7 +1711,8 @@ def compute_author_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int 
                         JOIN {s}.word w ON w.id = wb.word_id
                         JOIN {s}.book b ON b.id = wb.book_id
                         WHERE w.active AND b.author IS NOT NULL AND b.author <> ''
-                        GROUP BY wb.word_id""")
+                          AND NOT (b.author = ANY(%s))
+                        GROUP BY wb.word_id""", (placeholders,))
         max_df = max_df_fraction * n_authors
         idf = {wid: math.log(n_authors / df) for wid, df in cur.fetchall() if df <= max_df}
 
@@ -1700,7 +1724,8 @@ def compute_author_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int 
                         JOIN {s}.word w ON w.id = wb.word_id
                         JOIN {s}.book b ON b.id = wb.book_id
                         WHERE w.active AND b.author IS NOT NULL AND b.author <> ''
-                          AND wb.word_id = ANY(%s)""", (list(idf.keys()),))
+                          AND NOT (b.author = ANY(%s))
+                          AND wb.word_id = ANY(%s)""", (placeholders, list(idf.keys())))
         authors_by_word: dict[int, list[str]] = defaultdict(list)
         for wid, author in cur.fetchall():
             authors_by_word[wid].append(author)
@@ -1729,7 +1754,16 @@ def compute_author_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int 
 
     stored = 0
     with conn.cursor() as cur:
-        cur.execute(f"DELETE FROM {s}.author_similarity WHERE author_a = ANY(%s)", (author_names,))
+        # See compute_book_similarity's identical comment: a targeted delete
+        # only reaches authors still in scope THIS run, so an author who
+        # drops out of scope (PLACEHOLDER_AUTHORS gaining an entry, their
+        # last book losing its words, etc.) would keep stale rows forever.
+        # Found live: adding "Anonymous" et al. to PLACEHOLDER_AUTHORS left
+        # their old author_similarity rows behind under the targeted delete.
+        if limit:
+            cur.execute(f"DELETE FROM {s}.author_similarity WHERE author_a = ANY(%s)", (author_names,))
+        else:
+            cur.execute(f"DELETE FROM {s}.author_similarity")
         for i, a in enumerate(author_names, 1):
             candidates = [
                 (b, dot[a][b] / (norm[a] * norm[b]), shared[a][b])

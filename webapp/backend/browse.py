@@ -41,6 +41,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from concordance import usas_domains
+from concordance.db import PLACEHOLDER_AUTHORS
 from webapp.backend import main as _main
 
 router = APIRouter()
@@ -424,7 +425,13 @@ def author_related(
 ) -> AuthorRelatedResponse:
     """An author's most vocabulary-related authors, precomputed by
     `concordance author-similarity` -- same lexical-overlap metric and same
-    top-k-table-read shape as book_related."""
+    top-k-table-read shape as book_related. PLACEHOLDER_AUTHORS ("Various",
+    "Unknown Author", ...) are aggregation labels, not real authors --
+    author_similarity never has rows for them (see compute_author_similarity),
+    so they 404 here too rather than returning a center with an always-empty
+    related list."""
+    if author in PLACEHOLDER_AUTHORS:
+        raise HTTPException(status_code=404, detail="author not found")
     with _main.get_conn() as conn, conn.cursor() as cur:
         cur.execute(f"""SELECT count(DISTINCT b.id), count(DISTINCT w.id)
                         FROM {_main.SCHEMA}.book b
@@ -472,9 +479,10 @@ def authors_relatedness(
                         LEFT JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
                         LEFT JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id AND w.active
                         WHERE b.author IS NOT NULL AND b.author <> ''
+                          AND NOT (b.author = ANY(%s))
                         GROUP BY b.author
                         ORDER BY book_count DESC
-                        LIMIT %s""", (limit,))
+                        LIMIT %s""", (list(PLACEHOLDER_AUTHORS), limit))
         authors = cur.fetchall()
         author_names = [r[0] for r in authors]
 
