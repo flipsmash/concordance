@@ -416,6 +416,33 @@ def quizzable(
                   f"{dist.get('excluded',0)} excluded")
 
 
+@app.command("book-similarity")
+def book_similarity(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    top_k: int = typer.Option(12, "--top-k", help="Related books stored per book."),
+    min_shared_words: int = typer.Option(3, "--min-shared-words",
+                                          help="Minimum shared rare-word count for a pair to be stored at all."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of books (re)computed."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Compute each book's top-k most vocabulary-related books (IDF-weighted
+    cosine similarity over shared active words -- lexical usage overlap,
+    not semantic similarity; a different axis from the word-embedding
+    graph). Always recomputes every book in scope -- IDF weights are
+    corpus-wide and shift whenever any book's vocabulary changes."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    with console.status("[bold]Computing book vocabulary overlap…"):
+        stats = db.compute_book_similarity(conn, schema, limit=limit, top_k=top_k,
+                                           min_shared_words=min_shared_words)
+    conn.close()
+    console.print(f"[green]✓[/green] book-similarity: [bold]{stats['books']}[/bold] books "
+                  f"-> [bold]{stats['pairs_stored']}[/bold] related-book pairs stored")
+
+
 @app.command("dedupe-plurals")
 def dedupe_plurals(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
@@ -749,6 +776,7 @@ def maintain(
     skip_difficulty: bool = typer.Option(False, "--skip-difficulty"),
     skip_quizdef: bool = typer.Option(False, "--skip-quizdef"),
     skip_quizzable: bool = typer.Option(False, "--skip-quizzable"),
+    skip_book_similarity: bool = typer.Option(False, "--skip-book-similarity"),
     skip_wordnik: bool = typer.Option(False, "--skip-wordnik", help="Skip the wordnik-pron fetch step."),
     skip_ipa: bool = typer.Option(False, "--skip-ipa", help="Skip the ipa backfill step."),
     skip_embed: bool = typer.Option(False, "--skip-embed"),
@@ -756,15 +784,16 @@ def maintain(
 ) -> None:
     """Run the full post-ingest maintenance chain in dependency order:
     fill-definitions -> classify -> normalize-pos -> ngram -> archaic ->
-    difficulty -> quizdef -> quizzable -> wordnik-pron -> ipa -> embed. This
-    is the whole documented sequence from the README's "Backfilling
-    definitions" / "Enrichment & scoring" / "Pronunciation audio" /
-    "Semantic distance" sections, chained into one command instead of eleven
-    to remember and re-order by hand. `load-taxonomy` and `train-fasttext`
-    are deliberately excluded — both are one-time/occasional holistic setup,
-    not per-batch maintenance (see their own docstrings); Commons/Azure audio
-    steps stay separate too, since Commons rate-limits hard and is meant to
-    run for hours unattended on its own.
+    difficulty -> quizdef -> quizzable -> book-similarity -> wordnik-pron ->
+    ipa -> embed. This is the whole documented sequence from the README's
+    "Backfilling definitions" / "Enrichment & scoring" / "Definition-quality
+    cleanup" / "Pronunciation audio" / "Semantic distance" sections, chained
+    into one command instead of twelve to remember and re-order by hand.
+    `load-taxonomy` and `train-fasttext` are deliberately excluded — both
+    are one-time/occasional holistic setup, not per-batch maintenance (see
+    their own docstrings); Commons/Azure audio steps stay separate too,
+    since Commons rate-limits hard and is meant to run for hours unattended
+    on its own.
 
     fill-definitions used to be two separate steps here (refill then deepen)
     that each re-entered the definition cascade from scratch on the same
@@ -851,6 +880,14 @@ def maintain(
                       f"{dist.get('excluded',0)} excluded")
     else:
         console.print("[dim]quizzable skipped.[/dim]")
+
+    if not skip_book_similarity:
+        with console.status("[bold]Computing book vocabulary overlap…"):
+            stats = db.compute_book_similarity(conn, schema, limit=limit)
+        console.print(f"[green]✓[/green] book-similarity: [bold]{stats['books']}[/bold] books "
+                      f"-> [bold]{stats['pairs_stored']}[/bold] related-book pairs stored")
+    else:
+        console.print("[dim]book-similarity skipped.[/dim]")
 
     if not skip_wordnik:
         stats = db.fetch_wordnik_pronunciations(conn, schema, only_missing=True, limit=limit)

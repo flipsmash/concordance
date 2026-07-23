@@ -927,3 +927,115 @@ def test_expand_synonym_definitions_strips_css_junk_and_is_idempotent(monkeypatc
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
     conn.close()
+
+
+@pg
+def test_compute_book_similarity_idf_weighting_and_thresholds():
+    # 4 books. book1/book2 share 4 rare words (each appearing in ONLY those
+    # two books) -- should score highly and be stored both directions.
+    # book1/book4 share exactly 1 rare word -- below min_shared_words,
+    # must NOT be stored. A word common to ALL 4 books must be excluded
+    # from scoring entirely (max_df_fraction) and not inflate shared_word_count.
+    # book3 shares nothing with anyone.
+    from concordance.model import Candidate
+
+    schema = "cc_test_book_similarity"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    def word(lemma):
+        c = Candidate(lemma=lemma, pos="NOUN")
+        c.definition = f"definition of {lemma}"
+        return c
+
+    common = word("commonword")
+    rares = [word(f"rareword{i}") for i in range(4)]
+    onerare = word("onerare")
+    unique3 = [word(f"uniqueword{i}") for i in range(3)]
+
+    db.sync_book_results(conn, "Book One", kept=[common, *rares, onerare], rejected=[], schema=schema)
+    db.sync_book_results(conn, "Book Two", kept=[common, *rares], rejected=[], schema=schema)
+    db.sync_book_results(conn, "Book Three", kept=[common, *unique3], rejected=[], schema=schema)
+    db.sync_book_results(conn, "Book Four", kept=[common, onerare], rejected=[], schema=schema)
+
+    stats = db.compute_book_similarity(conn, schema, min_shared_words=3)
+    assert stats["books"] == 4
+
+    with conn.cursor() as cur:
+        cur.execute(f"select id, title from {schema}.book")
+        ids = {title: bid for bid, title in cur.fetchall()}
+
+        # book1/book2: 4 shared rare words, both directions stored.
+        cur.execute(f"""select score, shared_word_count from {schema}.book_similarity
+                        where book_a_id=%s and book_b_id=%s""", (ids["Book One"], ids["Book Two"]))
+        row = cur.fetchone()
+        assert row is not None
+        score, shared_count = row
+        assert shared_count == 4          # the common word must NOT be counted
+        # book1 has one extra idf-included word (onerare) book2 doesn't share,
+        # so cosine is 4/(sqrt(5)*sqrt(4)) = 2/sqrt(5) ~= 0.894, not 1.0.
+        assert 0.85 < score < 0.95
+        cur.execute(f"""select score, shared_word_count from {schema}.book_similarity
+                        where book_a_id=%s and book_b_id=%s""", (ids["Book Two"], ids["Book One"]))
+        assert cur.fetchone() == (score, shared_count)   # symmetric, both directions stored
+
+        # book1/book4: only 1 shared rare word -- below min_shared_words, not stored.
+        cur.execute(f"""select 1 from {schema}.book_similarity
+                        where book_a_id=%s and book_b_id=%s""", (ids["Book One"], ids["Book Four"]))
+        assert cur.fetchone() is None
+
+        # book3 shares nothing -- no rows at all involving it.
+        cur.execute(f"""select count(*) from {schema}.book_similarity
+                        where book_a_id=%s or book_b_id=%s""", (ids["Book Three"], ids["Book Three"]))
+        assert cur.fetchone() == (0,)
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_compute_book_similarity_respects_top_k_and_is_idempotent():
+    from concordance.model import Candidate
+
+    schema = "cc_test_book_similarity_topk"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    def word(lemma):
+        c = Candidate(lemma=lemma, pos="NOUN")
+        c.definition = f"definition of {lemma}"
+        return c
+
+    # "hub" shares 3 rare words with each of 3 other books -- with top_k=2,
+    # only its 2 best-scoring neighbors should be stored.
+    shared_sets = [[word(f"book{b}word{i}") for i in range(3)] for b in range(3)]
+    hub_words = [w for group in shared_sets for w in group]
+    db.sync_book_results(conn, "Hub", kept=hub_words, rejected=[], schema=schema)
+    for b in range(3):
+        db.sync_book_results(conn, f"Leaf{b}", kept=shared_sets[b], rejected=[], schema=schema)
+
+    stats1 = db.compute_book_similarity(conn, schema, top_k=2, min_shared_words=3)
+    assert stats1["books"] == 4
+
+    with conn.cursor() as cur:
+        cur.execute(f"select id from {schema}.book where title='Hub'")
+        hub_id = cur.fetchone()[0]
+        cur.execute(f"select count(*) from {schema}.book_similarity where book_a_id=%s", (hub_id,))
+        assert cur.fetchone() == (2,)   # capped at top_k, not all 3 leaves
+
+    # Re-running must not duplicate rows (always-recompute, not append).
+    db.compute_book_similarity(conn, schema, top_k=2, min_shared_words=3)
+    with conn.cursor() as cur:
+        cur.execute(f"select count(*) from {schema}.book_similarity where book_a_id=%s", (hub_id,))
+        assert cur.fetchone() == (2,)
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()

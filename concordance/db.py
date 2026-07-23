@@ -116,6 +116,26 @@ CREATE TABLE IF NOT EXISTS {s}.word_ngram (
     fetched_at     timestamptz NOT NULL DEFAULT now()
 );
 
+-- Each book's top-k most vocabulary-related books (IDF-weighted cosine
+-- similarity over shared active words -- see compute_book_similarity),
+-- NOT a full all-pairs matrix: storing only the top-k neighbors per book
+-- keeps this O(k*n_books), flat as the corpus grows, matching this
+-- project's own no-fixed-corpus-scale principle. Both directions are
+-- stored (a related to b AND b related to a as separate rows) so "book
+-- X's related books" is always a single indexed WHERE book_a_id=X, no
+-- UNION/OR needed -- the same "one row per lookup direction" shape
+-- sessions(token) already uses for the identical reason.
+CREATE TABLE IF NOT EXISTS {s}.book_similarity (
+    book_a_id          integer NOT NULL REFERENCES {s}.book(id) ON DELETE CASCADE,
+    book_b_id          integer NOT NULL REFERENCES {s}.book(id) ON DELETE CASCADE,
+    score              double precision NOT NULL,
+    shared_word_count  integer NOT NULL,
+    updated_at         timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (book_a_id, book_b_id)
+);
+CREATE INDEX IF NOT EXISTS book_similarity_rank_idx
+    ON {s}.book_similarity (book_a_id, score DESC);
+
 CREATE TABLE IF NOT EXISTS {s}.word_audio (
     word_id      integer PRIMARY KEY REFERENCES {s}.word(id) ON DELETE CASCADE,
     source       text,          -- 'commons' | 'azure' | 'none' (looked up, nothing found)
@@ -1476,6 +1496,115 @@ def compute_quizzable(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> dic
                 (wid, ok, reason or None))
     conn.commit()
     return dict(dist)
+
+
+def compute_book_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
+                            top_k: int = 12, min_shared_words: int = 3,
+                            max_df_fraction: float = 0.5) -> dict:
+    """`concordance book-similarity` / `maintain`'s book-similarity step:
+    each book's top-k most vocabulary-related books, by IDF-weighted cosine
+    similarity over shared ACTIVE words -- lexical usage overlap, not
+    semantic similarity (that's the existing word_embedding graph's job; a
+    different axis, deliberately not duplicated here).
+
+    Always recomputes everything in scope (no only-missing gate, same
+    reasoning as archaic/difficulty/quizzable): IDF weights are corpus-wide,
+    so they shift whenever ANY book's word_book membership changes, not
+    just the book being looked at.
+
+    Why cosine, not raw Jaccard: an earlier bug in this same file
+    (browse_books/browse_authors, see their docstrings) is exactly what
+    unweighted overlap reproduces -- a word shared by nearly every book
+    (the/said/table) counts the same as a shared "cangue", so common words
+    would dominate every score. IDF weighting fixes that; cosine (rather
+    than a weighted Jaccard) also avoids penalizing a short book for having
+    a small vocabulary relative to a long one it otherwise overlaps with
+    almost entirely, since cosine normalizes each book's own vector
+    magnitude away.
+
+    `max_df_fraction` (default 0.5): words appearing in more than half of
+    all books are excluded from the similarity computation entirely, not
+    just down-weighted. Not merely a performance shortcut (though it is
+    one -- without it, a self-join for computing shared-word contributions
+    is combinatorial in how many books each word appears in, and a handful
+    of ubiquitous words would dominate the join's cost) -- ln(N/df) for
+    such a word is already close to zero, so this is a near-lossless
+    approximation of the same math, expressed as a scale-independent
+    fraction rather than a fixed count so it stays correct as the corpus
+    grows. `shared_word_count` (an explainability field, not used for
+    ranking) only counts words that passed this same filter -- "N shared
+    RARE words" is a more honest, more on-brand number to show a user here
+    than a raw count dominated by function words."""
+    import math
+    from collections import defaultdict
+
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT count(DISTINCT wb.book_id) FROM {s}.word_book wb
+                        JOIN {s}.word w ON w.id = wb.word_id WHERE w.active""")
+        n_books = cur.fetchone()[0]
+        if n_books < 2:
+            return {"books": n_books, "pairs_stored": 0}
+
+        cur.execute(f"""SELECT wb.word_id, count(DISTINCT wb.book_id) AS df
+                        FROM {s}.word_book wb JOIN {s}.word w ON w.id = wb.word_id
+                        WHERE w.active GROUP BY wb.word_id""")
+        max_df = max_df_fraction * n_books
+        idf = {wid: math.log(n_books / df) for wid, df in cur.fetchall() if df <= max_df}
+
+        if not idf:
+            return {"books": n_books, "pairs_stored": 0}
+
+        cur.execute(f"""SELECT wb.word_id, wb.book_id FROM {s}.word_book wb
+                        JOIN {s}.word w ON w.id = wb.word_id
+                        WHERE w.active AND wb.word_id = ANY(%s)""", (list(idf.keys()),))
+        books_by_word: dict[int, list[int]] = defaultdict(list)
+        for wid, bid in cur.fetchall():
+            books_by_word[wid].append(bid)
+
+    norm_sq: dict[int, float] = defaultdict(float)
+    for wid, books in books_by_word.items():
+        w = idf[wid] ** 2
+        for bid in books:
+            norm_sq[bid] += w
+    norm = {bid: math.sqrt(v) for bid, v in norm_sq.items()}
+
+    dot: dict[int, dict[int, float]] = defaultdict(lambda: defaultdict(float))
+    shared: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
+    for wid, books in books_by_word.items():
+        w2 = idf[wid] ** 2
+        for i, a in enumerate(books):
+            for b in books[i + 1:]:
+                dot[a][b] += w2
+                dot[b][a] += w2
+                shared[a][b] += 1
+                shared[b][a] += 1
+
+    book_ids = list(norm.keys())
+    if limit:
+        book_ids = book_ids[: int(limit)]
+
+    stored = 0
+    with conn.cursor() as cur:
+        cur.execute(f"DELETE FROM {s}.book_similarity WHERE book_a_id = ANY(%s)", (book_ids,))
+        for i, a in enumerate(book_ids, 1):
+            candidates = [
+                (b, dot[a][b] / (norm[a] * norm[b]), shared[a][b])
+                for b in dot[a] if shared[a][b] >= min_shared_words and norm[b] > 0
+            ]
+            candidates.sort(key=lambda t: t[1], reverse=True)
+            for b, score, shared_count in candidates[:top_k]:
+                cur.execute(
+                    f"""INSERT INTO {s}.book_similarity (book_a_id, book_b_id, score, shared_word_count, updated_at)
+                        VALUES (%s,%s,%s,%s, now())
+                        ON CONFLICT (book_a_id, book_b_id) DO UPDATE SET
+                            score=EXCLUDED.score, shared_word_count=EXCLUDED.shared_word_count, updated_at=now()""",
+                    (a, b, score, shared_count))
+                stored += 1
+            if i % 200 == 0:
+                conn.commit()
+    conn.commit()
+    return {"books": len(book_ids), "pairs_stored": stored}
 
 
 def compute_definition_embeddings(conn, schema: str = DEFAULT_SCHEMA, only_missing: bool = True,
