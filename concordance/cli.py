@@ -278,6 +278,9 @@ def classify(
     limit: int = typer.Option(0, "--limit", "-l", help="Only classify the first N words (0 = all)."),
     only_missing: bool = typer.Option(False, "--only-missing", help="Only classify words that have no category yet."),
     batch: int = typer.Option(0, "--batch", help="Override the batch size (smaller = fewer omissions)."),
+    commit_every: int = typer.Option(200, "--commit-every",
+                                      help="Commit to the DB after every N words, not just once at the end -- "
+                                           "so a crash mid-run loses at most one partial chunk, not everything."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Tag every word in the DB with USAS categories (LLM + WordNet-Domains prior)."""
@@ -289,7 +292,8 @@ def classify(
     cfg = Config()
     if model:
         cfg.model_path = str(model)
-    stats = classify_and_store(conn, schema, cfg, limit, only_missing=only_missing, batch=batch or None)
+    stats = classify_and_store(conn, schema, cfg, limit, only_missing=only_missing, batch=batch or None,
+                               commit_every=commit_every)
     conn.close()
     console.print(f"[green]✓[/green] classified [bold]{stats['classified']}[/bold]/{stats['words']} words "
                   f"-> {stats['assignments']} category assignments")

@@ -150,9 +150,26 @@ def _parse(text: str):
 
 
 def classify_and_store(conn, schema: str, cfg: Config | None = None, limit: int = 0,
-                       only_missing: bool = False, batch: int | None = None) -> dict:
+                       only_missing: bool = False, batch: int | None = None,
+                       commit_every: int = 200) -> dict:
     """Classify every word in {schema}.word and write tags to word_category.
-    Idempotent for the LLM-sourced rows (cleared and rewritten each run)."""
+    Idempotent for the LLM-sourced rows (cleared and rewritten each run).
+
+    Commits every `commit_every` words, not once at the end -- this is by
+    far the longest-running maintain step (an hours-to-days local-LLM pass
+    over the whole backlog when there's one), so a crash partway through
+    used to lose every word classified so far, no matter how close to
+    done it was: the old code held the whole run's results in memory and
+    issued exactly one conn.commit() after the entire batch finished.
+    Found live: a run crashed ~3 hours in with zero word_category rows
+    written. Chunking is safe to do here without changing what gets
+    classified -- Classifier.classify() already just loops over its own
+    internal self.batch-sized (default 15) LLM calls with no state shared
+    across them, so calling it once per outer chunk instead of once on
+    the full item list produces identical per-word results. Paired with
+    only_missing's own re-select-what's-still-missing query, a killed and
+    restarted run resumes close to where it left off instead of
+    re-classifying from scratch."""
     ssch = db._safe_schema(schema)
     with conn.cursor() as cur:
         where = (" WHERE NOT EXISTS (SELECT 1 FROM " + ssch + ".word_category wc WHERE wc.word_id=word.id)"
@@ -165,38 +182,49 @@ def classify_and_store(conn, schema: str, cfg: Config | None = None, limit: int 
 
     items = [{"word": r[1], "pos": r[2] or "", "definition": r[3] or "",
               "sentence": r[4] or "", "_id": r[0]} for r in rows]
-    clf = Classifier(cfg)
+    clf = Classifier(cfg)  # loaded once, reused for every chunk below
     if batch:
         clf.batch = batch
-    tags = clf.classify(items)
 
     stats = {"words": len(items), "classified": 0, "assignments": 0}
+
+    # One-time clear, before any chunk's writes -- only_missing's WHERE
+    # already guarantees these words have no rows to clear; a --limit run
+    # clears just its own row ids up front so the chunk loop below only
+    # ever needs to INSERT, never worry about stale rows from a prior run
+    # over the same ids.
     with conn.cursor() as cur:
         if only_missing:
-            pass                                   # these words have no rows to clear
+            pass
         elif limit:
             cur.execute(f"DELETE FROM {ssch}.word_category WHERE source IN ('llm','wnd+llm') "
                         "AND word_id = ANY(%s)", ([r[0] for r in rows],))
         else:
             cur.execute(f"DELETE FROM {ssch}.word_category WHERE source IN ('llm','wnd+llm')")
-        for it in items:
-            codes = tags.get(it["word"].lower(), [])
-            if not codes:
-                continue
-            stats["classified"] += 1
-            prior_fields = {c[0] for c in wndomains.usas_prior(it["word"])}
-            for rank, code in enumerate(codes):
-                cid = code_id.get(code)
-                if cid is None:
-                    continue
-                src = "wnd+llm" if code[0] in prior_fields else "llm"
-                conf = round(max(0.4, 1.0 - 0.25 * rank), 2)
-                cur.execute(
-                    f"""INSERT INTO {ssch}.word_category (word_id, category_id, confidence, source, is_primary)
-                        VALUES (%s,%s,%s,%s,%s)
-                        ON CONFLICT (word_id, category_id) DO UPDATE SET
-                            confidence=EXCLUDED.confidence, source=EXCLUDED.source, is_primary=EXCLUDED.is_primary""",
-                    (it["_id"], cid, conf, src, rank == 0))
-                stats["assignments"] += 1
     conn.commit()
+
+    for start in range(0, len(items), max(1, commit_every)):
+        chunk = items[start:start + commit_every]
+        tags = clf.classify(chunk)
+        with conn.cursor() as cur:
+            for it in chunk:
+                codes = tags.get(it["word"].lower(), [])
+                if not codes:
+                    continue
+                stats["classified"] += 1
+                prior_fields = {c[0] for c in wndomains.usas_prior(it["word"])}
+                for rank, code in enumerate(codes):
+                    cid = code_id.get(code)
+                    if cid is None:
+                        continue
+                    src = "wnd+llm" if code[0] in prior_fields else "llm"
+                    conf = round(max(0.4, 1.0 - 0.25 * rank), 2)
+                    cur.execute(
+                        f"""INSERT INTO {ssch}.word_category (word_id, category_id, confidence, source, is_primary)
+                            VALUES (%s,%s,%s,%s,%s)
+                            ON CONFLICT (word_id, category_id) DO UPDATE SET
+                                confidence=EXCLUDED.confidence, source=EXCLUDED.source, is_primary=EXCLUDED.is_primary""",
+                        (it["_id"], cid, conf, src, rank == 0))
+                    stats["assignments"] += 1
+        conn.commit()
     return stats
