@@ -7,6 +7,7 @@ against a disposable schema."""
 from __future__ import annotations
 
 import os
+from urllib.parse import quote
 
 import pytest
 
@@ -495,5 +496,106 @@ def test_book_related_returns_precomputed_neighbors_sorted_by_score():
 
         # Unknown book -> 404, not a silent empty response.
         assert client.get("/api/browse/books/999999/related").status_code == 404
+    finally:
+        restore()
+
+
+@pg
+def test_author_related_returns_neighbors_sorted_by_score():
+    schema = "cc_test_author_related"
+    client, conn, restore = _setup(schema)
+    try:
+        book_a = _insert_book(conn, schema, "Book A", author="Author A")
+        book_b = _insert_book(conn, schema, "Book B", author="Author B")
+        book_c = _insert_book(conn, schema, "Book C", author="Author C")
+        # A 4th, disjoint author -- needed so N_authors=4 and
+        # _author_similarity_candidates' max_df_fraction (default 0.5, so
+        # max_df=2) doesn't exclude the Author A/B shared words (author-df=2)
+        # entirely -- same reasoning as book_related's own test.
+        book_d = _insert_book(conn, schema, "Book D", author="Author D")
+        _link(conn, schema, _insert_word(conn, schema, "bookdword"), book_d)
+
+        # Author A/B share 3 words; Author A/C share only 1 -- default
+        # min_shared_words=3 means only A/B should come back as related.
+        for i in range(3):
+            w = _insert_word(conn, schema, f"shared{i}")
+            _link(conn, schema, w, book_a)
+            _link(conn, schema, w, book_b)
+        w_c = _insert_word(conn, schema, "onlyc")
+        _link(conn, schema, w_c, book_a)
+        _link(conn, schema, w_c, book_c)
+        conn.commit()
+
+        resp = client.get(f"/api/browse/authors/{quote('Author A')}/related")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        assert data["center"]["id"] == "Author A"
+        assert data["center"]["ring"] == 0
+        assert data["center"]["book_count"] == 1
+        assert data["center"]["word_count"] == 4  # 3 shared + onlyc
+
+        related_ids = [n["id"] for n in data["nodes"] if n["ring"] == 1]
+        assert related_ids == ["Author B"]  # Author C excluded -- below min_shared_words
+
+        assert len(data["edges"]) == 1
+        edge = data["edges"][0]
+        assert edge["source"] == "Author A" and edge["target"] == "Author B"
+        assert edge["shared_word_count"] == 3
+        # All 4 of Author A's words here have author-df=2 (shared with
+        # exactly one other author each), so every word's idf is identical
+        # and the cosine collapses to sqrt(3)/2 -- see
+        # _author_similarity_candidates' docstring in browse.py for why
+        # author-df (not book-df) is the denominator that makes this number
+        # meaningfully different from book_related's metric.
+        assert edge["score"] == pytest.approx(0.8660254, abs=1e-4)
+
+        # Unknown author -> 404, not a silent empty response.
+        assert client.get(f"/api/browse/authors/{quote('Nobody')}/related").status_code == 404
+    finally:
+        restore()
+
+
+@pg
+def test_authors_relatedness_global_graph_dedupes_mutual_edges():
+    schema = "cc_test_authors_relatedness"
+    client, conn, restore = _setup(schema)
+    try:
+        book_a = _insert_book(conn, schema, "Book A", author="Author A")
+        book_b = _insert_book(conn, schema, "Book B", author="Author B")
+        book_c = _insert_book(conn, schema, "Book C", author="Author C")
+        book_d = _insert_book(conn, schema, "Book D", author="Author D")
+        _link(conn, schema, _insert_word(conn, schema, "bookdword"), book_d)
+        for i in range(3):
+            w = _insert_word(conn, schema, f"shared{i}")
+            _link(conn, schema, w, book_a)
+            _link(conn, schema, w, book_b)
+        # Author C needs at least one linked word too -- otherwise only 3
+        # authors (A, B, D) have any active vocabulary, dropping n_authors
+        # to 3 and making max_df_fraction (0.5 * 3 = 1.5) exclude the A/B
+        # shared words (author-df=2) entirely, same trap the per-author test
+        # and book_related's own test both had to route around.
+        w_c = _insert_word(conn, schema, "onlyc")
+        _link(conn, schema, w_c, book_a)
+        _link(conn, schema, w_c, book_c)
+        conn.commit()
+
+        resp = client.get("/api/browse/authors/relatedness")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        node_ids = {n["id"] for n in data["nodes"]}
+        assert node_ids == {"Author A", "Author B", "Author C", "Author D"}
+
+        # Author A and Author B are mutual top-k neighbors of each other --
+        # the edge must appear exactly once, not once per direction (cosine
+        # similarity is symmetric, so a naive per-author candidate dump
+        # would double it).
+        matching = [
+            e for e in data["edges"]
+            if {e["source"], e["target"]} == {"Author A", "Author B"}
+        ]
+        assert len(matching) == 1
+        assert matching[0]["shared_word_count"] == 3
     finally:
         restore()
