@@ -35,6 +35,7 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
   const viewRef = useRef(null)
   const containerRef = useRef(null)
   const fgRef = useRef(null)
+  const chaseIntervalRef = useRef(null)
 
   useEffect(() => {
     const el = containerRef.current
@@ -84,8 +85,29 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
               ?.d3Force('link')
               ?.distance((l) => LINK_DISTANCE_MAX - l.score * (LINK_DISTANCE_MAX - LINK_DISTANCE_MIN))
             fgRef.current?.d3ReheatSimulation?.()
-            fgRef.current?.zoomToFit(ZOOM_MS, ZOOM_PADDING)
-          }, ZOOM_MS)
+            // A single zoomToFit right after reheating races the simulation:
+            // ForceGraph2D mounts and starts ticking with d3-force's default
+            // 30px link distance BEFORE this effect gets a chance to
+            // override it, so one immediate fit locks pan/zoom to that
+            // tight, wrong-scale snapshot -- then the reheated sim spends
+            // the next several seconds expanding toward the real (up to
+            // LINK_DISTANCE_MAX) distances, drifting nodes outside the
+            // already-locked viewport (visible live as edges running off
+            // the edge of the canvas with no node circle in sight). Chase
+            // it instead: re-fit every 300ms for a few seconds so the view
+            // tracks the layout as it actually expands, rather than
+            // guessing a single delay that's either too early (mid-
+            // expansion) or wastes time waiting past when it's needed.
+            // onEngineStop's own zoomToFit (below) is the final correction
+            // once the simulation naturally cools down.
+            if (chaseIntervalRef.current) clearInterval(chaseIntervalRef.current)
+            let elapsed = 0
+            chaseIntervalRef.current = setInterval(() => {
+              fgRef.current?.zoomToFit(300, ZOOM_PADDING)
+              elapsed += 300
+              if (elapsed > 4000) clearInterval(chaseIntervalRef.current)
+            }, 300)
+          }, 50)
         })
         .catch((err) => setError(err.message || 'failed to load graph'))
         .finally(() => setLoading(false))
@@ -123,16 +145,20 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
     [],
   )
 
+  // Shared by both paintNode (visible canvas) and paintNodePointerArea
+  // (force-graph's separate hit-test canvas, see below) so the clickable
+  // area always matches what's drawn, not force-graph's small nodeRelSize-
+  // based default.
+  const nodeRadius = useCallback((node) => (node.id === center?.id ? NODE_RADIUS_CENTER : NODE_RADIUS_RELATED), [center])
+
   const paintNode = useMemo(
     () => (node, ctx, globalScale) => {
       const isCenter = node.id === center?.id
-      const r = isCenter ? NODE_RADIUS_CENTER : NODE_RADIUS_RELATED
-      ctx.globalAlpha = isCenter ? 1 : 0.6
+      const r = nodeRadius(node)
       ctx.beginPath()
       ctx.arc(node.x, node.y, r, 0, 2 * Math.PI)
       ctx.fillStyle = cssVar('--accent', '#aa3bff')
       ctx.fill()
-      ctx.globalAlpha = 1
       if (isCenter) {
         ctx.lineWidth = 2 / globalScale
         ctx.strokeStyle = cssVar('--text-h', '#08060d')
@@ -145,7 +171,26 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
       ctx.fillStyle = cssVar('--text-h', '#08060d')
       ctx.fillText(getLabel(node), node.x, node.y + r + 2)
     },
-    [center, getLabel],
+    [center, getLabel, nodeRadius],
+  )
+
+  // force-graph hit-tests clicks against a separate, hidden "shadow" canvas
+  // that it renders itself -- nodeCanvasObject (paintNode, above) is ONLY
+  // ever applied to the visible canvas (confirmed in force-graph's source:
+  // nodeCanvasObject is bound to state.forceGraph alone, not
+  // state.shadowGraph), so without this, the shadow canvas falls back to
+  // its own default hit-circle sized from nodeRelSize (~4px radius) instead
+  // of the 8-14px circles actually drawn -- clicks anywhere but the exact
+  // center pixel silently miss. Found live: every attempted node click
+  // failed to fire onNodeClick at all, even dead-on-visually inside a node.
+  const paintNodePointerArea = useMemo(
+    () => (node, color, ctx) => {
+      ctx.fillStyle = color
+      ctx.beginPath()
+      ctx.arc(node.x, node.y, nodeRadius(node), 0, 2 * Math.PI)
+      ctx.fill()
+    },
+    [nodeRadius],
   )
 
   const nodeLabel = useCallback(
@@ -186,6 +231,7 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
             nodeLabel={nodeLabel}
             nodeCanvasObject={paintNode}
             nodeCanvasObjectMode={() => 'replace'}
+            nodePointerAreaPaint={paintNodePointerArea}
             linkColor={() => cssVar('--border', '#e5e4e7')}
             linkWidth={(l) => 0.5 + l.score * 2.5}
             linkLabel={linkLabel}
