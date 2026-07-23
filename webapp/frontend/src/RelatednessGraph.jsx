@@ -108,9 +108,19 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
   const graphData = useMemo(
     () => ({
       nodes: rawGraph.nodes.map((n) => ({ ...n })),
-      links: rawGraph.edges.map((e) => ({ source: e.source, target: e.target, score: e.score })),
+      links: rawGraph.edges.map((e) => ({
+        source: e.source,
+        target: e.target,
+        score: e.score,
+        shared_word_count: e.shared_word_count,
+      })),
     }),
     [rawGraph],
+  )
+
+  const linkLabel = useCallback(
+    (l) => `${l.shared_word_count} shared words · ${(l.score * 100).toFixed(0)}% overlap`,
+    [],
   )
 
   const paintNode = useMemo(
@@ -178,6 +188,7 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
             nodeCanvasObjectMode={() => 'replace'}
             linkColor={() => cssVar('--border', '#e5e4e7')}
             linkWidth={(l) => 0.5 + l.score * 2.5}
+            linkLabel={linkLabel}
             onNodeClick={handleNodeClick}
             onEngineStop={handleEngineStop}
           />
