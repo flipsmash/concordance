@@ -21,6 +21,7 @@ function WorkDetail() {
   const navigate = useNavigate()
   const [book, setBook] = useState(null)
   const [bands, setBands] = useState([])
+  const [related, setRelated] = useState(null) // null = not loaded yet, [] = loaded, none found
 
   useEffect(() => {
     fetch(`${API_BASE}/api/browse/books?book_id=${bookId}`)
@@ -34,6 +35,26 @@ function WorkDetail() {
       .then((res) => res.json())
       .then(setBands)
       .catch(() => {})
+  }, [bookId])
+
+  useEffect(() => {
+    setRelated(null)
+    fetch(`${API_BASE}/api/browse/books/${bookId}/related?top_k=6`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!data) {
+          setRelated([])
+          return
+        }
+        // shared_word_count lives on the edge, not the node -- join by id.
+        const sharedById = new Map(data.edges.map((e) => [e.target, e.shared_word_count]))
+        setRelated(
+          data.nodes
+            .filter((n) => n.ring === 1)
+            .map((n) => ({ ...n, shared_word_count: sharedById.get(n.id) ?? 0 })),
+        )
+      })
+      .catch(() => setRelated([]))
   }, [bookId])
 
   const { items, total, page, setPage, loading, error, totalPages } = usePagedTable({
@@ -68,6 +89,36 @@ function WorkDetail() {
       <section className="browse-facets work-detail-section">
         <h2 className="work-detail-heading">Difficulty distribution</h2>
         <DifficultyHistogram bands={bands} />
+      </section>
+
+      <section className="browse-facets work-detail-section">
+        <h2 className="work-detail-heading">Related books</h2>
+        {related === null ? (
+          <p className="muted">Loading…</p>
+        ) : related.length > 0 ? (
+          <>
+            <ul className="related-list">
+              {related.map((b) => (
+                <li
+                  key={b.id}
+                  className="related-row"
+                  onClick={() => navigate(`/app/authors/${encodeURIComponent(b.author || '')}/${b.id}`)}
+                >
+                  <span className="related-name">{b.title}</span>
+                  <span className="related-meta">
+                    {b.author && <span>{b.author}</span>}
+                    <span className="related-shared">{b.shared_word_count} shared words</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <Link to={`/app/authors/${encodeURIComponent(author)}/${bookId}/relatedness`} className="related-see-graph">
+              See full relatedness graph →
+            </Link>
+          </>
+        ) : (
+          <p className="muted">Not enough shared vocabulary with other books yet.</p>
+        )}
       </section>
 
       {error && <div className="error-banner">{error}</div>}

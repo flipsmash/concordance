@@ -1,7 +1,10 @@
+import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { usePagedTable } from './usePagedTable'
 import './Authors.css'
+import './WorkDetail.css'
 
+const API_BASE = ''
 const PAGE_SIZE = 30
 
 function difficultySummary(book) {
@@ -22,6 +25,7 @@ function difficultySummary(book) {
 function AuthorWorks() {
   const { author } = useParams()
   const navigate = useNavigate()
+  const [related, setRelated] = useState(null) // null = not loaded yet, [] = loaded, none found
 
   const { items, total, page, setPage, loading, error, totalPages } = usePagedTable({
     endpoint: '/api/browse/books',
@@ -31,12 +35,55 @@ function AuthorWorks() {
     extraParams: { author },
   })
 
+  useEffect(() => {
+    setRelated(null)
+    fetch(`${API_BASE}/api/browse/authors/${encodeURIComponent(author)}/related?top_k=6`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!data) {
+          setRelated([])
+          return
+        }
+        // shared_word_count lives on the edge, not the node -- join by id.
+        const sharedById = new Map(data.edges.map((e) => [e.target, e.shared_word_count]))
+        setRelated(
+          data.nodes
+            .filter((n) => n.ring === 1)
+            .map((n) => ({ ...n, shared_word_count: sharedById.get(n.id) ?? 0 })),
+        )
+      })
+      .catch(() => setRelated([]))
+  }, [author])
+
   return (
     <div className="authors-page">
       <header className="authors-header">
         <h1>{author}</h1>
         <Link to="/app/authors" className="authors-back-link">← All authors</Link>
       </header>
+
+      <section>
+        <h2 className="work-detail-heading">Related authors</h2>
+        {related === null ? (
+          <p className="muted">Loading…</p>
+        ) : related.length > 0 ? (
+          <>
+            <ul className="related-list">
+              {related.map((a) => (
+                <li key={a.id} className="related-row" onClick={() => navigate(`/app/authors/${encodeURIComponent(a.id)}`)}>
+                  <span className="related-name">{a.id}</span>
+                  <span className="related-shared">{a.shared_word_count} shared words</span>
+                </li>
+              ))}
+            </ul>
+            <Link to={`/app/authors/${encodeURIComponent(author)}/relatedness`} className="related-see-graph">
+              See full relatedness graph →
+            </Link>
+          </>
+        ) : (
+          <p className="muted">Not enough shared vocabulary with other authors yet.</p>
+        )}
+      </section>
 
       {error && <div className="error-banner">{error}</div>}
 

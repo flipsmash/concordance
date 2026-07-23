@@ -20,6 +20,9 @@ const QuizReview = lazy(() => import('./QuizReview'))
 const Authors = lazy(() => import('./Authors'))
 const AuthorWorks = lazy(() => import('./AuthorWorks'))
 const WorkDetail = lazy(() => import('./WorkDetail'))
+const BookRelatedness = lazy(() => import('./BookRelatedness'))
+const AuthorRelatedness = lazy(() => import('./AuthorRelatedness'))
+const AuthorsRelatedness = lazy(() => import('./AuthorsRelatedness'))
 
 function tabClass({ isActive }) {
   return isActive ? 'tab active' : 'tab'
@@ -136,6 +139,14 @@ function App() {
             }
           />
           <Route
+            path="authors/relatedness"
+            element={
+              <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                <AuthorsRelatedness />
+              </Suspense>
+            }
+          />
+          <Route
             path="authors/:author"
             element={
               <Suspense fallback={<div className="page-loading">Loading…</div>}>
@@ -144,10 +155,26 @@ function App() {
             }
           />
           <Route
+            path="authors/:author/relatedness"
+            element={
+              <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                <AuthorRelatedness />
+              </Suspense>
+            }
+          />
+          <Route
             path="authors/:author/:bookId"
             element={
               <Suspense fallback={<div className="page-loading">Loading…</div>}>
                 <WorkDetail />
+              </Suspense>
+            }
+          />
+          <Route
+            path="authors/:author/:bookId/relatedness"
+            element={
+              <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                <BookRelatedness />
               </Suspense>
             }
           />
