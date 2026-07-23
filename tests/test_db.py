@@ -1039,3 +1039,112 @@ def test_compute_book_similarity_respects_top_k_and_is_idempotent():
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
     conn.close()
+
+
+@pg
+def test_compute_author_similarity_idf_weighting_and_thresholds():
+    # Same shape as test_compute_book_similarity_idf_weighting_and_thresholds,
+    # one book per author -- author-df here is identical to book-df since
+    # each author only has one book, so the expected numbers match exactly.
+    # The author-vs-book-df distinction (an author with SEVERAL books
+    # containing the same word must count once, not once per book) is
+    # covered separately below via the DISTINCT-authors_by_word case.
+    from concordance.model import Candidate
+
+    schema = "cc_test_author_similarity"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    def word(lemma):
+        c = Candidate(lemma=lemma, pos="NOUN")
+        c.definition = f"definition of {lemma}"
+        return c
+
+    common = word("commonword")
+    rares = [word(f"rareword{i}") for i in range(4)]
+    onerare = word("onerare")
+    unique3 = [word(f"uniqueword{i}") for i in range(3)]
+
+    db.sync_book_results(conn, "Book One", kept=[common, *rares, onerare], rejected=[], schema=schema, author="Author One")
+    db.sync_book_results(conn, "Book Two", kept=[common, *rares], rejected=[], schema=schema, author="Author Two")
+    db.sync_book_results(conn, "Book Three", kept=[common, *unique3], rejected=[], schema=schema, author="Author Three")
+    db.sync_book_results(conn, "Book Four", kept=[common, onerare], rejected=[], schema=schema, author="Author Four")
+
+    stats = db.compute_author_similarity(conn, schema, min_shared_words=3)
+    assert stats["authors"] == 4
+
+    with conn.cursor() as cur:
+        cur.execute(f"""select score, shared_word_count from {schema}.author_similarity
+                        where author_a=%s and author_b=%s""", ("Author One", "Author Two"))
+        row = cur.fetchone()
+        assert row is not None
+        score, shared_count = row
+        assert shared_count == 4          # the common word must NOT be counted
+        assert 0.85 < score < 0.95        # same math as the book-level test: 2/sqrt(5)
+
+        cur.execute(f"""select score, shared_word_count from {schema}.author_similarity
+                        where author_a=%s and author_b=%s""", ("Author Two", "Author One"))
+        assert cur.fetchone() == (score, shared_count)   # symmetric, both directions stored
+
+        # Author One/Four: only 1 shared rare word -- below min_shared_words.
+        cur.execute(f"""select 1 from {schema}.author_similarity
+                        where author_a=%s and author_b=%s""", ("Author One", "Author Four"))
+        assert cur.fetchone() is None
+
+        # Author Three shares nothing -- no rows at all involving it.
+        cur.execute(f"""select count(*) from {schema}.author_similarity
+                        where author_a=%s or author_b=%s""", ("Author Three", "Author Three"))
+        assert cur.fetchone() == (0,)
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_compute_author_similarity_dedupes_shared_words_across_an_authors_own_books():
+    # The one case that genuinely diverges from book-level math: an author
+    # with SEVERAL books containing the same word must have that word count
+    # once toward their own vector, not once per book -- otherwise the
+    # DISTINCT in compute_author_similarity's authors_by_word query would be
+    # a no-op and this test would silently pass even if it were removed.
+    from concordance.model import Candidate
+
+    schema = "cc_test_author_similarity_dedupe"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    def word(lemma):
+        c = Candidate(lemma=lemma, pos="NOUN")
+        c.definition = f"definition of {lemma}"
+        return c
+
+    shared = [word(f"shared{i}") for i in range(3)]
+    # Two more, unrelated authors: with only {Prolific, Solo} (n_authors=2),
+    # max_df_fraction (0.5 * 2 = 1) would exclude `shared` (author-df=2)
+    # entirely -- same trap the book-level tests route around with a 4th
+    # book. Two fillers bring n_authors to 4, max_df=2, so df=2 survives.
+    db.sync_book_results(conn, "Prolific Book A", kept=list(shared), rejected=[], schema=schema, author="Prolific")
+    db.sync_book_results(conn, "Prolific Book B", kept=list(shared), rejected=[], schema=schema, author="Prolific")
+    db.sync_book_results(conn, "Solo Book", kept=list(shared), rejected=[], schema=schema, author="Solo")
+    db.sync_book_results(conn, "Filler Book", kept=[word("fillerword")], rejected=[], schema=schema, author="Filler")
+    db.sync_book_results(conn, "Filler2 Book", kept=[word("filler2word")], rejected=[], schema=schema, author="Filler2")
+
+    db.compute_author_similarity(conn, schema, min_shared_words=3)
+
+    with conn.cursor() as cur:
+        cur.execute(f"""select shared_word_count from {schema}.author_similarity
+                        where author_a=%s and author_b=%s""", ("Prolific", "Solo"))
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == 3   # not 6 -- each shared word counts once per author, not once per book
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()

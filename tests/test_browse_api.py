@@ -526,6 +526,9 @@ def test_author_related_returns_neighbors_sorted_by_score():
         _link(conn, schema, w_c, book_c)
         conn.commit()
 
+        from concordance import db as _db
+        _db.compute_author_similarity(conn, schema)
+
         resp = client.get(f"/api/browse/authors/{quote('Author A')}/related")
         assert resp.status_code == 200
         data = resp.json()
@@ -545,8 +548,8 @@ def test_author_related_returns_neighbors_sorted_by_score():
         # All 4 of Author A's words here have author-df=2 (shared with
         # exactly one other author each), so every word's idf is identical
         # and the cosine collapses to sqrt(3)/2 -- see
-        # _author_similarity_candidates' docstring in browse.py for why
-        # author-df (not book-df) is the denominator that makes this number
+        # compute_author_similarity's docstring in db.py for why author-df
+        # (not book-df) is the denominator that makes this number
         # meaningfully different from book_related's metric.
         assert edge["score"] == pytest.approx(0.8660254, abs=1e-4)
 
@@ -579,6 +582,9 @@ def test_authors_relatedness_global_graph_dedupes_mutual_edges():
         _link(conn, schema, w_c, book_a)
         _link(conn, schema, w_c, book_c)
         conn.commit()
+
+        from concordance import db as _db
+        _db.compute_author_similarity(conn, schema)
 
         resp = client.get("/api/browse/authors/relatedness")
         assert resp.status_code == 200

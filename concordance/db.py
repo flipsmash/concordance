@@ -136,6 +136,27 @@ CREATE TABLE IF NOT EXISTS {s}.book_similarity (
 CREATE INDEX IF NOT EXISTS book_similarity_rank_idx
     ON {s}.book_similarity (book_a_id, score DESC);
 
+-- Same shape as book_similarity, one level up: each author's top-k most
+-- vocabulary-related authors. Originally shipped as an on-demand,
+-- compute-every-request query (the relatedness-visualization plan's own
+-- reasoning: "authors are dozens today, full O(n^2) pairwise at request
+-- time is cheap") -- that premise was wrong the moment it met real data
+-- (~3,500 authors, not dozens; full-corpus timing came back at ~39s), so
+-- this was precomputed instead, matching book_similarity's pattern rather
+-- than trying to make the on-demand query fast enough for an HTTP request.
+-- author_a/author_b are plain text (book.author has no own table), not an
+-- integer FK.
+CREATE TABLE IF NOT EXISTS {s}.author_similarity (
+    author_a           text NOT NULL,
+    author_b           text NOT NULL,
+    score              double precision NOT NULL,
+    shared_word_count  integer NOT NULL,
+    updated_at         timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (author_a, author_b)
+);
+CREATE INDEX IF NOT EXISTS author_similarity_rank_idx
+    ON {s}.author_similarity (author_a, score DESC);
+
 CREATE TABLE IF NOT EXISTS {s}.word_audio (
     word_id      integer PRIMARY KEY REFERENCES {s}.word(id) ON DELETE CASCADE,
     source       text,          -- 'commons' | 'azure' | 'none' (looked up, nothing found)
@@ -1616,6 +1637,117 @@ def compute_book_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 
                 conn.commit()
     conn.commit()
     return {"books": len(book_ids), "pairs_stored": stored}
+
+
+def compute_author_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
+                              top_k: int = 12, min_shared_words: int = 3,
+                              max_df_fraction: float = 0.5) -> dict:
+    """`concordance author-similarity` / `maintain`'s author-similarity step:
+    each author's top-k most vocabulary-related authors, by IDF-weighted
+    cosine similarity over shared ACTIVE words -- same metric shape as
+    compute_book_similarity, one level up (an author's vector is the union
+    of their books' word sets).
+
+    Originally shipped as an on-demand, compute-per-request query in
+    browse.py, on the plan's own reasoning that "authors are dozens today,
+    full O(n^2) pairwise at request time is cheap." That premise didn't
+    survive contact with the real corpus: ~3,500 authors, and a full-corpus
+    timing came back at ~39s for a SINGLE request -- unusable behind an
+    HTTP endpoint, let alone one a "See full relatedness graph" link would
+    hit on every click. Precomputed here instead, exactly like books.
+
+    IDF is *author*-document-frequency (ln(N_authors / df_authors)), NOT
+    book-level df: a word spread across 30 books all by one author has high
+    book-df (looks common) but low author-df (df=1) -- it's a distinctive
+    marker of that one author, and book-df would wash out exactly the
+    signal that matters at this granularity. See compute_book_similarity's
+    own docstring for the cosine-over-Jaccard and max_df_fraction reasoning,
+    which applies identically here.
+
+    An author with several books containing the same word must count once
+    per word, not once per book -- the DISTINCT below is load-bearing, not
+    decorative: without it, an author with many books sharing a word would
+    have that word's weight (and every pair involving them) inflated by
+    however many of their own books happen to contain it."""
+    import math
+    from collections import defaultdict
+
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT count(DISTINCT b.author) FROM {s}.word_book wb
+                        JOIN {s}.word w ON w.id = wb.word_id
+                        JOIN {s}.book b ON b.id = wb.book_id
+                        WHERE w.active AND b.author IS NOT NULL AND b.author <> ''""")
+        n_authors = cur.fetchone()[0]
+        if n_authors < 2:
+            conn.commit()  # see compute_book_similarity's own early-return commit note
+            return {"authors": n_authors, "pairs_stored": 0}
+
+        cur.execute(f"""SELECT wb.word_id, count(DISTINCT b.author) AS df
+                        FROM {s}.word_book wb
+                        JOIN {s}.word w ON w.id = wb.word_id
+                        JOIN {s}.book b ON b.id = wb.book_id
+                        WHERE w.active AND b.author IS NOT NULL AND b.author <> ''
+                        GROUP BY wb.word_id""")
+        max_df = max_df_fraction * n_authors
+        idf = {wid: math.log(n_authors / df) for wid, df in cur.fetchall() if df <= max_df}
+
+        if not idf:
+            conn.commit()
+            return {"authors": n_authors, "pairs_stored": 0}
+
+        cur.execute(f"""SELECT DISTINCT wb.word_id, b.author FROM {s}.word_book wb
+                        JOIN {s}.word w ON w.id = wb.word_id
+                        JOIN {s}.book b ON b.id = wb.book_id
+                        WHERE w.active AND b.author IS NOT NULL AND b.author <> ''
+                          AND wb.word_id = ANY(%s)""", (list(idf.keys()),))
+        authors_by_word: dict[int, list[str]] = defaultdict(list)
+        for wid, author in cur.fetchall():
+            authors_by_word[wid].append(author)
+
+    norm_sq: dict[str, float] = defaultdict(float)
+    for wid, authors in authors_by_word.items():
+        w = idf[wid] ** 2
+        for a in authors:
+            norm_sq[a] += w
+    norm = {a: math.sqrt(v) for a, v in norm_sq.items()}
+
+    dot: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    shared: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for wid, authors in authors_by_word.items():
+        w2 = idf[wid] ** 2
+        for i, a in enumerate(authors):
+            for b in authors[i + 1:]:
+                dot[a][b] += w2
+                dot[b][a] += w2
+                shared[a][b] += 1
+                shared[b][a] += 1
+
+    author_names = list(norm.keys())
+    if limit:
+        author_names = author_names[: int(limit)]
+
+    stored = 0
+    with conn.cursor() as cur:
+        cur.execute(f"DELETE FROM {s}.author_similarity WHERE author_a = ANY(%s)", (author_names,))
+        for i, a in enumerate(author_names, 1):
+            candidates = [
+                (b, dot[a][b] / (norm[a] * norm[b]), shared[a][b])
+                for b in dot[a] if shared[a][b] >= min_shared_words and norm[b] > 0
+            ]
+            candidates.sort(key=lambda t: t[1], reverse=True)
+            for b, score, shared_count in candidates[:top_k]:
+                cur.execute(
+                    f"""INSERT INTO {s}.author_similarity (author_a, author_b, score, shared_word_count, updated_at)
+                        VALUES (%s,%s,%s,%s, now())
+                        ON CONFLICT (author_a, author_b) DO UPDATE SET
+                            score=EXCLUDED.score, shared_word_count=EXCLUDED.shared_word_count, updated_at=now()""",
+                    (a, b, score, shared_count))
+                stored += 1
+            if i % 200 == 0:
+                conn.commit()
+    conn.commit()
+    return {"authors": len(author_names), "pairs_stored": stored}
 
 
 def compute_definition_embeddings(conn, schema: str = DEFAULT_SCHEMA, only_missing: bool = True,

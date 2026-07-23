@@ -443,6 +443,35 @@ def book_similarity(
                   f"-> [bold]{stats['pairs_stored']}[/bold] related-book pairs stored")
 
 
+@app.command("author-similarity")
+def author_similarity(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    top_k: int = typer.Option(12, "--top-k", help="Related authors stored per author."),
+    min_shared_words: int = typer.Option(3, "--min-shared-words",
+                                          help="Minimum shared rare-word count for a pair to be stored at all."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of authors (re)computed."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Compute each author's top-k most vocabulary-related authors (same
+    IDF-weighted cosine metric as book-similarity, one level up -- an
+    author's vector is the union of their books' word sets). Originally
+    computed on demand per-request; moved to a precomputed table once real
+    corpus scale (~3,500 authors) made the on-demand query take ~39s.
+    Always recomputes every author in scope, same reasoning as
+    book-similarity."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    with console.status("[bold]Computing author vocabulary overlap…"):
+        stats = db.compute_author_similarity(conn, schema, limit=limit, top_k=top_k,
+                                             min_shared_words=min_shared_words)
+    conn.close()
+    console.print(f"[green]✓[/green] author-similarity: [bold]{stats['authors']}[/bold] authors "
+                  f"-> [bold]{stats['pairs_stored']}[/bold] related-author pairs stored")
+
+
 @app.command("dedupe-plurals")
 def dedupe_plurals(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
@@ -777,6 +806,7 @@ def maintain(
     skip_quizdef: bool = typer.Option(False, "--skip-quizdef"),
     skip_quizzable: bool = typer.Option(False, "--skip-quizzable"),
     skip_book_similarity: bool = typer.Option(False, "--skip-book-similarity"),
+    skip_author_similarity: bool = typer.Option(False, "--skip-author-similarity"),
     skip_wordnik: bool = typer.Option(False, "--skip-wordnik", help="Skip the wordnik-pron fetch step."),
     skip_ipa: bool = typer.Option(False, "--skip-ipa", help="Skip the ipa backfill step."),
     skip_embed: bool = typer.Option(False, "--skip-embed"),
@@ -784,8 +814,9 @@ def maintain(
 ) -> None:
     """Run the full post-ingest maintenance chain in dependency order:
     fill-definitions -> classify -> normalize-pos -> ngram -> archaic ->
-    difficulty -> quizdef -> quizzable -> book-similarity -> wordnik-pron ->
-    ipa -> embed. This is the whole documented sequence from the README's
+    difficulty -> quizdef -> quizzable -> book-similarity ->
+    author-similarity -> wordnik-pron -> ipa -> embed. This is the whole
+    documented sequence from the README's
     "Backfilling definitions" / "Enrichment & scoring" / "Definition-quality
     cleanup" / "Pronunciation audio" / "Semantic distance" sections, chained
     into one command instead of twelve to remember and re-order by hand.
@@ -888,6 +919,14 @@ def maintain(
                       f"-> [bold]{stats['pairs_stored']}[/bold] related-book pairs stored")
     else:
         console.print("[dim]book-similarity skipped.[/dim]")
+
+    if not skip_author_similarity:
+        with console.status("[bold]Computing author vocabulary overlap…"):
+            stats = db.compute_author_similarity(conn, schema, limit=limit)
+        console.print(f"[green]✓[/green] author-similarity: [bold]{stats['authors']}[/bold] authors "
+                      f"-> [bold]{stats['pairs_stored']}[/bold] related-author pairs stored")
+    else:
+        console.print("[dim]author-similarity skipped.[/dim]")
 
     if not skip_wordnik:
         stats = db.fetch_wordnik_pronunciations(conn, schema, only_missing=True, limit=limit)

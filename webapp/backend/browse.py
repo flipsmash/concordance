@@ -377,88 +377,14 @@ def book_related(
 
 
 # --- /api/browse/authors/{author}/related, /api/browse/authors/relatedness -----
-
-def _author_similarity_candidates(
-    conn, schema: str, *, min_shared_words: int = 3, max_df_fraction: float = 0.5, top_k: int = 8,
-) -> dict[str, list[tuple[str, float, int]]]:
-    """IDF-weighted cosine similarity between authors, by shared active
-    vocabulary -- same metric shape as concordance/db.py's
-    compute_book_similarity, but computed on demand: authors are dozens
-    today, not hundreds-and-growing like books, so full O(n^2) pairwise at
-    request time is cheap and there's no precomputed table to maintain.
-
-    IDF here is *author*-document-frequency (ln(N_authors / df_authors)),
-    deliberately NOT the book-level IDF book_similarity uses: a word used
-    across 30 books all by one author has high book-df (looks "common",
-    ~0 weight) but low author-df (df=1) -- it's a distinctive marker of
-    that one author, and book-df would wash out exactly the signal that
-    matters at this granularity.
-    """
-    import math
-    from collections import defaultdict
-
-    s = schema
-    with conn.cursor() as cur:
-        cur.execute(f"""SELECT count(DISTINCT b.author) FROM {s}.word_book wb
-                        JOIN {s}.word w ON w.id = wb.word_id
-                        JOIN {s}.book b ON b.id = wb.book_id
-                        WHERE w.active AND b.author IS NOT NULL AND b.author <> ''""")
-        n_authors = cur.fetchone()[0]
-        if n_authors < 2:
-            return {}
-
-        cur.execute(f"""SELECT wb.word_id, count(DISTINCT b.author) AS df
-                        FROM {s}.word_book wb
-                        JOIN {s}.word w ON w.id = wb.word_id
-                        JOIN {s}.book b ON b.id = wb.book_id
-                        WHERE w.active AND b.author IS NOT NULL AND b.author <> ''
-                        GROUP BY wb.word_id""")
-        max_df = max_df_fraction * n_authors
-        idf = {wid: math.log(n_authors / df) for wid, df in cur.fetchall() if df <= max_df}
-        if not idf:
-            return {}
-
-        # DISTINCT matters here: an author with several books containing the
-        # same word must appear once in authors_by_word[wid], not once per
-        # book -- otherwise dot/shared below double-counts that author's own
-        # weight and inflates every pair involving them.
-        cur.execute(f"""SELECT DISTINCT wb.word_id, b.author FROM {s}.word_book wb
-                        JOIN {s}.word w ON w.id = wb.word_id
-                        JOIN {s}.book b ON b.id = wb.book_id
-                        WHERE w.active AND b.author IS NOT NULL AND b.author <> ''
-                          AND wb.word_id = ANY(%s)""", (list(idf.keys()),))
-        authors_by_word: dict[int, list[str]] = defaultdict(list)
-        for wid, author in cur.fetchall():
-            authors_by_word[wid].append(author)
-
-    norm_sq: dict[str, float] = defaultdict(float)
-    for wid, authors in authors_by_word.items():
-        w2 = idf[wid] ** 2
-        for a in authors:
-            norm_sq[a] += w2
-    norm = {a: math.sqrt(v) for a, v in norm_sq.items()}
-
-    dot: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
-    shared: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    for wid, authors in authors_by_word.items():
-        w2 = idf[wid] ** 2
-        for i, a in enumerate(authors):
-            for b in authors[i + 1:]:
-                dot[a][b] += w2
-                dot[b][a] += w2
-                shared[a][b] += 1
-                shared[b][a] += 1
-
-    result: dict[str, list[tuple[str, float, int]]] = {}
-    for a in norm:
-        candidates = [
-            (b, dot[a][b] / (norm[a] * norm[b]), shared[a][b])
-            for b in dot[a] if shared[a][b] >= min_shared_words and norm[b] > 0
-        ]
-        candidates.sort(key=lambda t: t[1], reverse=True)
-        result[a] = candidates[:top_k]
-    return result
-
+#
+# Both read concordance/db.py's precomputed author_similarity table --
+# originally an on-demand per-request computation (the relatedness plan's
+# own reasoning: "authors are dozens today, full O(n^2) pairwise is
+# cheap"), until real data showed ~3,500 authors and a ~39s full-corpus
+# computation time. Moved to the same precompute-table pattern book_related
+# already used, populated by `concordance author-similarity` / `maintain`
+# (see compute_author_similarity's docstring for the metric itself).
 
 class AuthorGraphNode(BaseModel):
     id: str                  # author name -- string, unlike book/word graph
@@ -496,62 +422,79 @@ def author_related(
     top_k: int = Query(8, ge=1, le=20),
     _: dict = Depends(_main.require_viewer),
 ) -> AuthorRelatedResponse:
-    """An author's most vocabulary-related authors -- same lexical-overlap
-    metric as book_related, computed on demand rather than from a
-    precomputed table (see _author_similarity_candidates)."""
-    with _main.get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(f"""SELECT count(DISTINCT b.id), count(DISTINCT w.id)
-                            FROM {_main.SCHEMA}.book b
-                            LEFT JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
-                            LEFT JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id AND w.active
-                            WHERE b.author = %s""", (author,))
-            row = cur.fetchone()
-            if row is None or row[0] == 0:
-                raise HTTPException(status_code=404, detail="author not found")
-            center = AuthorGraphNode(id=author, ring=0, book_count=row[0], word_count=row[1])
-        candidates = _author_similarity_candidates(conn, _main.SCHEMA, top_k=top_k).get(author, [])
+    """An author's most vocabulary-related authors, precomputed by
+    `concordance author-similarity` -- same lexical-overlap metric and same
+    top-k-table-read shape as book_related."""
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"""SELECT count(DISTINCT b.id), count(DISTINCT w.id)
+                        FROM {_main.SCHEMA}.book b
+                        LEFT JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
+                        LEFT JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id AND w.active
+                        WHERE b.author = %s""", (author,))
+        row = cur.fetchone()
+        if row is None or row[0] == 0:
+            raise HTTPException(status_code=404, detail="author not found")
+        center = AuthorGraphNode(id=author, ring=0, book_count=row[0], word_count=row[1])
+
+        cur.execute(f"""SELECT author_b, score, shared_word_count
+                        FROM {_main.SCHEMA}.author_similarity
+                        WHERE author_a = %s
+                        ORDER BY score DESC LIMIT %s""", (author, top_k))
+        related = cur.fetchall()
 
     nodes = [center] + [
-        AuthorGraphNode(id=name, ring=1, book_count=None, word_count=None) for name, _score, _shared in candidates
+        AuthorGraphNode(id=r[0], ring=1, book_count=None, word_count=None) for r in related
     ]
     edges = [
-        AuthorGraphEdge(source=author, target=name, score=score, shared_word_count=shared)
-        for name, score, shared in candidates
+        AuthorGraphEdge(source=author, target=r[0], score=r[1], shared_word_count=r[2])
+        for r in related
     ]
     return AuthorRelatedResponse(center=center, nodes=nodes, edges=edges)
 
 
 @router.get("/api/browse/authors/relatedness", response_model=AuthorRelatednessGraph)
 def authors_relatedness(
-    top_k: int = Query(5, ge=1, le=20),
+    top_k: int = Query(5, ge=1, le=20, description="Neighbors per author, from author_similarity's stored top-k."),
+    limit: int = Query(60, ge=5, le=300, description="Cap on how many authors appear at all, by book count."),
     _: dict = Depends(_main.require_viewer),
 ) -> AuthorRelatednessGraph:
     """The global all-authors relatedness graph (secondary page, per the
-    relatedness-visualization plan) -- every author as a node, edges from
-    each author's own top-k candidate list, deduplicated (cosine is
-    symmetric, so a mutual top-k pair would otherwise appear twice)."""
-    with _main.get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(f"""SELECT b.author, count(DISTINCT b.id), count(DISTINCT w.id)
-                            FROM {_main.SCHEMA}.book b
-                            LEFT JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
-                            LEFT JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id AND w.active
-                            WHERE b.author IS NOT NULL AND b.author <> ''
-                            GROUP BY b.author""")
-            authors = cur.fetchall()
-        all_candidates = _author_similarity_candidates(conn, _main.SCHEMA, top_k=top_k)
+    relatedness-visualization plan). Real corpus scale (~3,500 authors)
+    makes an unbounded version both an expensive query and, more
+    importantly, an unreadable hairball in a force-directed layout -- so
+    `limit` restricts it to the `limit` authors with the most books
+    (proxy for "most represented in the corpus", so the busiest, most
+    interconnected part of the graph is what's shown by default), and
+    edges are only kept between two authors that both made the cut."""
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"""SELECT b.author, count(DISTINCT b.id) AS book_count, count(DISTINCT w.id) AS word_count
+                        FROM {_main.SCHEMA}.book b
+                        LEFT JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
+                        LEFT JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id AND w.active
+                        WHERE b.author IS NOT NULL AND b.author <> ''
+                        GROUP BY b.author
+                        ORDER BY book_count DESC
+                        LIMIT %s""", (limit,))
+        authors = cur.fetchall()
+        author_names = [r[0] for r in authors]
+
+        cur.execute(f"""SELECT author_a, author_b, score, shared_word_count FROM (
+                            SELECT author_a, author_b, score, shared_word_count,
+                                   row_number() OVER (PARTITION BY author_a ORDER BY score DESC) AS rn
+                            FROM {_main.SCHEMA}.author_similarity
+                            WHERE author_a = ANY(%s) AND author_b = ANY(%s)
+                        ) ranked WHERE rn <= %s""", (author_names, author_names, top_k))
+        rows = cur.fetchall()
 
     nodes = [AuthorGraphNode(id=r[0], ring=0, book_count=r[1], word_count=r[2]) for r in authors]
     seen_pairs: set[frozenset] = set()
     edges: list[AuthorGraphEdge] = []
-    for a, candidates in all_candidates.items():
-        for b, score, shared in candidates:
-            pair = frozenset((a, b))
-            if pair in seen_pairs:
-                continue
-            seen_pairs.add(pair)
-            edges.append(AuthorGraphEdge(source=a, target=b, score=score, shared_word_count=shared))
+    for a, b, score, shared in rows:
+        pair = frozenset((a, b))
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        edges.append(AuthorGraphEdge(source=a, target=b, score=score, shared_word_count=shared))
     return AuthorRelatednessGraph(nodes=nodes, edges=edges)
 
 
