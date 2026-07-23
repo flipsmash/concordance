@@ -1544,6 +1544,16 @@ def compute_book_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 
                         JOIN {s}.word w ON w.id = wb.word_id WHERE w.active""")
         n_books = cur.fetchone()[0]
         if n_books < 2:
+            # Closing the cursor does NOT end the connection's transaction --
+            # a bare SELECT still opens one in the default isolation level,
+            # and an early `return` here without an explicit commit leaves
+            # `conn` sitting "idle in transaction" indefinitely, holding
+            # locks that block anything needing DDL (a schema drop, another
+            # connection's ALTER TABLE) until the caller happens to touch
+            # this same connection again. Found live: a 2-book test schema
+            # hit this path, and a completely separate connection's DROP
+            # SCHEMA hung for 10+ minutes waiting on it.
+            conn.commit()
             return {"books": n_books, "pairs_stored": 0}
 
         cur.execute(f"""SELECT wb.word_id, count(DISTINCT wb.book_id) AS df
@@ -1553,6 +1563,7 @@ def compute_book_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 
         idf = {wid: math.log(n_books / df) for wid, df in cur.fetchall() if df <= max_df}
 
         if not idf:
+            conn.commit()  # same reasoning as the n_books < 2 early return above
             return {"books": n_books, "pairs_stored": 0}
 
         cur.execute(f"""SELECT wb.word_id, wb.book_id FROM {s}.word_book wb

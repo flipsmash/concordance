@@ -439,3 +439,61 @@ def test_domain_summary_includes_uncategorized_and_correct_total():
         assert len(plain_domains) == 6
     finally:
         restore()
+
+
+@pg
+def test_book_related_returns_precomputed_neighbors_sorted_by_score():
+    schema = "cc_test_book_related"
+    client, conn, restore = _setup(schema)
+    try:
+        from concordance import db as _db
+
+        book_a = _insert_book(conn, schema, "Book A", author="Author A")
+        book_b = _insert_book(conn, schema, "Book B", author="Author B")
+        book_c = _insert_book(conn, schema, "Book C", author="Author C")
+        # A 4th book with its own disjoint vocabulary: needed so N=4 and
+        # compute_book_similarity's max_df_fraction (default 0.5, so
+        # max_df=2) doesn't exclude the book_a/book_b shared words (df=2)
+        # from scoring entirely -- with only 3 books this test's own shared
+        # words would score zero everything, a real bug this exact test
+        # exposed once (see the db.compute_book_similarity commit history:
+        # an early-return-without-commit case this same 2-3-book scale
+        # triggered live, hanging a completely unrelated connection's
+        # DROP SCHEMA for 10+ minutes).
+        book_d = _insert_book(conn, schema, "Book D", author="Author D")
+        _link(conn, schema, _insert_word(conn, schema, "bookdword"), book_d)
+        # book_a/book_b share 3 rare words; book_a/book_c share only 1 --
+        # compute_book_similarity's own min_shared_words default (3) means
+        # only the book_a/book_b pair should be precomputed and returned.
+        for i in range(3):
+            w = _insert_word(conn, schema, f"shared{i}")
+            _link(conn, schema, w, book_a)
+            _link(conn, schema, w, book_b)
+        w_c = _insert_word(conn, schema, "onlyc")
+        _link(conn, schema, w_c, book_a)
+        _link(conn, schema, w_c, book_c)
+        conn.commit()
+
+        _db.compute_book_similarity(conn, schema)
+
+        resp = client.get(f"/api/browse/books/{book_a}/related")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        assert data["center"]["id"] == book_a
+        assert data["center"]["ring"] == 0
+        assert data["center"]["word_count"] == 4  # 3 shared + onlyc
+
+        related_ids = [n["id"] for n in data["nodes"] if n["ring"] == 1]
+        assert related_ids == [book_b]  # book_c excluded -- below min_shared_words
+
+        assert len(data["edges"]) == 1
+        edge = data["edges"][0]
+        assert edge["source"] == book_a and edge["target"] == book_b
+        assert edge["shared_word_count"] == 3
+        assert edge["score"] > 0
+
+        # Unknown book -> 404, not a silent empty response.
+        assert client.get("/api/browse/books/999999/related").status_code == 404
+    finally:
+        restore()

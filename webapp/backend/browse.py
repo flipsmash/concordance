@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from concordance import usas_domains
@@ -302,6 +302,78 @@ def browse_books(
         for r in rows
     ]
     return BookPage(items=items, total=total, page=page, page_size=page_size)
+
+
+# --- /api/browse/books/{id}/related -----------------------------------------
+
+class BookGraphNode(BaseModel):
+    id: int
+    title: str
+    author: str | None
+    ring: int              # 0 = center, 1 = a related book
+    word_count: int | None  # populated for the center only -- see book_related's
+                             # own comment for why a related node sizes off
+                             # shared_word_count instead (no extra JOIN needed)
+
+
+class BookGraphEdge(BaseModel):
+    source: int
+    target: int
+    score: float            # similarity -- HIGHER means more related. The
+                             # opposite of word_graph's GraphEdge.distance
+                             # (lower = closer) -- the frontend force-layout
+                             # must invert this (link length ~ 1 - score),
+                             # not reuse distance-is-already-right assumptions.
+    shared_word_count: int
+
+
+class BookRelatedResponse(BaseModel):
+    center: BookGraphNode
+    nodes: list[BookGraphNode]   # includes the center (ring=0) AND related books (ring=1)
+    edges: list[BookGraphEdge]
+
+
+@router.get("/api/browse/books/{book_id}/related", response_model=BookRelatedResponse)
+def book_related(
+    book_id: int,
+    top_k: int = Query(8, ge=1, le=20),
+    _: dict = Depends(_main.require_viewer),
+) -> BookRelatedResponse:
+    """A book's most vocabulary-related books, precomputed by
+    `concordance book-similarity` (concordance/db.py's compute_book_similarity)
+    -- lexical usage overlap (shared active words, IDF-weighted), NOT
+    semantic similarity (that's word_graph's job, at the word level). Serves
+    both the "Related books" list widget (read `nodes` where ring==1,
+    already sorted by score) and the drill-down graph page (render the
+    whole response) from a single cheap query -- unlike word_graph's
+    multi-hop BFS, this is a direct top-k table read, so there's no
+    separate expensive-vs-cheap split worth two endpoints for."""
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"""SELECT b.id, b.title, b.author, count(DISTINCT w.id)
+                        FROM {_main.SCHEMA}.book b
+                        LEFT JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
+                        LEFT JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id AND w.active
+                        WHERE b.id = %s GROUP BY b.id, b.title, b.author""", (book_id,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="book not found")
+        center = BookGraphNode(id=row[0], title=row[1], author=row[2], ring=0, word_count=row[3])
+
+        cur.execute(f"""SELECT b.id, b.title, b.author, bs.score, bs.shared_word_count
+                        FROM {_main.SCHEMA}.book_similarity bs
+                        JOIN {_main.SCHEMA}.book b ON b.id = bs.book_b_id
+                        WHERE bs.book_a_id = %s
+                        ORDER BY bs.score DESC LIMIT %s""", (book_id, top_k))
+        related = cur.fetchall()
+
+    nodes = [center] + [
+        BookGraphNode(id=r[0], title=r[1], author=r[2], ring=1, word_count=None) for r in related
+    ]
+    edges = [
+        BookGraphEdge(source=book_id, target=r[0], score=r[3], shared_word_count=r[4])
+        for r in related
+    ]
+    return BookRelatedResponse(center=center, nodes=nodes, edges=edges)
 
 
 # --- /api/browse/words ----------------------------------------------------------
