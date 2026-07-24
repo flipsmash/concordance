@@ -462,6 +462,20 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
         # idempotent column additions (CREATE TABLE IF NOT EXISTS won't alter an
         # existing table, so evolve columns explicitly)
         cur.execute(f"ALTER TABLE {s}.book ADD COLUMN IF NOT EXISTS author text")
+        # See concordance/archive_metadata.py -- word_count/distinct_nonstop_
+        # word_count are computed locally from each book's own archive/ text
+        # (Gutenberg boilerplate stripped first); publication_year is only
+        # ever populated when Gutenberg's catalog metadata states an exact
+        # year (rare -- confirmed live: 0/30 in a random corpus sample),
+        # publication_era is the far-more-common free-text fallback (e.g.
+        # "early 20th century") for when it doesn't. archive_path is repo-
+        # relative (e.g. "archive/1601 -- Twain, Mark.txt"), not absolute --
+        # portable across any checkout that also has archive/ populated.
+        cur.execute(f"ALTER TABLE {s}.book ADD COLUMN IF NOT EXISTS publication_year integer")
+        cur.execute(f"ALTER TABLE {s}.book ADD COLUMN IF NOT EXISTS publication_era text")
+        cur.execute(f"ALTER TABLE {s}.book ADD COLUMN IF NOT EXISTS word_count integer")
+        cur.execute(f"ALTER TABLE {s}.book ADD COLUMN IF NOT EXISTS distinct_nonstop_word_count integer")
+        cur.execute(f"ALTER TABLE {s}.book ADD COLUMN IF NOT EXISTS archive_path text")
         # word_book's PK (word_id, book_id) serves word-id-leading lookups (does
         # this word belong to book X) for free, but the browse feature's author/
         # book listing endpoints join book -> word_book on book_id, a direction
@@ -1780,6 +1794,33 @@ def compute_personal_difficulty(conn, schema: str = DEFAULT_SCHEMA, *, limit: in
                 conn.commit()
     conn.commit()
     return {"words": stored, "skipped_no_baseline": skipped_no_baseline}
+
+
+def get_book_by_title(conn, title: str, schema: str = DEFAULT_SCHEMA) -> tuple[int, str | None] | None:
+    """(book_id, existing archive_path) for a title, or None if no such book
+    -- `concordance archive-metadata` uses this to match an archive/
+    filename's parsed title (see cli.py's _parse_incoming_name) to its row."""
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT id, archive_path FROM {s}.book WHERE title = %s", (title,))
+        return cur.fetchone()
+
+
+def update_book_archive_metadata(conn, book_id: int, *, archive_path: str, word_count: int,
+                                  distinct_nonstop_word_count: int, publication_year: int | None,
+                                  publication_era: str | None, schema: str = DEFAULT_SCHEMA) -> None:
+    """Writes one book's concordance/archive_metadata.py-computed stats --
+    see that module's own docstring for what each field means and why
+    publication date is two columns, not one."""
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""UPDATE {s}.book SET archive_path=%s, word_count=%s,
+                    distinct_nonstop_word_count=%s, publication_year=%s, publication_era=%s
+                WHERE id=%s""",
+            (archive_path, word_count, distinct_nonstop_word_count, publication_year, publication_era, book_id),
+        )
+    conn.commit()
 
 
 def compute_book_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,

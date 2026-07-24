@@ -470,6 +470,88 @@ def refresh_rejected_index(
     console.print("[green]✓[/green] refresh-rejected-index: rejected_lemma_index refreshed")
 
 
+@app.command("archive-metadata")
+def archive_metadata_cmd(
+    archive_dir: Path = typer.Option(ARCHIVE_DIR, "--archive-dir", help="Directory of full-text files."),
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of files scanned (0 = all)."),
+    skip_network: bool = typer.Option(
+        False, "--skip-network",
+        help="Skip Gutenberg lookups; only compute word stats + archive_path."),
+    delay: float = typer.Option(0.3, "--delay", help="Seconds to wait between Gutenberg requests."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Backfill word_count/distinct_nonstop_word_count/archive_path (and,
+    best-effort, publication_year/publication_era) for every book whose
+    full text sits in archive/ -- see concordance/archive_metadata.py's own
+    docstring for the word-counting method and why publication date is two
+    columns, not one, neither reliably populated.
+
+    Only-missing by default (skips any book whose archive_path is already
+    set) so an interrupted run resumes without re-hitting the network for
+    books already done -- the Gutenberg lookup is the slow part (~11.5k
+    requests at a full corpus's scale, politely paced via --delay),
+    expected to run for hours on a full backlog. Deliberately not part of
+    `maintain`, same reasoning as wordnik-pron/commons-download."""
+    import time as _time
+
+    from . import archive_metadata as am
+
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+
+    if not archive_dir.is_dir():
+        console.print(f"[red]✗[/red] no such directory: {archive_dir}/")
+        raise typer.Exit(code=1)
+
+    files = sorted(p for p in archive_dir.iterdir() if p.suffix.lower() == ".txt")
+    if limit:
+        files = files[:limit]
+    console.print(f"Found [bold]{len(files)}[/bold] file(s) in {archive_dir}/.")
+
+    stats = {"processed": 0, "no_match": 0, "already_done": 0, "no_pub_info": 0}
+    for i, path in enumerate(files, 1):
+        title, _author = _parse_incoming_name(path)
+        found = db.get_book_by_title(conn, title, schema)
+        if found is None:
+            stats["no_match"] += 1
+            continue
+        book_id, existing_path = found
+        if existing_path:
+            stats["already_done"] += 1
+            continue
+
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        stripped = am.strip_gutenberg_boilerplate(raw)
+        word_count, distinct_nonstop = am.word_stats(stripped)
+
+        year, era = None, None
+        if not skip_network:
+            gutenberg_id = am.extract_gutenberg_id(raw)
+            if gutenberg_id:
+                year, era = am.fetch_publication_info(gutenberg_id)
+                if year is None and era is None:
+                    stats["no_pub_info"] += 1
+                _time.sleep(delay)
+
+        db.update_book_archive_metadata(
+            conn, book_id, archive_path=path.as_posix(), word_count=word_count,
+            distinct_nonstop_word_count=distinct_nonstop, publication_year=year,
+            publication_era=era, schema=schema,
+        )
+        stats["processed"] += 1
+        if i % 50 == 0:
+            console.print(f"  ...{i}/{len(files)} scanned, {stats['processed']} updated")
+
+    conn.close()
+    console.print(f"[green]✓[/green] archive-metadata: [bold]{stats['processed']}[/bold] books updated, "
+                  f"{stats['already_done']} already done, {stats['no_match']} had no matching book row"
+                  + (f", {stats['no_pub_info']} had no publication info found" if not skip_network else ""))
+
+
 @app.command("book-similarity")
 def book_similarity(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
