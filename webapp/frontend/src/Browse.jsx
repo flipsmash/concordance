@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import AddToSetMenu from './AddToSetMenu'
 import { useAuth } from './AuthContext'
 import AuthorSelect from './AuthorSelect'
 import MultiSelect from './MultiSelect'
@@ -198,6 +199,21 @@ function Browse() {
 
   const bandsTotal = bands.reduce((sum, b) => sum + b.word_count, 0) || 1
 
+  // --- bulk-select-into-a-set mode -------------------------------------------
+  // Local view state, not URL-synced (unlike the facets above) -- a selection
+  // is a working set for one visit, not something worth bookmarking/sharing.
+  const [selectMode, setSelectMode] = useState(false)
+  const [selectedIds, setSelectedIds] = useState([])
+
+  function toggleSelectMode() {
+    setSelectMode((m) => !m)
+    setSelectedIds([])
+  }
+
+  function toggleWordSelected(id) {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+  }
+
   function surpriseMe() {
     fetch(`${API_BASE}/api/browse/words?${facetSearchParams({ random: 'true' })}`)
       .then((res) => res.json())
@@ -235,6 +251,8 @@ function Browse() {
           <Link to="/app/visualizations" className="browse-quiz-link">Visualizations</Link>
           {' · '}
           <Link to="/app/quiz" className="browse-quiz-link">Take a quiz</Link>
+          {' · '}
+          <Link to="/app/sets" className="browse-quiz-link">My sets</Link>
           {' · '}
           {user?.username} · <button type="button" onClick={logout}>Log out</button>
         </div>
@@ -274,6 +292,13 @@ function Browse() {
           </label>
           <button type="button" className="browse-surprise" onClick={surpriseMe}>
             🎲 Surprise me
+          </button>
+          <button
+            type="button"
+            className={selectMode ? 'browse-select-toggle active' : 'browse-select-toggle'}
+            onClick={toggleSelectMode}
+          >
+            {selectMode ? 'Cancel select' : 'Select words'}
           </button>
         </div>
 
@@ -396,7 +421,20 @@ function Browse() {
 
       <ul className="browse-results">
         {items.map((w) => (
-          <li key={w.id} className="browse-result-row" onClick={() => navigate(`/app/words/${w.id}`)}>
+          <li
+            key={w.id}
+            className={selectMode ? 'browse-result-row selectable' : 'browse-result-row'}
+            onClick={() => (selectMode ? toggleWordSelected(w.id) : navigate(`/app/words/${w.id}`))}
+          >
+            {selectMode && (
+              <input
+                type="checkbox"
+                className="browse-result-checkbox"
+                checked={selectedIds.includes(w.id)}
+                onChange={() => toggleWordSelected(w.id)}
+                onClick={(e) => e.stopPropagation()}
+              />
+            )}
             <span className="browse-result-lemma">{w.lemma}</span>
             {w.part_of_speech && <span className="browse-result-pos">{w.part_of_speech}</span>}
             {w.definition && (
@@ -424,6 +462,14 @@ function Browse() {
           Next →
         </button>
       </footer>
+
+      {selectMode && selectedIds.length > 0 && (
+        <div className="browse-selection-bar">
+          <span>{selectedIds.length} selected</span>
+          <AddToSetMenu wordIds={selectedIds} />
+          <button type="button" onClick={() => setSelectedIds([])}>Clear</button>
+        </div>
+      )}
     </div>
   )
 }

@@ -24,6 +24,9 @@ const BookRelatedness = lazy(() => import('./BookRelatedness'))
 const AuthorRelatedness = lazy(() => import('./AuthorRelatedness'))
 const AuthorsRelatedness = lazy(() => import('./AuthorsRelatedness'))
 const Visualizations = lazy(() => import('./Visualizations'))
+const Sets = lazy(() => import('./Sets'))
+const SetDetail = lazy(() => import('./SetDetail'))
+const FlashcardRun = lazy(() => import('./FlashcardRun'))
 
 function tabClass({ isActive }) {
   return isActive ? 'tab active' : 'tab'
@@ -136,6 +139,30 @@ function App() {
             element={
               <Suspense fallback={<div className="page-loading">Loading…</div>}>
                 <QuizReview />
+              </Suspense>
+            }
+          />
+          <Route
+            path="sets"
+            element={
+              <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                <Sets />
+              </Suspense>
+            }
+          />
+          <Route
+            path="sets/:setId"
+            element={
+              <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                <SetDetail />
+              </Suspense>
+            }
+          />
+          <Route
+            path="sets/:setId/flashcards"
+            element={
+              <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                <FlashcardRun />
               </Suspense>
             }
           />

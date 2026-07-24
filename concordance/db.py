@@ -349,6 +349,36 @@ CREATE TABLE IF NOT EXISTS {s}.word_personal_difficulty (
     calibrated_at        timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (user_id, word_id)
 );
+
+-- User-curated flashcard sets (§ word sets) -- a persistent, user-named
+-- collection of words, distinct from quiz_session's ephemeral per-session
+-- word selection. word_review_schedule (spaced-repetition bias for
+-- quizzing) is deliberately NOT reused for "mastered" here -- its own
+-- comment is explicit that it's not a mastery-tracking system, just a
+-- continuously-updated re-exposure bias with no per-set notion at all.
+CREATE TABLE IF NOT EXISTS {s}.word_set (
+    id          serial PRIMARY KEY,
+    user_id     integer NOT NULL REFERENCES {s}.users(id) ON DELETE CASCADE,
+    name        text NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (user_id, name)
+);
+CREATE INDEX IF NOT EXISTS word_set_user_idx ON {s}.word_set (user_id);
+
+-- One row per (set, word) -- `mastered` is a plain sticky flag, toggled by
+-- the user (flashcard-run "Mastered" button, or the summary page's
+-- checkbox), not computed from any response history the way
+-- word_review_schedule's streak is. A mastered word is simply excluded
+-- from that set's next flashcard deck (see word_sets.py's flashcards
+-- endpoint) until un-toggled.
+CREATE TABLE IF NOT EXISTS {s}.word_set_item (
+    set_id       integer NOT NULL REFERENCES {s}.word_set(id) ON DELETE CASCADE,
+    word_id      integer NOT NULL REFERENCES {s}.word(id) ON DELETE CASCADE,
+    mastered     boolean NOT NULL DEFAULT false,
+    mastered_at  timestamptz,
+    added_at     timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (set_id, word_id)
+);
 """
 
 

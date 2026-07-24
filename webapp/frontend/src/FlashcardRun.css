@@ -1,0 +1,128 @@
+.flashcard-run-page {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 28px 20px 48px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.flashcard-run-page .quiz-progress-track {
+  width: 100%;
+}
+
+/* First flip animation in the app -- no existing card/reveal transform to
+   reuse, built from the same design tokens as everything else. */
+.flashcard {
+  width: 100%;
+  height: 280px;
+  perspective: 1200px;
+  cursor: pointer;
+}
+
+.flashcard-inner {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  transition: transform 0.5s ease;
+  transform-style: preserve-3d;
+}
+
+.flashcard.flipped .flashcard-inner {
+  transform: rotateY(180deg);
+}
+
+.flashcard-face {
+  position: absolute;
+  inset: 0;
+  backface-visibility: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+}
+
+.flashcard-front {
+  font-size: 32px;
+  font-weight: 700;
+  color: var(--text-h);
+}
+
+.flashcard-back {
+  transform: rotateY(180deg);
+  font-size: 18px;
+  color: var(--text-h);
+  line-height: 1.5;
+}
+
+.flashcard-hint {
+  margin: 0;
+}
+
+.flashcard-actions {
+  display: flex;
+  gap: 12px;
+  width: 100%;
+}
+
+.flashcard-next-btn,
+.flashcard-mastered-btn {
+  flex: 1;
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.flashcard-next-btn {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-h);
+}
+
+.flashcard-next-btn:hover {
+  border-color: var(--accent);
+}
+
+.flashcard-mastered-btn {
+  border: 1px solid var(--accept);
+  background: var(--accept);
+  color: white;
+}
+
+.flashcard-mastered-btn:hover {
+  background: var(--accept-hover);
+  border-color: var(--accept-hover);
+}
+
+.flashcard-done-message {
+  font-size: 18px;
+  color: var(--text-h);
+  text-align: center;
+  margin-top: 40px;
+}
+
+.flashcard-done-links {
+  display: flex;
+  gap: 16px;
+}
+
+.flashcard-done-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.muted {
+  color: var(--text);
+  font-size: 13px;
+  margin: 0;
+}

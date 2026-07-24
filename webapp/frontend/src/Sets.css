@@ -1,0 +1,127 @@
+.sets-page {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 24px 20px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.sets-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 12px;
+}
+
+.sets-back-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.sets-new-row {
+  display: flex;
+  gap: 8px;
+}
+
+.sets-new-row input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 14px;
+  color: var(--text-h);
+  background: var(--bg);
+}
+
+.sets-new-row button {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-h);
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-size: 14px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.sets-new-row button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.sets-new-row button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sets-empty {
+  padding: 20px 14px;
+  text-align: center;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}
+
+.sets-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.sets-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.sets-row:last-child {
+  border-bottom: none;
+}
+
+.sets-row:hover {
+  background: var(--row-hover, var(--border));
+}
+
+.sets-name {
+  font-weight: 600;
+  color: var(--text-h);
+  flex: 1;
+}
+
+.sets-counts {
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.sets-delete-btn {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--danger);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.sets-delete-btn:hover {
+  border-color: var(--danger);
+  background: var(--row-danger-hover);
+}
+
+.muted {
+  color: var(--text);
+  font-size: 13px;
+  margin: 0;
+}

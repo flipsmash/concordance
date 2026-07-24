@@ -1,0 +1,124 @@
+.add-to-set-menu {
+  position: relative;
+  display: inline-block;
+}
+
+.add-to-set-btn {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-h);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.add-to-set-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.add-to-set-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.add-to-set-dropdown {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  right: 0;
+  width: 240px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.add-to-set-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.add-to-set-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.add-to-set-list li:hover {
+  background: var(--row-hover, var(--border));
+}
+
+.add-to-set-name {
+  color: var(--text-h);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.add-to-set-count {
+  color: var(--text);
+  font-size: 12px;
+  flex: 0 0 auto;
+}
+
+.add-to-set-new {
+  display: flex;
+  gap: 6px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.add-to-set-new input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 13px;
+  color: var(--text-h);
+  background: var(--bg);
+}
+
+.add-to-set-new button {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-h);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.add-to-set-new button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.add-to-set-new button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.add-to-set-loading {
+  margin: 0;
+  font-size: 13px;
+}
+
+.add-to-set-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--danger);
+}

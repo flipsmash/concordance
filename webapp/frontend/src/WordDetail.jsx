@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
+import AddToSetMenu from './AddToSetMenu'
 import GraphView from './GraphView'
 import { colorForBucket } from './domainColors'
 import './WordDetail.css'
@@ -110,6 +111,7 @@ function WordDetail({ backTo = '/accepted' }) {
         {hasAudio && (
           <audio controls src={`${API_BASE}/api/words/${id}/audio`} className="word-detail-audio" />
         )}
+        <AddToSetMenu wordIds={[word.id]} />
         <button
           type="button"
           className="word-detail-surprise"

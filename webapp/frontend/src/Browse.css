@@ -196,6 +196,27 @@
   border-color: var(--accent);
 }
 
+.browse-select-toggle {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-h);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.browse-select-toggle:hover {
+  border-color: var(--accent);
+}
+
+.browse-select-toggle.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
 .browse-domain-row {
   display: flex;
   flex-wrap: wrap;
@@ -391,6 +412,43 @@
 
 .browse-result-row:last-child {
   border-bottom: none;
+}
+
+.browse-result-checkbox {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.browse-selection-bar {
+  position: sticky;
+  bottom: 16px;
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+  font-size: 13px;
+  color: var(--text-h);
+}
+
+.browse-selection-bar button {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-h);
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.browse-selection-bar button:hover {
+  border-color: var(--accent);
 }
 
 .browse-result-row:hover {

@@ -53,8 +53,11 @@
   height: 32px;
 }
 
-.word-detail-surprise {
+.word-detail-header .add-to-set-menu {
   margin-left: auto;
+}
+
+.word-detail-surprise {
   border: 1px solid var(--border);
   background: var(--bg);
   color: var(--text-h);
