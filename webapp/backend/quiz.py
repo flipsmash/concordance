@@ -30,20 +30,28 @@ answer key lives in the payload alongside the client-safe fields; _client_view
 strips exactly the key fields below before anything is sent to the browser.
 
   mc:          {prompt, options:[{word_id,label}], correct_word_id,
-                nota_is_correct, target_lemma, quiz_definition, degraded}
+                nota_is_correct, target_lemma, quiz_definition, degraded,
+                guessing_floor}
                -- answer key: correct_word_id, nota_is_correct
   true_false:  {statement_word, statement_definition, is_true, target_lemma,
-                quiz_definition, degraded}
+                quiz_definition, degraded, guessing_floor}
                -- answer key: is_true
   matching:    {word_slots:[{word_id,lemma}], definition_slots:[{slot,
                 quiz_definition}], correct_mapping:{word_id: slot},
-                target_lemma, quiz_definition, degraded}
+                target_lemma, quiz_definition, degraded, guessing_floor}
                -- answer key: correct_mapping
                -- word_slots and definition_slots are shuffled INDEPENDENTLY
                with unrelated ordering/labeling schemes (word order vs. A/B/C
                slot letters) specifically so comparing the two lists never
                reveals the pairing -- only correct_mapping (server-only)
                does. definition_slots deliberately carries no word_id.
+
+guessing_floor (see concordance/calibration.py) is the structural
+chance-correct probability of the ACTUAL assembled question -- computed once
+at build time from real option/member counts, not nominal request config,
+and copied verbatim onto every quiz_answer row `answer_quiz_question` writes
+for that question (all rows of a matching question share one value, since
+guessing_floor only depends on set size n, identical for every pair in it).
 
 quiz_answer gets one row per mc/true_false question, but one row PER PAIR for
 a matching question (word_id = that pair's word, response = the submitted
@@ -64,6 +72,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from psycopg.types.json import Json
 from pydantic import BaseModel, Field
 
+from concordance import calibration as calib
 from concordance import distractors as dx
 from concordance import spaced_repetition as sr
 from concordance import usas_domains
@@ -220,11 +229,18 @@ def _select_target_words(conn, body: QuizStartRequest, count: int, exclude_ids: 
     if body.pos:
         filters.append("w.part_of_speech = ANY(%s)")
         params.append(body.pos)
+    # Personalized difficulty (see concordance/calibration.py), when this
+    # user has one for a word, wins over the shared ex-ante score for
+    # SELECTION purposes -- "give me hard words for me" should mean what it
+    # says, not the population-level estimate. word_personal_difficulty is
+    # never written into word_difficulty.difficulty itself (see its own
+    # schema comment), so this COALESCE is the one place it's actually
+    # consumed.
     if body.difficulty_min is not None:
-        filters.append("wd.difficulty >= %s")
+        filters.append("coalesce(wpd.personal_difficulty, wd.difficulty) >= %s")
         params.append(body.difficulty_min)
     if body.difficulty_max is not None:
-        filters.append("wd.difficulty <= %s")
+        filters.append("coalesce(wpd.personal_difficulty, wd.difficulty) <= %s")
         params.append(body.difficulty_max)
     if body.domains:
         codes = [code for bucket in body.domains
@@ -254,10 +270,12 @@ def _select_target_words(conn, body: QuizStartRequest, count: int, exclude_ids: 
                 JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
                 LEFT JOIN {_main.SCHEMA}.word_review_schedule wrs
                     ON wrs.word_id = w.id AND wrs.user_id = %s
+                LEFT JOIN {_main.SCHEMA}.word_personal_difficulty wpd
+                    ON wpd.word_id = w.id AND wpd.user_id = %s
                 WHERE {where}
                 ORDER BY {order_by}
                 LIMIT %s""",
-            (user_id, *params, count),
+            (user_id, user_id, *params, count),
         )
         rows = cur.fetchall()
     return [{"id": r[0], "lemma": r[1], "quiz_definition": r[2], "pos": r[3]} for r in rows]
@@ -329,6 +347,9 @@ def _build_mc_payload(conn, target: dict, body: QuizStartRequest,
         "degraded": result.degraded,
         "target_lemma": target["lemma"],
         "quiz_definition": target["quiz_definition"],
+        # From the actual assembled option count (post NOTA/shortfall
+        # handling above), not body.mc_choice_count -- see calibration.py.
+        "guessing_floor": calib.guessing_floor("mc", len(options)),
     }
     return payload, [target["id"]], consumed_ids
 
@@ -365,6 +386,7 @@ def _build_tf_payload(conn, target: dict, body: QuizStartRequest,
         "target_lemma": target["lemma"],
         "quiz_definition": target["quiz_definition"],
         "degraded": False,
+        "guessing_floor": calib.guessing_floor("true_false", 2),
     }
     return payload, [target["id"]], consumed_ids
 
@@ -407,6 +429,9 @@ def _build_matching_payload(conn, seed: dict, body: QuizStartRequest,
         "target_lemma": seed["lemma"],
         "quiz_definition": seed["quiz_definition"],
         "degraded": result.degraded,
+        # Same for every pair in the set -- 1/n, from the actual assembled
+        # member count n (can be below body.matching_set_size).
+        "guessing_floor": calib.guessing_floor("matching", n),
     }
     member_ids = [m["id"] for m in members]
     return payload, member_ids, member_ids
@@ -603,6 +628,11 @@ def answer_quiz_question(session_id: int, body: QuizAnswerSubmit,
                 raise HTTPException(status_code=400, detail="question already answered")
 
             frequency = (session["config"] or {}).get("spaced_repetition_frequency", "normal")
+            direction = (session["config"] or {}).get("direction")
+            # Copied from the question's own payload (computed at build time
+            # from the actual assembled option/set count -- see
+            # concordance/calibration.py), not recomputed here.
+            guessing_floor = payload.get("guessing_floor")
 
             if qtype == "mc":
                 if payload["nota_is_correct"]:
@@ -610,10 +640,13 @@ def answer_quiz_question(session_id: int, body: QuizAnswerSubmit,
                 else:
                     is_correct = body.selected_word_id == payload["correct_word_id"]
                 cur.execute(
-                    f"""INSERT INTO {_main.SCHEMA}.quiz_answer (question_id, word_id, response, is_correct)
-                        VALUES (%s, %s, %s, %s)""",
+                    f"""INSERT INTO {_main.SCHEMA}.quiz_answer
+                            (question_id, word_id, response, is_correct,
+                             guessing_floor, question_type, direction)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)""",
                     (body.question_id, target_word_ids[0],
-                     Json({"selected_word_id": body.selected_word_id}), is_correct),
+                     Json({"selected_word_id": body.selected_word_id}), is_correct,
+                     guessing_floor, qtype, direction),
                 )
                 _update_review_schedule(cur, user["id"], target_word_ids[0], is_correct, frequency)
             elif qtype == "true_false":
@@ -621,9 +654,12 @@ def answer_quiz_question(session_id: int, body: QuizAnswerSubmit,
                     raise HTTPException(status_code=400, detail="answer (true/false) is required")
                 is_correct = body.answer == payload["is_true"]
                 cur.execute(
-                    f"""INSERT INTO {_main.SCHEMA}.quiz_answer (question_id, word_id, response, is_correct)
-                        VALUES (%s, %s, %s, %s)""",
-                    (body.question_id, target_word_ids[0], Json({"answer": body.answer}), is_correct),
+                    f"""INSERT INTO {_main.SCHEMA}.quiz_answer
+                            (question_id, word_id, response, is_correct,
+                             guessing_floor, question_type, direction)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    (body.question_id, target_word_ids[0], Json({"answer": body.answer}), is_correct,
+                     guessing_floor, qtype, direction),
                 )
                 _update_review_schedule(cur, user["id"], target_word_ids[0], is_correct, frequency)
             elif qtype == "matching":
@@ -637,9 +673,12 @@ def answer_quiz_question(session_id: int, body: QuizAnswerSubmit,
                     correct_slot = mapping.get(str(wid))
                     pair_correct = correct_slot is not None and slot == correct_slot
                     cur.execute(
-                        f"""INSERT INTO {_main.SCHEMA}.quiz_answer (question_id, word_id, response, is_correct)
-                            VALUES (%s, %s, %s, %s)""",
-                        (body.question_id, wid, Json({"definition_slot": slot}), pair_correct),
+                        f"""INSERT INTO {_main.SCHEMA}.quiz_answer
+                                (question_id, word_id, response, is_correct,
+                                 guessing_floor, question_type, direction)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                        (body.question_id, wid, Json({"definition_slot": slot}), pair_correct,
+                         guessing_floor, qtype, direction),
                     )
                     _update_review_schedule(cur, user["id"], wid, pair_correct, frequency)
                     pair_results.append({"word_id": wid, "is_correct": pair_correct, "correct_slot": correct_slot})

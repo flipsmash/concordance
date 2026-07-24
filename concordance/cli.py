@@ -420,6 +420,33 @@ def quizzable(
                   f"{dist.get('excluded',0)} excluded")
 
 
+@app.command("calibrate-difficulty")
+def calibrate_difficulty(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of first-exposure responses processed."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Personalize each quizzed word's difficulty per user, from that user's
+    own FIRST quiz exposure to it (see concordance/calibration.py). NOT a
+    population-level IRT calibration and NOT written into the shared
+    word_difficulty.difficulty column -- see compute_personal_difficulty's
+    own docstring for why one dominant rater's response data can never
+    identify "true" item difficulty, no matter how much of it accumulates.
+    eta/scale are hand-tuned via app_settings ('calibration_eta'/
+    'calibration_scale'), not auto-fit, for the same reason."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    stats = db.compute_personal_difficulty(conn, schema, limit=limit)
+    conn.close()
+    console.print(f"[green]✓[/green] calibrate-difficulty: [bold]{stats['words']}[/bold] "
+                  f"(user, word) pairs personalized"
+                  + (f", {stats['skipped_no_baseline']} skipped (no ex-ante difficulty yet)"
+                     if stats.get("skipped_no_baseline") else ""))
+
+
 @app.command("book-similarity")
 def book_similarity(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
@@ -836,6 +863,7 @@ def maintain(
     skip_difficulty: bool = typer.Option(False, "--skip-difficulty"),
     skip_quizdef: bool = typer.Option(False, "--skip-quizdef"),
     skip_quizzable: bool = typer.Option(False, "--skip-quizzable"),
+    skip_calibrate_difficulty: bool = typer.Option(False, "--skip-calibrate-difficulty"),
     skip_book_similarity: bool = typer.Option(False, "--skip-book-similarity"),
     skip_author_similarity: bool = typer.Option(False, "--skip-author-similarity"),
     skip_author_clustering: bool = typer.Option(False, "--skip-author-clustering"),
@@ -846,9 +874,9 @@ def maintain(
 ) -> None:
     """Run the full post-ingest maintenance chain in dependency order:
     fill-definitions -> classify -> normalize-pos -> ngram -> archaic ->
-    difficulty -> quizdef -> quizzable -> book-similarity ->
-    author-similarity -> author-clustering -> wordnik-pron -> ipa -> embed.
-    This is the whole documented sequence from the README's
+    difficulty -> quizdef -> quizzable -> calibrate-difficulty ->
+    book-similarity -> author-similarity -> author-clustering ->
+    wordnik-pron -> ipa -> embed. This is the whole documented sequence from the README's
     "Backfilling definitions" / "Enrichment & scoring" / "Definition-quality
     cleanup" / "Pronunciation audio" / "Semantic distance" sections, chained
     into one command instead of twelve to remember and re-order by hand.
@@ -943,6 +971,13 @@ def maintain(
                       f"{dist.get('excluded',0)} excluded")
     else:
         console.print("[dim]quizzable skipped.[/dim]")
+
+    if not skip_calibrate_difficulty:
+        stats = db.compute_personal_difficulty(conn, schema, limit=limit)
+        console.print(f"[green]✓[/green] calibrate-difficulty: [bold]{stats['words']}[/bold] "
+                      f"(user, word) pairs personalized")
+    else:
+        console.print("[dim]calibrate-difficulty skipped.[/dim]")
 
     if not skip_book_similarity:
         with console.status("[bold]Computing book vocabulary overlap…"):

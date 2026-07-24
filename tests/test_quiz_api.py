@@ -182,6 +182,177 @@ def test_quiz_round_trip_and_admin_settings_http():
         cleanup.close()
 
 
+def _seed_corpus_at_difficulty(conn, schema: str, prefix: str, n: int, difficulty: float) -> None:
+    with conn.cursor() as cur:
+        for i in range(n):
+            cur.execute(
+                f"""INSERT INTO {schema}.word (lemma, definition, quiz_definition, part_of_speech, active)
+                    VALUES (%s, %s, %s, 'noun', true) RETURNING id""",
+                (f"{prefix}{i}", f"definition {prefix}{i}", f"quiz definition {prefix}{i}"),
+            )
+            wid = cur.fetchone()[0]
+            cur.execute(
+                f"INSERT INTO {schema}.word_difficulty (word_id, quizzable, difficulty) VALUES (%s, true, %s)",
+                (wid, difficulty),
+            )
+    conn.commit()
+
+
+@pg
+def test_select_target_words_prefers_personal_difficulty_over_ex_ante():
+    # Whitebox: _select_target_words is where the plan's COALESCE(personal,
+    # ex-ante) filtering actually lives -- going through the full HTTP
+    # question-build pipeline instead would conflate this with distractor
+    # selection's own (unrelated) difficulty-band filter, which reads only
+    # the raw ex-ante wd.difficulty column and has no per-user context to
+    # COALESCE against, so it can't be used to isolate this behavior.
+    from webapp.backend import main
+    from webapp.backend import quiz as quiz_module
+
+    schema = "cc_test_quiz_personal_difficulty_select"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+    # "otherword*": ex-ante 50, no personal override -- always in the [0,60]
+    # band, never in [80,100].
+    _seed_corpus_at_difficulty(conn, schema, "otherword", 5, 50.0)
+    # "personalword0": ex-ante 50 (same as otherword*) but a personal
+    # override of 90 -- selection must follow the override, not the ex-ante.
+    _seed_corpus_at_difficulty(conn, schema, "personalword", 1, 50.0)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"INSERT INTO {schema}.users (username, password_hash) VALUES ('personaldiffuser', %s) RETURNING id",
+            (auth.hash_password("password123"),),
+        )
+        user_id = cur.fetchone()[0]
+        cur.execute(f"SELECT id FROM {schema}.word WHERE lemma = 'personalword0'")
+        personal_word_id = cur.fetchone()[0]
+        cur.execute(
+            f"""INSERT INTO {schema}.word_personal_difficulty
+                    (user_id, word_id, item_rating, personal_difficulty, based_on_correct)
+                VALUES (%s, %s, 2.5, 90.0, false)""",
+            (user_id, personal_word_id),
+        )
+    conn.commit()
+
+    old_schema = main.SCHEMA
+    main.SCHEMA = schema
+    try:
+        # High band: only personalword0 qualifies -- its ex-ante (50) is out
+        # of range, so only the personal override (90) can put it here.
+        body_high = quiz_module.QuizStartRequest(length=1, difficulty_min=80, difficulty_max=100)
+        pool_high = quiz_module._select_target_words(conn, body_high, 100, set(), user_id)
+        assert [w["lemma"] for w in pool_high] == ["personalword0"]
+
+        # Low band: the ex-ante 50 alone would qualify personalword0, but
+        # its personal override (90) is what selection actually consults,
+        # so it must be excluded here -- only the otherword* words remain.
+        body_low = quiz_module.QuizStartRequest(length=10, difficulty_min=0, difficulty_max=60)
+        pool_low = quiz_module._select_target_words(conn, body_low, 100, set(), user_id)
+        lemmas_low = {w["lemma"] for w in pool_low}
+        assert "personalword0" not in lemmas_low
+        assert lemmas_low == {f"otherword{i}" for i in range(5)}
+    finally:
+        main.SCHEMA = old_schema
+        with conn.cursor() as cur:
+            cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        conn.commit()
+        conn.close()
+
+
+@pg
+def test_guessing_floor_written_reflects_actual_assembled_count_not_nominal_http():
+    # calibration.py's guessing_floor is load-bearing for personalized
+    # difficulty -- it must come from the ACTUAL number of options/members a
+    # question ends up with, not the nominal mc_choice_count/matching_set_size
+    # requested, since both builders can fall short of nominal when the
+    # corpus can't supply enough candidates (see _build_mc_payload's
+    # distractor_count reassignment and _build_matching_payload's `members`
+    # length). A corpus deliberately too small to fill either nominal count
+    # forces both shortfall paths.
+    from starlette.testclient import TestClient
+
+    from webapp.backend import main
+
+    schema = "cc_test_quiz_guessing_floor_http"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+    # Exactly 3 quizzable words total: any mc/matching question drawn from
+    # this corpus tops out at 3 options/members, however large the nominal
+    # request.
+    _seed_corpus(conn, schema, n=3)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"INSERT INTO {schema}.users (username, password_hash) VALUES ('floorhttpuser', %s) RETURNING id",
+            (auth.hash_password("password123"),),
+        )
+    conn.commit()
+    conn.close()
+
+    old_schema = main.SCHEMA
+    main.SCHEMA = schema
+    try:
+        client = TestClient(main.app, base_url="https://testserver")
+        client.post("/api/auth/login", json={"username": "floorhttpuser", "password": "password123"})
+
+        # MC, nominal 8 choices -- only 3 words exist, so the real option
+        # count tops out at 3 (1 target + up to 2 distractors), never 8.
+        res = client.post("/api/quiz/start", json={"length": 1, "types": ["mc"], "mc_choice_count": 8})
+        assert res.status_code == 200, res.text
+        assert res.json()["total_questions"] == 1
+        session_id = res.json()["session_id"]
+        q = client.get(f"/api/quiz/{session_id}").json()["question"]
+        actual_option_count = len(q["options"])
+        assert actual_option_count < 8
+        client.post(f"/api/quiz/{session_id}/answer",
+                    json={"question_id": q["question_id"], "selected_word_id": q["options"][0]["word_id"]})
+
+        # Matching, nominal set size 8 -- same 3-word ceiling.
+        res2 = client.post("/api/quiz/start", json={"length": 1, "types": ["matching"], "matching_set_size": 8})
+        assert res2.status_code == 200, res2.text
+        assert res2.json()["total_questions"] == 1
+        session2_id = res2.json()["session_id"]
+        q2 = client.get(f"/api/quiz/{session2_id}").json()["question"]
+        actual_member_count = len(q2["word_slots"])
+        assert actual_member_count < 8
+        pairs = [{"word_id": ws["word_id"], "definition_slot": q2["definition_slots"][0]["slot"]}
+                 for ws in q2["word_slots"]]
+        client.post(f"/api/quiz/{session2_id}/answer",
+                    json={"question_id": q2["question_id"], "pairs": pairs})
+    finally:
+        main.SCHEMA = old_schema
+
+    verify_conn = db.connect(_URL)
+    try:
+        with verify_conn.cursor() as cur:
+            cur.execute(f"""select qa.guessing_floor, qa.question_type
+                            from {schema}.quiz_answer qa
+                            join {schema}.quiz_question qq on qq.id = qa.question_id
+                            where qq.question_type = 'mc'""")
+            mc_rows = cur.fetchall()
+            assert len(mc_rows) == 1
+            assert mc_rows[0] == (1.0 / actual_option_count, "mc")
+
+            cur.execute(f"""select qa.guessing_floor, qa.question_type
+                            from {schema}.quiz_answer qa
+                            join {schema}.quiz_question qq on qq.id = qa.question_id
+                            where qq.question_type = 'matching'""")
+            matching_rows = cur.fetchall()
+            assert len(matching_rows) == actual_member_count
+            expected = 1.0 / actual_member_count
+            assert all(row == (expected, "matching") for row in matching_rows)
+
+            cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        verify_conn.commit()
+    finally:
+        verify_conn.close()
+
+
 @pg
 def test_feedback_timing_defaults_to_immediate_when_setting_row_missing():
     from webapp.backend import quiz as quiz_module

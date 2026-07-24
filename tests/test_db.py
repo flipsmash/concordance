@@ -1267,3 +1267,199 @@ def test_compute_author_clustering_is_idempotent_and_deterministic():
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
     conn.close()
+
+
+# --- compute_personal_difficulty (concordance/calibration.py) -------------
+
+def _cal_user(cur, schema, username):
+    cur.execute(f"INSERT INTO {schema}.users (username, password_hash) VALUES (%s, 'x') RETURNING id",
+                (username,))
+    return cur.fetchone()[0]
+
+
+def _cal_word(cur, schema, lemma, difficulty):
+    cur.execute(f"INSERT INTO {schema}.word (lemma, definition) VALUES (%s, %s) RETURNING id",
+                (lemma, f"definition of {lemma}"))
+    wid = cur.fetchone()[0]
+    cur.execute(f"INSERT INTO {schema}.word_difficulty (word_id, difficulty) VALUES (%s, %s)",
+                (wid, difficulty))
+    return wid
+
+
+def _cal_answer(cur, schema, user_id, word_id, is_correct, guessing_floor, answered_at):
+    """One quiz_answer row, each wrapped in its own session/question (a real
+    session would batch several answers into one, but compute_personal_difficulty
+    only cares about answered_at ordering per (user, word), not session shape)."""
+    cur.execute(f"""INSERT INTO {schema}.quiz_session (user_id, config, feedback_timing)
+                    VALUES (%s, '{{}}', 'immediate') RETURNING id""", (user_id,))
+    session_id = cur.fetchone()[0]
+    cur.execute(f"""INSERT INTO {schema}.quiz_question
+                        (session_id, seq, question_type, target_word_ids, payload)
+                    VALUES (%s, 1, 'mc', %s, '{{}}') RETURNING id""", (session_id, [word_id]))
+    question_id = cur.fetchone()[0]
+    cur.execute(f"""INSERT INTO {schema}.quiz_answer
+                        (question_id, word_id, response, is_correct, guessing_floor,
+                         question_type, direction, answered_at)
+                    VALUES (%s, %s, '{{}}', %s, %s, 'mc', 'definition_to_word', %s)""",
+                (question_id, word_id, is_correct, guessing_floor, answered_at))
+
+
+@pg
+def test_compute_personal_difficulty_never_quizzed_word_gets_no_row():
+    schema = "cc_test_calibration_unquizzed"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    with conn.cursor() as cur:
+        _cal_user(cur, schema, "calibuser")
+        _cal_word(cur, schema, "untouchedword", 50.0)
+    conn.commit()
+
+    stats = db.compute_personal_difficulty(conn, schema)
+    assert stats["words"] == 0
+
+    with conn.cursor() as cur:
+        cur.execute(f"select count(*) from {schema}.word_personal_difficulty")
+        assert cur.fetchone() == (0,)
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_compute_personal_difficulty_correct_and_incorrect_move_opposite_ways():
+    schema = "cc_test_calibration_updown"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    with conn.cursor() as cur:
+        user_id = _cal_user(cur, schema, "calibuser")
+        easy_correct = _cal_word(cur, schema, "easycorrectword", 50.0)
+        hard_wrong = _cal_word(cur, schema, "hardwrongword", 50.0)
+        # 4-option mc -> guessing_floor 0.25.
+        _cal_answer(cur, schema, user_id, easy_correct, True, 0.25, "2026-01-01T00:00:00Z")
+        _cal_answer(cur, schema, user_id, hard_wrong, False, 0.25, "2026-01-01T00:00:00Z")
+    conn.commit()
+
+    stats = db.compute_personal_difficulty(conn, schema)
+    assert stats["words"] == 2
+
+    with conn.cursor() as cur:
+        cur.execute(f"""select word_id, personal_difficulty, based_on_correct
+                        from {schema}.word_personal_difficulty order by word_id""")
+        rows = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+        correct_diff, correct_flag = rows[easy_correct]
+        wrong_diff, wrong_flag = rows[hard_wrong]
+
+        assert correct_flag is True
+        assert wrong_flag is False
+        # A correct first answer should make the word look EASIER than the
+        # ex-ante 50, an incorrect one HARDER -- and the move must be a
+        # bounded nudge (calibration.py's DEFAULT_ETA=1.0 nudge), not a
+        # wild swing to 0/100.
+        assert 0 < correct_diff < 50
+        assert 50 < wrong_diff < 100
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_compute_personal_difficulty_only_first_exposure_counts():
+    # Same (user, word) answered twice: an early WRONG answer followed by a
+    # later CORRECT one must calibrate off the early wrong answer only --
+    # the later "he learned it" re-exposure must not change the stored
+    # value (see compute_personal_difficulty's own docstring on why).
+    schema = "cc_test_calibration_first_exposure"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    with conn.cursor() as cur:
+        user_id = _cal_user(cur, schema, "calibuser")
+        word_id = _cal_word(cur, schema, "relearnedword", 50.0)
+        _cal_answer(cur, schema, user_id, word_id, False, 0.25, "2026-01-01T00:00:00Z")
+        _cal_answer(cur, schema, user_id, word_id, True, 0.25, "2026-06-01T00:00:00Z")
+    conn.commit()
+
+    db.compute_personal_difficulty(conn, schema)
+    with conn.cursor() as cur:
+        cur.execute(f"""select personal_difficulty, based_on_correct
+                        from {schema}.word_personal_difficulty where word_id=%s""", (word_id,))
+        diff, based_on_correct = cur.fetchone()
+        assert based_on_correct is False   # the FIRST (wrong) answer, not the later correct one
+        assert diff > 50                   # moved harder, not easier
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_compute_personal_difficulty_skips_words_without_ex_ante_baseline():
+    schema = "cc_test_calibration_no_baseline"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    with conn.cursor() as cur:
+        user_id = _cal_user(cur, schema, "calibuser")
+        cur.execute(f"INSERT INTO {schema}.word (lemma, definition) VALUES ('nobaselineword', 'def') RETURNING id")
+        word_id = cur.fetchone()[0]
+        # No word_difficulty row at all -- nothing to anchor a nudge to.
+        _cal_answer(cur, schema, user_id, word_id, True, 0.25, "2026-01-01T00:00:00Z")
+    conn.commit()
+
+    stats = db.compute_personal_difficulty(conn, schema)
+    assert stats["words"] == 0
+    assert stats["skipped_no_baseline"] == 1
+
+    with conn.cursor() as cur:
+        cur.execute(f"select count(*) from {schema}.word_personal_difficulty")
+        assert cur.fetchone() == (0,)
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_compute_personal_difficulty_is_idempotent():
+    schema = "cc_test_calibration_idempotent"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    with conn.cursor() as cur:
+        user_id = _cal_user(cur, schema, "calibuser")
+        word_id = _cal_word(cur, schema, "idempotentword", 50.0)
+        _cal_answer(cur, schema, user_id, word_id, True, 0.25, "2026-01-01T00:00:00Z")
+    conn.commit()
+
+    db.compute_personal_difficulty(conn, schema)
+    with conn.cursor() as cur:
+        cur.execute(f"select item_rating, personal_difficulty from {schema}.word_personal_difficulty")
+        run1 = cur.fetchall()
+
+    db.compute_personal_difficulty(conn, schema)
+    with conn.cursor() as cur:
+        cur.execute(f"select item_rating, personal_difficulty from {schema}.word_personal_difficulty")
+        run2 = cur.fetchall()
+
+        assert run1 == run2   # unchanged response data -> bit-identical recompute
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()

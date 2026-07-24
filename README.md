@@ -105,8 +105,8 @@ commands to remember and re-order by hand:
 ```bash
 concordance maintain   # fill-definitions -> classify -> normalize-pos -> ngram
                         # -> archaic -> difficulty -> quizdef -> quizzable
-                        # -> book-similarity -> author-similarity -> author-clustering
-                        # -> wordnik-pron -> ipa -> embed
+                        # -> calibrate-difficulty -> book-similarity -> author-similarity
+                        # -> author-clustering -> wordnik-pron -> ipa -> embed
 ```
 
 Every step runs incrementally (only-missing / blank-only / not-yet-embedded),
@@ -295,7 +295,7 @@ the next `maintain` run recomputes them from the new text — the same fix
 `sync_book_results` already applies for a re-ingested word whose sense
 changed, needed here too since this writes `word.definition` directly.
 
-## Enrichment & scoring (`classify`, `archaic`, `ngram`, `difficulty`, `quizdef`, `quizzable`)
+## Enrichment & scoring (`classify`, `archaic`, `ngram`, `difficulty`, `quizdef`, `quizzable`, `calibrate-difficulty`)
 
 A further pass of DB-only commands (no book/model pipeline; each just reads
 and updates rows in the schema `ingest` populated), meant to run in this
@@ -310,6 +310,7 @@ concordance archaic         # set current/dated/archaic/obsolete + confidence
 concordance difficulty      # 0-100 ex-ante difficulty scalar + factor breakdown
 concordance quizdef         # quiz-safe definitions (rewrite ones that leak the word)
 concordance quizzable       # flag variant/inferable-derivative words as unquizzable
+concordance calibrate-difficulty  # per-user difficulty nudge from quiz response data
 ```
 
 - **`classify`** — assigns each word 1-3 USAS category codes (word + POS +
@@ -333,8 +334,10 @@ concordance quizzable       # flag variant/inferable-derivative words as unquizz
   word from Google Books Ngram; feeds both `archaic` and `difficulty`.
 - **`difficulty`** — blends rarity (dominant), archaic confidence, USAS domain
   specificity, and morphological transparency into a single 0-100 scalar,
-  storing the factor breakdown alongside it (a principled ex-ante estimate,
-  not yet a fitted/IRT model — that comes once quiz response data exists).
+  storing the factor breakdown alongside it: a principled ex-ante estimate,
+  shared across every user. `calibrate-difficulty` (below) is the
+  once-quiz-data-exists follow-on, but it deliberately stays a per-user
+  overlay rather than folding back into this column.
 - **`quizdef`** — ~37% of definitions leak the target word's root ("audaciously"
   → "in an audacious manner"), making recall quizzing trivial; this builds a
   separate `quiz_definition` per word — passed through as-is if already clean,
@@ -343,6 +346,25 @@ concordance quizzable       # flag variant/inferable-derivative words as unquizz
 - **`quizzable`** — flags words whose only difference from an already-known
   base form is grammatical (plurals, inflections) or a transparently inferable
   derivative, so quizzing doesn't waste a card on something not actually new.
+- **`calibrate-difficulty`** — a per-`(user, word)` nudge to the ex-ante
+  `difficulty` score, from that user's own **first** quiz exposure to the
+  word (`concordance/calibration.py`): a fixed-guessing-floor Rasch-style
+  update (`b_new = b0 - eta*(y - P0)`), using the question's actual assembled
+  guessing floor (option/set count, not nominal request config) so an easy
+  4-choice MC miss moves the needle more than a coin-flip true/false miss.
+  Deliberately **not** a population-level IRT calibration and never written
+  back into the shared `word_difficulty.difficulty` column — with one
+  dominant rater (this is a single-user deployment), response data only
+  ever reveals that person's own relative gaps, never "true" item
+  difficulty, no matter how much of it accumulates. Stored in
+  `word_personal_difficulty` and consumed only by quiz word **selection**
+  (`difficulty_min`/`difficulty_max` prefer it over the shared score via
+  `COALESCE`) — every other consumer of `word_difficulty.difficulty` is
+  unaffected. `eta`/scale are hand-tuned via `app_settings`
+  (`calibration_eta`/`calibration_scale`), not fit, for the same
+  single-rater reason. Only a word's first-ever quiz exposure counts; a
+  later re-exposure is evidence the person is *learning* it, not
+  independent evidence about a fixed item's difficulty.
 
 `normalize-pos`/`archaic`/`difficulty`/`quizzable` all accept `--limit` for
 chunking a large backlog, but — unlike `refill`/`fill-definitions`'
@@ -622,11 +644,19 @@ it at `/app/quiz`, driven entirely by `webapp/backend/quiz.py` and
 - Every quiz-taking route requires only a logged-in session
   (`require_user`) — no admin flag needed, matching/true-false/multiple-choice
   are all available to invited non-admin accounts.
+- Every answer is written with the question's actual assembled guessing floor
+  (`guessing_floor` — see `calibrate-difficulty` above), which `concordance
+  calibrate-difficulty`/`maintain` later folds into a per-user difficulty
+  overlay from that word's first exposure; **difficulty range filters**
+  above prefer a user's own calibrated value over the shared ex-ante score
+  once one exists.
 
-Not yet built: spaced repetition (re-surfacing missed words sooner) and any
-mastery-tracking dashboard — the schema captures enough (question type,
-choice count, NOTA presence, per-answer correctness, timestamps) to add
-both later without a backfill.
+Spaced repetition (re-surfacing missed words sooner, `concordance/
+spaced_repetition.py` + `word_review_schedule`) is live as an opt-in
+per-session selection bias (`spaced_repetition_enabled`/`_frequency`). Not
+yet built: any mastery-tracking dashboard — the schema captures enough
+(question type, choice count, NOTA presence, per-answer correctness,
+timestamps) to add one later without a backfill.
 
 ### Visualizations (`/app/visualizations`)
 
@@ -731,7 +761,9 @@ Every stage is real and runs end-to-end; the LLM judge is live, running the
 14B model against every ingest (not the no-model stub — see the fallback
 note above). Beyond the base extract → judge → enrich pipeline:
 a cross-book verdict cache, a public review webapp, USAS domain tagging, an
-ex-ante difficulty scalar, quiz-safe definitions + a quizzable flag, a
+ex-ante difficulty scalar with a per-user calibration overlay from quiz
+response data (`calibrate-difficulty` — see "Enrichment & scoring" above),
+quiz-safe definitions + a quizzable flag, a
 pronunciation-audio pipeline (real recordings first, IPA-guided synthesis
 otherwise), a unified definition-lookup cascade (one `resolve.py` cascade
 behind `ingest`/`refill`/`deepen`/`fill-definitions`/`lookup_word.py`, with
