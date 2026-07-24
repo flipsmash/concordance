@@ -176,3 +176,59 @@ def test_classify_and_store_only_missing_resumes_after_a_partial_run(monkeypatch
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
     conn.close()
+
+
+@pg
+def test_classify_and_store_skips_a_word_deleted_mid_run(monkeypatch):
+    # Reproduces the live crash: classify_and_store snapshots every word to
+    # classify in one SELECT up front, then works through it in chunks over
+    # what can be an hours-long run. If some OTHER process deletes a word
+    # from that snapshot before its chunk is reached (a concurrent prune,
+    # or -- what actually happened live -- an unrelated data cleanup run
+    # while `maintain`'s classify step was still mid-flight), the old code
+    # crashed with a bare ForeignKeyViolation trying to INSERT INTO
+    # word_category for a word_id no longer in `word`. The fix re-checks
+    # each chunk against the live table immediately before use.
+    schema = "cc_test_classify_vanished"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    _seed_classify_schema(conn, schema, 20)
+
+    with conn.cursor() as cur:
+        cur.execute(f"select id from {schema}.word where lemma='chunkword15'")
+        vanishing_id = cur.fetchone()[0]
+
+    class _DeletingClassifier(_FakeClassifier):
+        """Same fixed-tag behavior as _FakeClassifier, but deletes a word
+        from a LATER chunk the first time it's called -- simulating a
+        concurrent deletion landing between classify_and_store's one-time
+        snapshot SELECT and the chunk loop actually reaching that word."""
+
+        def classify(self, items):
+            if len(self.seen_chunks) == 0:
+                with conn.cursor() as cur:
+                    cur.execute(f"DELETE FROM {schema}.word WHERE id=%s", (vanishing_id,))
+                conn.commit()
+            return super().classify(items)
+
+    fake = _DeletingClassifier()
+    monkeypatch.setattr(classify, "Classifier", lambda cfg=None: fake)
+
+    # Must not raise (this is the regression the fix is for).
+    stats = classify.classify_and_store(conn, schema, only_missing=True, commit_every=10)
+
+    assert stats["vanished"] == 1
+    assert stats["words"] == 20          # snapshot size is unchanged -- taken before the delete
+    assert stats["classified"] == 19     # one fewer actually written
+
+    with conn.cursor() as cur:
+        cur.execute(f"select count(*) from {schema}.word_category")
+        assert cur.fetchone()[0] == 19
+        cur.execute(f"select count(*) from {schema}.word_category where word_id=%s", (vanishing_id,))
+        assert cur.fetchone()[0] == 0
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()

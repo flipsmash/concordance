@@ -169,7 +169,19 @@ def classify_and_store(conn, schema: str, cfg: Config | None = None, limit: int 
     the full item list produces identical per-word results. Paired with
     only_missing's own re-select-what's-still-missing query, a killed and
     restarted run resumes close to where it left off instead of
-    re-classifying from scratch."""
+    re-classifying from scratch.
+
+    The word list itself is one big snapshot SELECT taken up front, before
+    the (possibly hours-long) chunk loop below even starts -- on a large
+    backlog a word from that snapshot can be deleted out from under this
+    run by the time its chunk is reached (a concurrent prune via the web
+    app, or any other admin cleanup touching `word` directly). Found live:
+    a maintain run crashed on a ForeignKeyViolation inserting word_category
+    for a word deleted mid-run by an unrelated cleanup. Each chunk re-checks
+    which of its own word ids still exist immediately before use, dropping
+    any that don't, rather than trusting the stale snapshot -- cheap (one
+    indexed SELECT per chunk) and avoids wasting an LLM call on a word
+    about to fail to insert anyway."""
     ssch = db._safe_schema(schema)
     with conn.cursor() as cur:
         where = (" WHERE NOT EXISTS (SELECT 1 FROM " + ssch + ".word_category wc WHERE wc.word_id=word.id)"
@@ -186,7 +198,7 @@ def classify_and_store(conn, schema: str, cfg: Config | None = None, limit: int 
     if batch:
         clf.batch = batch
 
-    stats = {"words": len(items), "classified": 0, "assignments": 0}
+    stats = {"words": len(items), "classified": 0, "assignments": 0, "vanished": 0}
 
     # One-time clear, before any chunk's writes -- only_missing's WHERE
     # already guarantees these words have no rows to clear; a --limit run
@@ -205,6 +217,21 @@ def classify_and_store(conn, schema: str, cfg: Config | None = None, limit: int 
 
     for start in range(0, len(items), max(1, commit_every)):
         chunk = items[start:start + commit_every]
+
+        # Re-verify against the live table rather than trusting the
+        # snapshot -- see this function's own docstring for the crash this
+        # is fixing. Filtered BEFORE classify() so a vanished word doesn't
+        # also cost an LLM call for nothing.
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT id FROM {ssch}.word WHERE id = ANY(%s)", ([it["_id"] for it in chunk],))
+            still_present = {r[0] for r in cur.fetchall()}
+        vanished = [it for it in chunk if it["_id"] not in still_present]
+        if vanished:
+            stats["vanished"] += len(vanished)
+            chunk = [it for it in chunk if it["_id"] in still_present]
+        if not chunk:
+            continue
+
         tags = clf.classify(chunk)
         with conn.cursor() as cur:
             for it in chunk:

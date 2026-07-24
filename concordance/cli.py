@@ -326,7 +326,8 @@ def classify(
                                commit_every=commit_every)
     conn.close()
     console.print(f"[green]✓[/green] classified [bold]{stats['classified']}[/bold]/{stats['words']} words "
-                  f"-> {stats['assignments']} category assignments")
+                  f"-> {stats['assignments']} category assignments"
+                  + (f" ({stats['vanished']} vanished mid-run, skipped)" if stats.get("vanished") else ""))
 
 
 
@@ -1064,7 +1065,8 @@ def maintain(
         with console.status("[bold]Classifying USAS domains…"):
             stats = classify_and_store(conn, schema, cfg, limit, only_missing=True, batch=None)
         console.print(f"[green]✓[/green] classify: [bold]{stats['classified']}[/bold]/{stats['words']} words "
-                      f"-> {stats['assignments']} category assignments")
+                      f"-> {stats['assignments']} category assignments"
+                      + (f" ({stats['vanished']} vanished mid-run, skipped)" if stats.get("vanished") else ""))
     else:
         console.print("[dim]classify skipped.[/dim]")
 
