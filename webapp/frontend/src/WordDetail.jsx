@@ -14,7 +14,7 @@ function CategoryChip({ category }) {
       style={{ background: colorForBucket(category.color_bucket) }}
       title={category.confidence != null ? `confidence ${Math.round(category.confidence * 100)}%` : undefined}
     >
-      {category.name}
+      {category.domain_name ? `${category.domain_name} - ${category.name}` : category.name}
     </span>
   )
 }

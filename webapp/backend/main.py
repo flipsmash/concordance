@@ -499,6 +499,9 @@ class WordCategory(BaseModel):
     is_primary: bool
     confidence: float | None
     color_bucket: str | None  # usas_domains.bucket_for(code[:1]) -- None -> gray chip
+    domain_name: str | None  # the real USAS top-level field name (usas.py's 21, not
+                              # usas_domains.py's 6 UI buckets) -- None when `code` IS
+                              # already top-level (name would just duplicate it)
 
 
 class DifficultyFactors(BaseModel):
@@ -585,17 +588,22 @@ def word_detail(word_id: int, _: dict = Depends(require_viewer)) -> WordDetail:
          audio_source) = row
 
         cur.execute(
-            f"""SELECT c.code, c.name, wc.is_primary, wc.confidence
+            f"""SELECT c.code, c.name, wc.is_primary, wc.confidence, top.name
                 FROM {SCHEMA}.word_category wc
                 JOIN {SCHEMA}.category c ON c.id = wc.category_id
+                LEFT JOIN {SCHEMA}.category top
+                       ON top.taxonomy = c.taxonomy AND top.code = left(c.code, 1) AND top.level = 0
                 WHERE wc.word_id = %s
                 ORDER BY wc.is_primary DESC, wc.confidence DESC NULLS LAST, c.code ASC""",
             (word_id,),
         )
         categories = [
             WordCategory(code=code, name=name, is_primary=is_primary, confidence=confidence,
-                         color_bucket=usas_domains.bucket_for(code[:1] if code else None))
-            for code, name, is_primary, confidence in cur.fetchall()
+                         color_bucket=usas_domains.bucket_for(code[:1] if code else None),
+                         # None when `code` is itself the top-level letter -- domain_name
+                         # would just repeat `name` in that case.
+                         domain_name=domain_name if code and len(code) > 1 else None)
+            for code, name, is_primary, confidence, domain_name in cur.fetchall()
         ]
 
         cur.execute(
