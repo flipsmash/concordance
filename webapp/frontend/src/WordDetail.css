@@ -53,6 +53,27 @@
   height: 32px;
 }
 
+.word-detail-surprise {
+  margin-left: auto;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-h);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.word-detail-surprise:hover {
+  border-color: var(--accent);
+}
+
+.word-detail-surprise:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .word-detail-section {
   border-bottom: 1px solid var(--border);
   padding-bottom: 16px;

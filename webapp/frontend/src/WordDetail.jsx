@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import GraphView from './GraphView'
 import { colorForBucket } from './domainColors'
 import './WordDetail.css'
@@ -21,11 +21,30 @@ function CategoryChip({ category }) {
 function WordDetail({ backTo = '/accepted' }) {
   const { id } = useParams()
   const navigate = useNavigate()
+  const location = useLocation()
   const [word, setWord] = useState(null)
   const [notFound, setNotFound] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [neighbors, setNeighbors] = useState(null) // null = not loaded yet, [] = loaded, none found
+  const [surpriseLoading, setSurpriseLoading] = useState(false)
+
+  // Same host-route family as this page's own -- /app/words/:id keeps
+  // navigating within /app (so `backTo="/app"` keeps working after repeat
+  // clicks), /words/:id (the admin curation detail view) stays on /words.
+  const wordsBase = location.pathname.startsWith('/app/') ? '/app/words' : '/words'
+
+  function surpriseMe() {
+    setSurpriseLoading(true)
+    fetch(`${API_BASE}/api/browse/words?random=true`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        const next = data?.items?.[0]
+        if (next) navigate(`${wordsBase}/${next.id}`)
+      })
+      .catch(() => {})
+      .finally(() => setSurpriseLoading(false))
+  }
 
   useEffect(() => {
     setLoading(true)
@@ -88,6 +107,14 @@ function WordDetail({ backTo = '/accepted' }) {
         {hasAudio && (
           <audio controls src={`${API_BASE}/api/words/${id}/audio`} className="word-detail-audio" />
         )}
+        <button
+          type="button"
+          className="word-detail-surprise"
+          onClick={surpriseMe}
+          disabled={surpriseLoading}
+        >
+          {surpriseLoading ? '…' : '🎲 Surprise me'}
+        </button>
       </div>
 
       <section className="word-detail-section">
