@@ -2,9 +2,11 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import InviteButton from './InviteButton'
 import { usePagedTable } from './usePagedTable'
+import './Browse.css' // .browse-az-strip/.browse-az-letter -- reused here as-is
 
 const API_BASE = ''
 const PAGE_SIZE = 50
+const ALPHABET = 'abcdefghijklmnopqrstuvwxyz'.split('')
 
 const COLUMNS = [
   { key: 'lemma', label: 'Term' },
@@ -16,6 +18,9 @@ const COLUMNS = [
 function AcceptedView() {
   const [pos, setPos] = useState('')
   const [posOptions, setPosOptions] = useState([])
+  const [qInput, setQInput] = useState('')
+  const [q, setQ] = useState('')
+  const [letter, setLetter] = useState('')
 
   useEffect(() => {
     fetch(`${API_BASE}/api/pos-values`)
@@ -23,6 +28,13 @@ function AcceptedView() {
       .then(setPosOptions)
       .catch(() => {})
   }, [])
+
+  // Same 200ms debounce as Browse.jsx's own search box -- one keystroke
+  // pause convention everywhere in the app, not a second, differently-timed one.
+  useEffect(() => {
+    const handle = setTimeout(() => setQ(qInput.trim()), 200)
+    return () => clearTimeout(handle)
+  }, [qInput])
 
   const {
     items, setItems, total, setTotal, page, setPage, sort, dir, handleSort,
@@ -32,11 +44,21 @@ function AcceptedView() {
     pageSize: PAGE_SIZE,
     defaultSort: 'difficulty',
     defaultDir: 'asc',
-    extraParams: { pos },
+    extraParams: { pos, q, letter },
   })
 
   function handlePosChange(value) {
     setPos(value)
+    resetPage()
+  }
+
+  function handleQChange(value) {
+    setQInput(value)
+    resetPage()
+  }
+
+  function handleLetterChange(value) {
+    setLetter((current) => (current === value ? '' : value))
     resetPage()
   }
 
@@ -67,6 +89,28 @@ function AcceptedView() {
           {total.toLocaleString()} active term{total === 1 ? '' : 's'}
         </span>
         <InviteButton />
+      </div>
+
+      <div className="browse-search">
+        <input
+          type="text"
+          placeholder="Search for a word…"
+          value={qInput}
+          onChange={(e) => handleQChange(e.target.value)}
+        />
+      </div>
+
+      <div className="browse-az-strip">
+        {ALPHABET.map((l) => (
+          <button
+            type="button"
+            key={l}
+            className={letter === l ? 'browse-az-letter active' : 'browse-az-letter'}
+            onClick={() => handleLetterChange(l)}
+          >
+            {l}
+          </button>
+        ))}
       </div>
 
       {error && <div className="error-banner">{error}</div>}

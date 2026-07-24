@@ -244,23 +244,44 @@ def list_words(
     sort: Literal["lemma", "part_of_speech", "definition", "difficulty"] = "difficulty",
     dir: Literal["asc", "desc"] = "asc",
     pos: str | None = None,
+    q: str | None = None,
+    letter: str | None = Query(None, min_length=1, max_length=1),
     _: dict = Depends(require_admin),
 ) -> WordPage:
     order_col = SORT_COLUMNS[sort]
     order_dir = "ASC" if dir == "asc" else "DESC"
     offset = (page - 1) * page_size
-    pos_filter = " AND w.part_of_speech = %s" if pos else ""
-    params = (pos,) if pos else ()
+    filters = []
+    params = []
+    if pos:
+        filters.append("w.part_of_speech = %s")
+        params.append(pos)
+    if letter:
+        filters.append("w.lemma_lc LIKE %s")
+        params.append(f"{letter.lower()}%")
+    if q:
+        # Same trigram threshold as /api/words/search and browse.py's own
+        # `q` filter -- one "what does typing X match" behavior everywhere
+        # in the app, not a second, differently-tuned search. Deliberately
+        # NOT reordering by relevance here (unlike browse.py's `elif q:`
+        # branch): this is a curation table where a clicked sort column
+        # shouldn't flip out from under you just because you typed
+        # something, and skipping it avoids browse.py's own footgun of a
+        # second `%s` for the ORDER BY needing `params` re-extended AFTER
+        # the count query already consumed the plain filter params.
+        filters.append("similarity(w.lemma, %s) > 0.1")
+        params.append(q)
+    where_extra = "".join(f" AND {f}" for f in filters)
 
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(f"SELECT count(*) FROM {SCHEMA}.word w WHERE w.active{pos_filter}", params)
+        cur.execute(f"SELECT count(*) FROM {SCHEMA}.word w WHERE w.active{where_extra}", params)
         total = cur.fetchone()[0]
 
         cur.execute(
             f"""SELECT w.id, w.lemma, w.part_of_speech, w.definition, d.difficulty, w.rescued_from_reject
                 FROM {SCHEMA}.word w
                 LEFT JOIN {SCHEMA}.word_difficulty d ON d.word_id = w.id
-                WHERE w.active{pos_filter}
+                WHERE w.active{where_extra}
                 ORDER BY {order_col} {order_dir} NULLS LAST, w.lemma ASC
                 LIMIT %s OFFSET %s""",
             (*params, page_size, offset),
@@ -299,21 +320,23 @@ def prune_word(word_id: int, _: dict = Depends(require_admin)) -> None:
 
 
 REJECTED_SORT_COLUMNS = {
-    "lemma": "r.lemma",
-    "book": "b.title",
-    "reason": "r.reason",
-    "count": "r.count",
-    "zipf": "r.zipf",
+    "lemma": "lemma",
+    "book_count": "book_count",
+    "reason": "reasons",
+    "count": "total_count",
+    "zipf": "zipf",
 }
 
 
 class RejectedRow(BaseModel):
-    id: int
+    id: int  # a representative rejected_word.id (rejected_lemma_index.rep_id)
+             # -- what POST /api/rejected/{id}/accept acts on. accept_rejected
+             # itself is unchanged (still by-id, single-book-link, single-row
+             # delete); see rejected_lemma_index's own schema comment for why.
     lemma: str
-    book: str
-    reason: str | None
-    detail: str | None
-    count: int | None
+    book_count: int
+    reasons: list[str]
+    count: int | None    # summed across every book this lemma was rejected in
     zipf: float | None
 
 
@@ -328,47 +351,73 @@ class RejectedPage(BaseModel):
 def list_rejected(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=500),
-    sort: Literal["lemma", "book", "reason", "count", "zipf"] = "count",
+    sort: Literal["lemma", "book_count", "reason", "count", "zipf"] = "count",
     dir: Literal["asc", "desc"] = "desc",
     book: list[str] = Query([]),
     reason: list[str] = Query([]),
+    q: str | None = None,
+    letter: str | None = Query(None, min_length=1, max_length=1),
     _: dict = Depends(require_admin),
 ) -> RejectedPage:
+    """One row per distinct rejected lemma (rejected_lemma_index), not per
+    (book, lemma) instance -- curation review happens once per WORD, not
+    once per book it was rejected in (see the view's own schema comment in
+    concordance/db.py, and refresh via `concordance refresh-rejected-index`
+    to pick up recent ingests/accepts)."""
     order_col = REJECTED_SORT_COLUMNS[sort]
     order_dir = "ASC" if dir == "asc" else "DESC"
     offset = (page - 1) * page_size
 
     filters, params = [], []
     if book:
-        filters.append("b.title = ANY(%s)")
+        # rejected_lemma_index only carries a book COUNT per lemma, not
+        # which books -- "distinct lemmas rejected in book X" has to reach
+        # back to rejected_word/book for that specific narrowing. Selects
+        # against the small view's own lemma_lc, same as q/letter below,
+        # just keyed on book membership instead of a lemma pattern.
+        filters.append(f"""rli.lemma_lc = ANY(
+            SELECT DISTINCT rw.lemma_lc FROM {SCHEMA}.rejected_word rw
+            JOIN {SCHEMA}.book b ON b.id = rw.book_id
+            WHERE b.title = ANY(%s))""")
         params.append(book)
     if reason:
-        filters.append("r.reason = ANY(%s)")
+        filters.append("rli.reasons && %s")
         params.append(reason)
+    if letter:
+        filters.append("rli.lemma_lc LIKE %s")
+        params.append(f"{letter.lower()}%")
+    if q:
+        # Deliberately prefix match, NOT trigram fuzzy match like
+        # /api/words/search and /api/words' own `q` -- confirmed live:
+        # trigram similarity>0.1 against this view's ~463k distinct lemmas
+        # turns a query like "apple" into ~4200 coincidental-trigram
+        # matches (aaa, aab, abc -- anything sharing a leading trigram),
+        # not relevant results. A prefix match stays both relevant
+        # (apple -> appleby, applecart, not aaa) and is still fast here.
+        filters.append("rli.lemma_lc LIKE %s")
+        params.append(f"{q.lower()}%")
     where_extra = "".join(f" AND {f}" for f in filters)
 
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            f"""SELECT count(*) FROM {SCHEMA}.rejected_word r
-                JOIN {SCHEMA}.book b ON b.id = r.book_id
+            f"""SELECT count(*) FROM {SCHEMA}.rejected_lemma_index rli
                 WHERE true{where_extra}""",
             params,
         )
         total = cur.fetchone()[0]
 
         cur.execute(
-            f"""SELECT r.id, r.lemma, b.title, r.reason, r.detail, r.count, r.zipf
-                FROM {SCHEMA}.rejected_word r
-                JOIN {SCHEMA}.book b ON b.id = r.book_id
+            f"""SELECT rli.rep_id, rli.lemma, rli.book_count, rli.reasons, rli.total_count, rli.zipf
+                FROM {SCHEMA}.rejected_lemma_index rli
                 WHERE true{where_extra}
-                ORDER BY {order_col} {order_dir} NULLS LAST, r.lemma ASC
+                ORDER BY {order_col} {order_dir} NULLS LAST, rli.lemma ASC
                 LIMIT %s OFFSET %s""",
             (*params, page_size, offset),
         )
         rows = cur.fetchall()
 
     items = [
-        RejectedRow(id=r[0], lemma=r[1], book=r[2], reason=r[3], detail=r[4], count=r[5], zipf=r[6])
+        RejectedRow(id=r[0], lemma=r[1], book_count=r[2], reasons=r[3] or [], count=r[4], zipf=r[5])
         for r in rows
     ]
     return RejectedPage(items=items, total=total, page=page, page_size=page_size)

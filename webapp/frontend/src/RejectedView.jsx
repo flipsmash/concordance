@@ -1,13 +1,15 @@
 import { useEffect, useState } from 'react'
 import { usePagedTable } from './usePagedTable'
 import MultiSelect from './MultiSelect'
+import './Browse.css' // .browse-az-strip/.browse-az-letter -- reused here as-is
 
 const API_BASE = ''
 const PAGE_SIZE = 50
+const ALPHABET = 'abcdefghijklmnopqrstuvwxyz'.split('')
 
 const COLUMNS = [
   { key: 'lemma', label: 'Term' },
-  { key: 'book', label: 'Book' },
+  { key: 'book_count', label: 'Books' },
   { key: 'reason', label: 'Reason' },
   { key: 'count', label: 'Count' },
   { key: 'zipf', label: 'Zipf' },
@@ -19,6 +21,9 @@ function RejectedView() {
   const [reasons, setReasons] = useState([])
   const [reasonOptions, setReasonOptions] = useState([])
   const [addedIds, setAddedIds] = useState({})
+  const [qInput, setQInput] = useState('')
+  const [q, setQ] = useState('')
+  const [letter, setLetter] = useState('')
 
   useEffect(() => {
     fetch(`${API_BASE}/api/rejected/books`)
@@ -31,6 +36,12 @@ function RejectedView() {
       .catch(() => {})
   }, [])
 
+  // Same 200ms debounce as Browse.jsx's own search box.
+  useEffect(() => {
+    const handle = setTimeout(() => setQ(qInput.trim()), 200)
+    return () => clearTimeout(handle)
+  }, [qInput])
+
   const {
     items, setItems, total, setTotal, page, setPage, sort, dir, handleSort,
     loading, error, setError, load, resetPage, totalPages,
@@ -39,7 +50,7 @@ function RejectedView() {
     pageSize: PAGE_SIZE,
     defaultSort: 'count',
     defaultDir: 'desc',
-    extraParams: { book: books, reason: reasons },
+    extraParams: { book: books, reason: reasons, q, letter },
   })
 
   function handleBooksChange(values) {
@@ -49,6 +60,16 @@ function RejectedView() {
 
   function handleReasonsChange(values) {
     setReasons(values)
+    resetPage()
+  }
+
+  function handleQChange(value) {
+    setQInput(value)
+    resetPage()
+  }
+
+  function handleLetterChange(value) {
+    setLetter((current) => (current === value ? '' : value))
     resetPage()
   }
 
@@ -84,6 +105,28 @@ function RejectedView() {
         </span>
       </div>
 
+      <div className="browse-search">
+        <input
+          type="text"
+          placeholder="Search by first letters…"
+          value={qInput}
+          onChange={(e) => handleQChange(e.target.value)}
+        />
+      </div>
+
+      <div className="browse-az-strip">
+        {ALPHABET.map((l) => (
+          <button
+            type="button"
+            key={l}
+            className={letter === l ? 'browse-az-letter active' : 'browse-az-letter'}
+            onClick={() => handleLetterChange(l)}
+          >
+            {l}
+          </button>
+        ))}
+      </div>
+
       {error && <div className="error-banner">{error}</div>}
 
       <div className="table-wrap">
@@ -103,10 +146,10 @@ function RejectedView() {
             {items.map((w) => (
               <tr key={w.id}>
                 <td className="lemma">{w.lemma}</td>
-                <td className="pos">{w.book}</td>
-                <td className="reason" title={w.detail || undefined}>
-                  {w.reason || '—'}
+                <td className="pos">
+                  {w.book_count} book{w.book_count === 1 ? '' : 's'}
                 </td>
+                <td className="reason">{w.reasons.length > 0 ? w.reasons.join(', ') : '—'}</td>
                 <td className="difficulty">{w.count ?? '—'}</td>
                 <td className="difficulty">{w.zipf != null ? w.zipf.toFixed(2) : '—'}</td>
                 <td className="actions">

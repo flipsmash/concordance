@@ -447,6 +447,29 @@ def calibrate_difficulty(
                      if stats.get("skipped_no_baseline") else ""))
 
 
+@app.command("refresh-rejected-index")
+def refresh_rejected_index(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Refresh rejected_lemma_index, the precomputed distinct-lemma view
+    behind the Rejected curation tab's search box / A-Z letter-jump (see
+    concordance/db.py's schema comment on rejected_lemma_index for why
+    rejected_word itself -- ~25M rows, ~468k distinct lemmas -- is too big
+    to search directly). Meant to run on its own daily schedule (cron/
+    systemd timer), independent of `maintain` -- this is cheap (~15-20s)
+    and curation search tolerates a bit of staleness, unlike maintain's
+    enrichment steps."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    db.refresh_rejected_lemma_index(conn, schema)
+    conn.close()
+    console.print("[green]✓[/green] refresh-rejected-index: rejected_lemma_index refreshed")
+
+
 @app.command("book-similarity")
 def book_similarity(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),

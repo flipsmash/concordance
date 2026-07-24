@@ -353,10 +353,68 @@ CREATE TABLE IF NOT EXISTS {s}.word_personal_difficulty (
 
 
 # pg_trgm powers future fuzzy "did-you-mean" lookups; optional because CREATE
-# EXTENSION needs privileges a managed role may lack.
+# EXTENSION needs privileges a managed role may lack. (rejected_lemma_index's
+# own search uses a plain prefix LIKE, not trigram similarity -- confirmed
+# live that trigram against it returns mostly coincidental-trigram noise at
+# this table's scale -- so it needs no trgm index of its own here.)
 _TRGM_DDL = """
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE INDEX IF NOT EXISTS word_lemma_trgm ON {s}.word USING gin (lemma gin_trgm_ops);
+"""
+
+# Precomputed distinct-lemma view over rejected_word -- the Rejected
+# curation tab (RejectedView) is meant to be reviewed once per WORD, not
+# once per (book, lemma) instance: rejected_word is deliberately many-rows-
+# per-lemma by design (~25M rows, ~468k distinct lemmas at real corpus
+# scale -- see rejected_word's own schema comment, the same lemma can be
+# rejected for different reasons in different books), which makes it both
+# the wrong grain for a review list AND too big to search/count directly:
+# an exact COUNT(*) with any filter is a multi-second scan REGARDLESS of
+# indexing (trigram or plain prefix LIKE) -- Postgres's planner won't use
+# an index for an aggregate over that many rows. This view is the review
+# grain: one row per lemma, aggregated across every book it was rejected in.
+#
+# `NOT EXISTS (... w.active)` is what makes a promoted word actually
+# disappear from the next refresh -- accept_rejected only deletes the ONE
+# rejected_word row it was invoked on (see its own docstring), so without
+# this the lemma would keep resurfacing via its other book instances even
+# after being accepted. Same "word wins over rejected_word" rule
+# classify.py's verdict cache already applies, just enforced here too --
+# and the reason this view can only be created once word.active exists,
+# hence its own DDL block below rather than living in _SCHEMA_DDL (which
+# runs before any ALTER-added column exists, and would fail on a brand-new
+# schema where `word` was just CREATEd bare).
+#
+# rep_id is a representative rejected_word.id (arbitrary but stable choice
+# via min()) -- accept_rejected's existing by-id, single-book-link, single-
+# row-delete behavior is intentionally left as-is (see its own docstring);
+# this just gives the distinct-lemma UI an id to call it with, rather than
+# rewriting accept to promote/link/delete across every book at once, a
+# materially different and riskier operation nobody asked for.
+#
+# A real MATERIALIZED VIEW (this project's first), not a hand-maintained
+# table kept in sync at insert time: nothing would otherwise notice a
+# lemma's last active instance being accepted or its book deleted, so an
+# incrementally-maintained copy would accumulate phantom rows forever.
+# Refreshed periodically (concordance refresh-rejected-index / maintain),
+# not on every write -- "as of a bit ago" is an acceptable staleness window
+# for curation review/search, unlike the enrichment tables that have to
+# reflect the very latest ingest.
+_REJECTED_LEMMA_INDEX_DDL = """
+CREATE MATERIALIZED VIEW IF NOT EXISTS {s}.rejected_lemma_index AS
+    SELECT r.lemma_lc,
+           min(r.lemma) AS lemma,
+           min(r.id) AS rep_id,
+           count(DISTINCT r.book_id) AS book_count,
+           sum(r.count) AS total_count,
+           max(r.zipf) AS zipf,
+           array_agg(DISTINCT r.reason) FILTER (WHERE r.reason IS NOT NULL) AS reasons
+    FROM {s}.rejected_word r
+    WHERE NOT EXISTS (
+        SELECT 1 FROM {s}.word w WHERE w.lemma_lc = r.lemma_lc AND w.active
+    )
+    GROUP BY r.lemma_lc;
+CREATE UNIQUE INDEX IF NOT EXISTS rejected_lemma_index_pkey ON {s}.rejected_lemma_index (lemma_lc);
 """
 
 # One row per word, two independent per-word vectors (not an all-pairs distance
@@ -495,6 +553,9 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
         cur.execute(
             f"""INSERT INTO {s}.app_settings (key, value) VALUES ('calibration_scale', %s)
                 ON CONFLICT (key) DO NOTHING""", (Json({"value": calibration.DEFAULT_SCALE}),))
+        # Only valid once word.active exists (added a few lines up in this
+        # same block) -- see _REJECTED_LEMMA_INDEX_DDL's own comment.
+        cur.execute(_REJECTED_LEMMA_INDEX_DDL.format(s=s))
     trgm = True
     try:
         with conn.cursor() as cur:
@@ -509,6 +570,22 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
         conn.rollback()
     conn.commit()
     return trgm
+
+
+def refresh_rejected_lemma_index(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> None:
+    """`concordance refresh-rejected-index` -- refreshes rejected_lemma_index
+    (see its own schema comment) from the current state of rejected_word.
+    CONCURRENTLY so RejectedView's search/letter-jump keep working against
+    the old data while this runs, rather than blocking readers for however
+    long the GROUP BY over rejected_word takes (~15-20s at real corpus
+    scale) -- requires the unique index on lemma_lc already created in
+    schema DDL. Meant to run on its own periodic schedule (daily cron), not
+    on every write and not gated to `maintain`'s cadence -- curation search
+    tolerates being a bit stale in a way `maintain`'s enrichment steps don't."""
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(f"REFRESH MATERIALIZED VIEW CONCURRENTLY {s}.rejected_lemma_index")
+    conn.commit()
 
 
 def _synonyms(cell: str) -> list[str]:
