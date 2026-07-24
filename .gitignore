@@ -34,6 +34,7 @@ missed_shadow.txt
 # Database dumps (data, not code)
 *.dump
 *.sql
+db_backups/
 
 # Licensed WordNet Domains / SentiWords data — do not publish
 wordnet-domains-sentiwords/
