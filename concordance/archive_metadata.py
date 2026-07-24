@@ -135,3 +135,47 @@ def fetch_publication_info(gutenberg_id: int, timeout: float = 15.0) -> tuple[in
     era = era_match.group(1).strip() if era_match else None
 
     return year, era
+
+
+def compute_book_metadata(path, *, skip_network: bool = False, delay: float = 0.3) -> dict:
+    """word_count/distinct_nonstop_word_count/publication_year/publication_era
+    for a single book file -- the one place this logic lives, shared by
+    `concordance archive-metadata` (the standalone backfill) and `concordance
+    ingest` (called inline right after a newly-ingested book's file is
+    archived), so the two entry points can never quietly drift apart on what
+    "this book's metadata" means.
+
+    .txt is assumed to be a Gutenberg release: boilerplate-stripped before
+    counting, and its Gutenberg id (if any) is looked up for publication
+    info. Any other format (.epub, .pdf) has no such header to find an id
+    in, so it's run through concordance.extract instead (the same reader
+    `ingest`/`run` already use) with no publication lookup -- confirmed
+    live there's no reliable substitute source for a non-Gutenberg book's
+    original publication date."""
+    from pathlib import Path
+
+    path = Path(path)
+    year = era = None
+    if path.suffix.lower() == ".txt":
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        text = strip_gutenberg_boilerplate(raw)
+        if not skip_network:
+            gutenberg_id = extract_gutenberg_id(raw)
+            if gutenberg_id:
+                import time
+
+                year, era = fetch_publication_info(gutenberg_id)
+                time.sleep(delay)
+    else:
+        from .extract import extract as extract_book
+
+        chapters = extract_book(path)
+        text = "\n\n".join(c.text for c in chapters)
+
+    word_count, distinct_nonstop = word_stats(text)
+    return {
+        "word_count": word_count,
+        "distinct_nonstop_word_count": distinct_nonstop,
+        "publication_year": year,
+        "publication_era": era,
+    }

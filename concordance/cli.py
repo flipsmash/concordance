@@ -98,7 +98,9 @@ def ingest(
     stub: bool = typer.Option(False, "--stub", help="Force the no-model stub judge even if the default model is present."),
     min_zipf: float = typer.Option(3.5, "--min-zipf", help="Frequency floor; higher keeps rarer words only."),
     limit: int = typer.Option(0, "--limit", "-l", help="Cap the shortlist size (0 = no cap)."),
-    no_lookup: bool = typer.Option(False, "--no-lookup", help="Skip online definition lookups."),
+    no_lookup: bool = typer.Option(False, "--no-lookup",
+                                    help="Skip online definition lookups, and the archive-metadata step's "
+                                         "Gutenberg publication-date lookup."),
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema to write into."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
     no_archive: bool = typer.Option(False, "--no-archive", help="Leave source book files in place instead of moving them to archive/."),
@@ -107,7 +109,14 @@ def ingest(
     no hand-edit, no finalize. Review/prune the result in the review web app.
 
     With no argument, processes every .epub/.pdf/.txt file in incoming/,
-    parsing "[Title] -- [Author]" from each filename to set book.author."""
+    parsing "[Title] -- [Author]" from each filename to set book.author.
+
+    Once a book is archived (skipped if --no-archive), its archive-metadata
+    fields (word_count, distinct_nonstop_word_count, archive_path, and a
+    best-effort publication_year/publication_era) are computed inline --
+    see archive_metadata.compute_book_metadata, the same implementation
+    `concordance archive-metadata` uses to backfill older books -- so a
+    freshly-ingested book never needs that command run afterward."""
     cfg = Config(
         min_zipf=min_zipf,
         limit=limit,
@@ -185,6 +194,27 @@ def ingest(
                 console.print(f"[dim]moved → {archive_dir}/{dest.name}[/dim]")
             except OSError as exc:
                 console.print(f"[yellow]![/yellow] could not archive {b.name}: {exc}")
+                dest = None
+
+            # Same fields `concordance archive-metadata` backfills, computed
+            # inline here so a freshly-ingested book never needs that separate
+            # command run afterward -- see archive_metadata.compute_book_metadata,
+            # the one shared implementation both call. Skipped (not just
+            # deferred) when archiving itself failed above: archive_path is
+            # meant to be a stable pointer to a file that actually lives in
+            # archive/, not wherever the source happened to be sitting.
+            if dest is not None:
+                found = db.get_book_by_title(conn, title, schema)
+                if found is not None:
+                    book_id, _existing_path = found
+                    try:
+                        from . import archive_metadata as am
+                        meta = am.compute_book_metadata(dest, skip_network=no_lookup)
+                        db.update_book_archive_metadata(
+                            conn, book_id, archive_path=dest.as_posix(), schema=schema, **meta,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        console.print(f"[yellow]![/yellow] archive-metadata failed for {dest.name}: {exc}")
 
     conn.close()
     console.print()
@@ -485,7 +515,18 @@ def archive_metadata_cmd(
     best-effort, publication_year/publication_era) for every book whose
     full text sits in archive/ -- see concordance/archive_metadata.py's own
     docstring for the word-counting method and why publication date is two
-    columns, not one, neither reliably populated.
+    columns, not one, neither reliably populated. `concordance ingest`
+    computes the same fields inline for every NEW book as it's archived
+    (via archive_metadata.compute_book_metadata, the one shared
+    implementation) -- this command exists for the historical backlog and
+    for re-running if that inline step was ever skipped (--no-archive, or
+    an interrupted run).
+
+    Covers .txt/.epub/.pdf (same formats `ingest` accepts) -- .txt is
+    assumed to be a Gutenberg release (boilerplate stripped, its Gutenberg
+    id looked up for publication info); .epub/.pdf are read via
+    concordance.extract instead, with no publication lookup (no Gutenberg
+    id to key one on).
 
     Only-missing by default (skips any book whose archive_path is already
     set) so an interrupted run resumes without re-hitting the network for
@@ -493,8 +534,6 @@ def archive_metadata_cmd(
     requests at a full corpus's scale, politely paced via --delay),
     expected to run for hours on a full backlog. Deliberately not part of
     `maintain`, same reasoning as wordnik-pron/commons-download."""
-    import time as _time
-
     from . import archive_metadata as am
 
     try:
@@ -507,12 +546,12 @@ def archive_metadata_cmd(
         console.print(f"[red]✗[/red] no such directory: {archive_dir}/")
         raise typer.Exit(code=1)
 
-    files = sorted(p for p in archive_dir.iterdir() if p.suffix.lower() == ".txt")
+    files = sorted(p for p in archive_dir.iterdir() if p.suffix.lower() in _INGEST_SUFFIXES)
     if limit:
         files = files[:limit]
     console.print(f"Found [bold]{len(files)}[/bold] file(s) in {archive_dir}/.")
 
-    stats = {"processed": 0, "no_match": 0, "already_done": 0, "no_pub_info": 0}
+    stats = {"processed": 0, "no_match": 0, "already_done": 0, "no_pub_info": 0, "errors": 0}
     for i, path in enumerate(files, 1):
         title, _author = _parse_incoming_name(path)
         found = db.get_book_by_title(conn, title, schema)
@@ -524,23 +563,17 @@ def archive_metadata_cmd(
             stats["already_done"] += 1
             continue
 
-        raw = path.read_text(encoding="utf-8", errors="replace")
-        stripped = am.strip_gutenberg_boilerplate(raw)
-        word_count, distinct_nonstop = am.word_stats(stripped)
-
-        year, era = None, None
-        if not skip_network:
-            gutenberg_id = am.extract_gutenberg_id(raw)
-            if gutenberg_id:
-                year, era = am.fetch_publication_info(gutenberg_id)
-                if year is None and era is None:
-                    stats["no_pub_info"] += 1
-                _time.sleep(delay)
+        try:
+            meta = am.compute_book_metadata(path, skip_network=skip_network, delay=delay)
+        except Exception as exc:  # noqa: BLE001 -- one bad file (scanned PDF, corrupt epub) shouldn't abort the run
+            console.print(f"[yellow]![/yellow] skipping {path.name}: {exc}")
+            stats["errors"] += 1
+            continue
+        if not skip_network and meta["publication_year"] is None and meta["publication_era"] is None:
+            stats["no_pub_info"] += 1
 
         db.update_book_archive_metadata(
-            conn, book_id, archive_path=path.as_posix(), word_count=word_count,
-            distinct_nonstop_word_count=distinct_nonstop, publication_year=year,
-            publication_era=era, schema=schema,
+            conn, book_id, archive_path=path.as_posix(), schema=schema, **meta,
         )
         stats["processed"] += 1
         if i % 50 == 0:
@@ -549,7 +582,8 @@ def archive_metadata_cmd(
     conn.close()
     console.print(f"[green]✓[/green] archive-metadata: [bold]{stats['processed']}[/bold] books updated, "
                   f"{stats['already_done']} already done, {stats['no_match']} had no matching book row"
-                  + (f", {stats['no_pub_info']} had no publication info found" if not skip_network else ""))
+                  + (f", {stats['no_pub_info']} had no publication info found" if not skip_network else "")
+                  + (f", {stats['errors']} skipped on error" if stats["errors"] else ""))
 
 
 @app.command("book-similarity")
