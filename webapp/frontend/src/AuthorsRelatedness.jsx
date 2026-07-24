@@ -3,8 +3,10 @@ import { Link, useNavigate } from 'react-router-dom'
 import AuthorClusterMap from './AuthorClusterMap'
 import AuthorDendrogram from './AuthorDendrogram'
 import AuthorMatrix from './AuthorMatrix'
+import AuthorSelect from './AuthorSelect'
 import RelatednessGraph from './RelatednessGraph'
 import './Authors.css'
+import './Browse.css' // .author-select* -- reused here for the highlight-an-author control
 import './GraphView.css' // .graph-signal-toggle, reused here directly for the tab strip
 
 const API_BASE = ''
@@ -30,6 +32,13 @@ const TABS = [
 function AuthorsRelatedness() {
   const navigate = useNavigate()
   const [tab, setTab] = useState('map')
+  // Owned here, not per-tab -- picking an author to highlight should survive
+  // switching tabs, since "where does X sit in this structure" is the same
+  // question across map/matrix/dendrogram/graph. onChange deliberately just
+  // sets local state rather than AuthorSelect's usual "navigate to this
+  // author's page" behavior (see Visualizations.jsx) -- here the point is to
+  // keep looking at the SAME view with X picked out, not leave it.
+  const [highlighted, setHighlighted] = useState(null)
 
   return (
     <div className="authors-page">
@@ -43,27 +52,40 @@ function AuthorsRelatedness() {
         </Link>
       </header>
 
-      <div className="graph-signal-toggle" role="group" aria-label="View">
-        {TABS.map((t) => (
-          <button key={t.id} type="button" className={tab === t.id ? 'active' : ''} onClick={() => setTab(t.id)}>
-            {t.label}
-          </button>
-        ))}
+      <div className="authors-relatedness-controls">
+        <div className="graph-signal-toggle" role="group" aria-label="View">
+          {TABS.map((t) => (
+            <button key={t.id} type="button" className={tab === t.id ? 'active' : ''} onClick={() => setTab(t.id)}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+        <div className="authors-relatedness-highlight">
+          <span className="muted">Highlight:</span>
+          <AuthorSelect value={highlighted} onChange={setHighlighted} />
+        </div>
       </div>
 
       {tab === 'map' && (
-        <AuthorClusterMap onAuthorClick={(author) => navigate(`/app/authors/${encodeURIComponent(author)}/relatedness`)} />
+        <AuthorClusterMap
+          highlightAuthor={highlighted}
+          onAuthorClick={(author) => navigate(`/app/authors/${encodeURIComponent(author)}/relatedness`)}
+        />
       )}
 
-      {tab === 'matrix' && <AuthorMatrix />}
+      {tab === 'matrix' && <AuthorMatrix highlightAuthor={highlighted} />}
 
       {tab === 'dendrogram' && (
-        <AuthorDendrogram onAuthorClick={(author) => navigate(`/app/authors/${encodeURIComponent(author)}/relatedness`)} />
+        <AuthorDendrogram
+          highlightAuthor={highlighted}
+          onAuthorClick={(author) => navigate(`/app/authors/${encodeURIComponent(author)}/relatedness`)}
+        />
       )}
 
       {tab === 'graph' && (
         <RelatednessGraph
           initialId="__all__"
+          highlightId={highlighted}
           fetchUrl={(_id, topK) => `${API_BASE}/api/browse/authors/relatedness?top_k=${topK}`}
           getLabel={(n) => n.id}
           getSublabel={(n) => (n.book_count != null ? `${n.book_count} book${n.book_count === 1 ? '' : 's'}` : undefined)}

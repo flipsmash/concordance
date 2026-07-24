@@ -5,12 +5,25 @@
   border: 1px solid var(--border);
   border-radius: 6px;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.author-dendrogram-controls {
+  justify-content: flex-end;
+  padding: 8px;
+  flex: 0 0 auto;
 }
 
 .author-dendrogram-svg {
   width: 100%;
-  height: 100%;
+  flex: 1;
   display: block;
+}
+
+.author-dendrogram:fullscreen {
+  background: var(--bg);
+  padding: 12px;
 }
 
 .author-dendrogram-edge {

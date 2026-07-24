@@ -25,7 +25,7 @@ const NODE_RADIUS_RELATED = 8
 // wants a *distance*, so it's inverted explicitly below rather than reusing
 // GraphView's assumption that the API's own number is already the right
 // one to hand the simulation.
-function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNavigate, sharedWordsUrl }) {
+function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNavigate, sharedWordsUrl, highlightId }) {
   const [center, setCenter] = useState(null)
   const [rawGraph, setRawGraph] = useState({ nodes: [], edges: [] })
   const [topK, setTopK] = useState(8)
@@ -178,6 +178,7 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
   const paintNode = useMemo(
     () => (node, ctx, globalScale) => {
       const isCenter = node.id === center?.id
+      const isHighlighted = highlightId != null && node.id === highlightId
       const r = nodeRadius(node)
       ctx.beginPath()
       ctx.arc(node.x, node.y, r, 0, 2 * Math.PI)
@@ -188,6 +189,18 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
         ctx.strokeStyle = cssVar('--text-h', '#08060d')
         ctx.stroke()
       }
+      if (isHighlighted) {
+        // A dashed OUTER ring, not a stroke on the node itself -- stays
+        // visually distinct from isCenter's solid stroke so "this is the
+        // author I searched for" never reads as "this is the ego center."
+        ctx.beginPath()
+        ctx.arc(node.x, node.y, r + 5 / globalScale, 0, 2 * Math.PI)
+        ctx.setLineDash([4 / globalScale, 3 / globalScale])
+        ctx.lineWidth = 2 / globalScale
+        ctx.strokeStyle = cssVar('--text-h', '#08060d')
+        ctx.stroke()
+        ctx.setLineDash([])
+      }
       const fontSize = Math.max(11 / globalScale, 3)
       ctx.font = `${fontSize}px sans-serif`
       ctx.textAlign = 'center'
@@ -195,7 +208,7 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
       ctx.fillStyle = cssVar('--text-h', '#08060d')
       ctx.fillText(getLabel(node), node.x, node.y + r + 2)
     },
-    [center, getLabel, nodeRadius],
+    [center, getLabel, nodeRadius, highlightId],
   )
 
   // force-graph hit-tests clicks against a separate, hidden "shadow" canvas

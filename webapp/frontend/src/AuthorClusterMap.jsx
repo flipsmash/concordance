@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { colorForCluster } from './clusterColors'
+import { cssVar } from './graphUtils'
 import './AuthorClusterMap.css'
+import './GraphView.css' // .graph-maximize -- reused here for the fullscreen button
 
 const API_BASE = ''
 const VIEW = 600 // SVG viewBox is VIEW x VIEW, coordinates normalized into it
@@ -16,10 +18,11 @@ const RADIUS_MAX = 14
 // static (no simulation to run), so SVG's native onClick/hover avoids
 // re-deriving RelatednessGraph's custom canvas hit-testing machinery for
 // a case that doesn't need it.
-function AuthorClusterMap({ onAuthorClick }) {
+function AuthorClusterMap({ onAuthorClick, highlightAuthor }) {
   const [nodes, setNodes] = useState(null) // null = loading
   const [error, setError] = useState('')
   const [hovered, setHovered] = useState(null)
+  const [isFullscreen, setIsFullscreen] = useState(false)
   const containerRef = useRef(null)
 
   useEffect(() => {
@@ -31,6 +34,26 @@ function AuthorClusterMap({ onAuthorClick }) {
       .then((data) => setNodes(data.nodes))
       .catch((err) => setError(err.message || 'failed to load cluster map'))
   }, [])
+
+  useEffect(() => {
+    function handleFullscreenChange() {
+      setIsFullscreen(document.fullscreenElement === containerRef.current)
+    }
+    document.addEventListener('fullscreenchange', handleFullscreenChange)
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange)
+  }, [])
+
+  function toggleFullscreen() {
+    if (document.fullscreenElement) {
+      document.exitFullscreen()
+    } else {
+      containerRef.current?.requestFullscreen()
+    }
+  }
+
+  // hover wins while active (lets you inspect a different point without
+  // losing your highlight pick -- it reappears the moment you mouse away).
+  const active = hovered ?? highlightAuthor ?? null
 
   const { points, maxBookCount } = useMemo(() => {
     if (!nodes || nodes.length === 0) return { points: [], maxBookCount: 1 }
@@ -66,6 +89,11 @@ function AuthorClusterMap({ onAuthorClick }) {
 
   return (
     <div className="cluster-map" ref={containerRef}>
+      <div className="graph-controls cluster-map-controls">
+        <button type="button" className="graph-maximize" onClick={toggleFullscreen}>
+          {isFullscreen ? 'Exit fullscreen' : 'Maximize'}
+        </button>
+      </div>
       {error && <div className="graph-error">{error}</div>}
       {nodes === null && !error && <div className="graph-loading">Loading…</div>}
       {nodes !== null && nodes.length === 0 && !error && (
@@ -73,28 +101,34 @@ function AuthorClusterMap({ onAuthorClick }) {
       )}
       {points.length > 0 && (
         <svg viewBox={`0 0 ${VIEW} ${VIEW}`} className="cluster-map-svg" role="img" aria-label="Author cluster map">
-          {points.map((p) => (
-            <g
-              key={p.author}
-              className="cluster-map-point"
-              onClick={() => onAuthorClick?.(p.author)}
-              onMouseEnter={() => setHovered(p.author)}
-              onMouseLeave={() => setHovered((h) => (h === p.author ? null : h))}
-            >
-              <circle
-                cx={p.cx}
-                cy={p.cy}
-                r={radiusFor(p.book_count)}
-                fill={colorForCluster(p.cluster_id)}
-                opacity={hovered === null || hovered === p.author ? 1 : 0.35}
-              />
-              {hovered === p.author && (
-                <text x={p.cx} y={p.cy - radiusFor(p.book_count) - 4} textAnchor="middle" className="cluster-map-label">
-                  {p.author} · {p.book_count} book{p.book_count === 1 ? '' : 's'}
-                </text>
-              )}
-            </g>
-          ))}
+          {points.map((p) => {
+            const isHighlighted = p.author === highlightAuthor
+            const isActive = p.author === active
+            return (
+              <g
+                key={p.author}
+                className="cluster-map-point"
+                onClick={() => onAuthorClick?.(p.author)}
+                onMouseEnter={() => setHovered(p.author)}
+                onMouseLeave={() => setHovered((h) => (h === p.author ? null : h))}
+              >
+                <circle
+                  cx={p.cx}
+                  cy={p.cy}
+                  r={radiusFor(p.book_count)}
+                  fill={colorForCluster(p.cluster_id)}
+                  opacity={active === null || isActive ? 1 : 0.35}
+                  stroke={isHighlighted ? cssVar('--accent', '#aa3bff') : undefined}
+                  strokeWidth={isHighlighted ? 3 : undefined}
+                />
+                {isActive && (
+                  <text x={p.cx} y={p.cy - radiusFor(p.book_count) - 4} textAnchor="middle" className="cluster-map-label">
+                    {p.author} · {p.book_count} book{p.book_count === 1 ? '' : 's'}
+                  </text>
+                )}
+              </g>
+            )
+          })}
         </svg>
       )}
     </div>

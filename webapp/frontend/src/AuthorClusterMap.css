@@ -6,12 +6,25 @@
   border: 1px solid var(--border);
   border-radius: 6px;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.cluster-map-controls {
+  justify-content: flex-end;
+  padding: 8px;
+  flex: 0 0 auto;
 }
 
 .cluster-map-svg {
   width: 100%;
-  height: 100%;
+  flex: 1;
   display: block;
+}
+
+.cluster-map:fullscreen {
+  background: var(--bg);
+  padding: 12px;
 }
 
 .cluster-map-point {

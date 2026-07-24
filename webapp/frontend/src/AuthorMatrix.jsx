@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import SharedWordsPanel from './SharedWordsPanel'
 import { cssVar } from './graphUtils'
 import './AuthorMatrix.css'
+import './GraphView.css' // .graph-maximize -- reused here for the fullscreen button
 
 const API_BASE = ''
 
@@ -16,14 +17,32 @@ const API_BASE = ''
 // pair's identity and exact numbers instead, and a click opens the shared-
 // words comparison, since a matrix cell is inherently a two-entity pick in
 // a way map/dendrogram node clicks (simple navigation) aren't.
-function AuthorMatrix() {
+function AuthorMatrix({ highlightAuthor }) {
   const [data, setData] = useState(null) // {authors, grid} | null (loading)
   const [error, setError] = useState('')
   const [hoverCell, setHoverCell] = useState(null) // {row, col} | null
   const [comparePair, setComparePair] = useState(null)
+  const [isFullscreen, setIsFullscreen] = useState(false)
   const canvasRef = useRef(null)
   const containerRef = useRef(null)
+  const viewRef = useRef(null)
   const [size, setSize] = useState(0)
+
+  useEffect(() => {
+    function handleFullscreenChange() {
+      setIsFullscreen(document.fullscreenElement === viewRef.current)
+    }
+    document.addEventListener('fullscreenchange', handleFullscreenChange)
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange)
+  }, [])
+
+  function toggleFullscreen() {
+    if (document.fullscreenElement) {
+      document.exitFullscreen()
+    } else {
+      viewRef.current?.requestFullscreen()
+    }
+  }
 
   useEffect(() => {
     fetch(`${API_BASE}/api/browse/authors/matrix`)
@@ -68,7 +87,20 @@ function AuthorMatrix() {
       }
     }
     ctx.globalAlpha = 1
-  }, [data, size, n, cellPx])
+
+    // Highlight-an-author-of-interest: outline its whole row + column band
+    // rather than individual cells -- at N up to ~200, a single highlighted
+    // cell would be nearly invisible, but the full cross is unmistakable
+    // even at matrix scale, and it reads immediately as "everything this
+    // author touches" rather than one pair.
+    const highlightIndex = highlightAuthor ? data.authors.indexOf(highlightAuthor) : -1
+    if (highlightIndex >= 0) {
+      ctx.strokeStyle = accent
+      ctx.lineWidth = 2
+      ctx.strokeRect(0, highlightIndex * cellPx, size, cellPx)
+      ctx.strokeRect(highlightIndex * cellPx, 0, cellPx, size)
+    }
+  }, [data, size, n, cellPx, highlightAuthor])
 
   const hoverInfo = useMemo(() => {
     if (!hoverCell || !data) return null
@@ -92,7 +124,12 @@ function AuthorMatrix() {
   const ready = data !== null && data.authors.length > 0
 
   return (
-    <div className="author-matrix">
+    <div className="author-matrix" ref={viewRef}>
+      <div className="graph-controls author-matrix-controls">
+        <button type="button" className="graph-maximize" onClick={toggleFullscreen}>
+          {isFullscreen ? 'Exit fullscreen' : 'Maximize'}
+        </button>
+      </div>
       {error && <div className="graph-error">{error}</div>}
 
       {/* Always mounted, even while loading/empty -- containerRef must be
@@ -126,6 +163,12 @@ function AuthorMatrix() {
               {hoverInfo.cell.shared_word_count} shared words, {(hoverInfo.cell.score * 100).toFixed(0)}% overlap
               (click to compare)
             </>
+          ) : highlightAuthor && data.authors.includes(highlightAuthor) ? (
+            <>
+              Highlighting <strong>{highlightAuthor}</strong>'s row and column. Hover a cell to see a specific pair.
+            </>
+          ) : highlightAuthor ? (
+            `${highlightAuthor} isn't in this matrix's top authors.`
           ) : (
             'Hover a cell to see the pair; click to compare their shared vocabulary.'
           )}

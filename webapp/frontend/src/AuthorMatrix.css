@@ -4,6 +4,21 @@
   gap: 8px;
 }
 
+.author-matrix-controls {
+  justify-content: flex-end;
+}
+
+.author-matrix:fullscreen {
+  background: var(--bg);
+  padding: 12px;
+  justify-content: center;
+}
+
+.author-matrix:fullscreen .author-matrix-canvas-wrap {
+  flex: 1;
+  height: auto;
+}
+
 .author-matrix-canvas-wrap {
   width: 100%;
   height: calc(100vh - 300px);

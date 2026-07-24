@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { colorForCluster } from './clusterColors'
+import { cssVar } from './graphUtils'
 import './AuthorDendrogram.css'
+import './GraphView.css' // .graph-maximize -- reused here for the fullscreen button
 
 const API_BASE = ''
 const WIDTH = 1000
@@ -18,12 +20,32 @@ const BOTTOM_PADDING = 30
 // hover-then-label pattern. Leaf dots are colored by cluster (fetched from
 // /map and joined by author name) so this view visually agrees with the
 // Map tab instead of introducing its own unrelated color language.
-function AuthorDendrogram({ onAuthorClick }) {
+function AuthorDendrogram({ onAuthorClick, highlightAuthor }) {
   const [tree, setTree] = useState(null)
   const [leafOrder, setLeafOrder] = useState([])
   const [clusterByAuthor, setClusterByAuthor] = useState({})
   const [error, setError] = useState('')
   const [hoveredAuthor, setHoveredAuthor] = useState(null)
+  const [isFullscreen, setIsFullscreen] = useState(false)
+  const containerRef = useRef(null)
+
+  useEffect(() => {
+    function handleFullscreenChange() {
+      setIsFullscreen(document.fullscreenElement === containerRef.current)
+    }
+    document.addEventListener('fullscreenchange', handleFullscreenChange)
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange)
+  }, [])
+
+  function toggleFullscreen() {
+    if (document.fullscreenElement) {
+      document.exitFullscreen()
+    } else {
+      containerRef.current?.requestFullscreen()
+    }
+  }
+
+  const activeAuthor = hoveredAuthor ?? highlightAuthor ?? null
 
   useEffect(() => {
     fetch(`${API_BASE}/api/browse/authors/dendrogram`)
@@ -78,7 +100,12 @@ function AuthorDendrogram({ onAuthorClick }) {
   }, [tree, leafOrder])
 
   return (
-    <div className="author-dendrogram">
+    <div className="author-dendrogram" ref={containerRef}>
+      <div className="graph-controls author-dendrogram-controls">
+        <button type="button" className="graph-maximize" onClick={toggleFullscreen}>
+          {isFullscreen ? 'Exit fullscreen' : 'Maximize'}
+        </button>
+      </div>
       {error && <div className="graph-error">{error}</div>}
       {tree === null && !error && <div className="graph-loading">Loading…</div>}
       {tree !== null && leafOrder.length === 0 && (
@@ -89,7 +116,10 @@ function AuthorDendrogram({ onAuthorClick }) {
           {layout.edges.map((e, i) => (
             <line key={i} x1={e.x1} y1={e.y1} x2={e.x2} y2={e.y2} className="author-dendrogram-edge" />
           ))}
-          {layout.leaves.map((l) => (
+          {layout.leaves.map((l) => {
+            const isHighlighted = l.author === highlightAuthor
+            const isActive = l.author === activeAuthor
+            return (
             <g
               key={l.author}
               onClick={() => onAuthorClick?.(l.author)}
@@ -100,16 +130,19 @@ function AuthorDendrogram({ onAuthorClick }) {
               <circle
                 cx={l.x}
                 cy={l.y}
-                r={hoveredAuthor === l.author ? 5 : 3}
+                r={isActive ? 5 : 3}
                 fill={colorForCluster(clusterByAuthor[l.author] ?? 0)}
+                stroke={isHighlighted ? cssVar('--accent', '#aa3bff') : undefined}
+                strokeWidth={isHighlighted ? 2 : undefined}
               />
-              {hoveredAuthor === l.author && (
+              {isActive && (
                 <text x={l.x} y={l.y + 14} textAnchor="middle" className="author-dendrogram-label">
                   {l.author}
                 </text>
               )}
             </g>
-          ))}
+            )
+          })}
         </svg>
       )}
     </div>
