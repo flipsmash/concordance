@@ -510,6 +510,12 @@ class DifficultyFactors(BaseModel):
     why: str
 
 
+class BookRef(BaseModel):
+    id: int
+    title: str
+    author: str | None  # nullable in the DB; pre-dates the author column backfill
+
+
 class WordDetail(BaseModel):
     id: int
     lemma: str
@@ -540,7 +546,7 @@ class WordDetail(BaseModel):
     audio_source: str | None  # 'commons'|'azure'|'azure_guess'|'none'|None (no row)
 
     categories: list[WordCategory]
-    books: list[str]
+    books: list[BookRef]
 
 
 @app.get("/api/words/{word_id}", response_model=WordDetail)
@@ -593,12 +599,12 @@ def word_detail(word_id: int, _: dict = Depends(require_viewer)) -> WordDetail:
         ]
 
         cur.execute(
-            f"""SELECT b.title FROM {SCHEMA}.word_book wb
+            f"""SELECT b.id, b.title, b.author FROM {SCHEMA}.word_book wb
                 JOIN {SCHEMA}.book b ON b.id = wb.book_id
                 WHERE wb.word_id = %s ORDER BY b.title ASC""",
             (word_id,),
         )
-        books = [r[0] for r in cur.fetchall()]
+        books = [BookRef(id=bid, title=title, author=author) for bid, title, author in cur.fetchall()]
 
     return WordDetail(
         id=word_id, lemma=lemma, part_of_speech=pos, definition=definition, ipa=ipa,

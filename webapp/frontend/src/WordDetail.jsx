@@ -5,6 +5,7 @@ import { colorForBucket } from './domainColors'
 import './WordDetail.css'
 
 const API_BASE = ''
+const BOOKS_PREVIEW_COUNT = 10
 
 function CategoryChip({ category }) {
   return (
@@ -28,6 +29,7 @@ function WordDetail({ backTo = '/accepted' }) {
   const [loading, setLoading] = useState(true)
   const [neighbors, setNeighbors] = useState(null) // null = not loaded yet, [] = loaded, none found
   const [surpriseLoading, setSurpriseLoading] = useState(false)
+  const [booksExpanded, setBooksExpanded] = useState(false)
 
   // Same host-route family as this page's own -- /app/words/:id keeps
   // navigating within /app (so `backTo="/app"` keeps working after repeat
@@ -52,6 +54,7 @@ function WordDetail({ backTo = '/accepted' }) {
     setError('')
     setWord(null)
     setNeighbors(null)
+    setBooksExpanded(false)
 
     fetch(`${API_BASE}/api/words/${id}`)
       .then((res) => {
@@ -226,7 +229,32 @@ function WordDetail({ backTo = '/accepted' }) {
 
       <section className="word-detail-section">
         <h2>Source</h2>
-        <p>{word.books.length > 0 ? word.books.join(', ') : '—'}</p>
+        {word.books.length > 0 ? (
+          <>
+            <ul className="source-books-list">
+              {(booksExpanded ? word.books : word.books.slice(0, BOOKS_PREVIEW_COUNT)).map((b) => (
+                <li key={b.id}>
+                  {b.author ? (
+                    <Link to={`/app/authors/${encodeURIComponent(b.author)}/${b.id}`}>{b.title}</Link>
+                  ) : (
+                    b.title
+                  )}
+                </li>
+              ))}
+            </ul>
+            {word.books.length > BOOKS_PREVIEW_COUNT && (
+              <button
+                type="button"
+                className="word-detail-books-toggle"
+                onClick={() => setBooksExpanded((v) => !v)}
+              >
+                {booksExpanded ? 'Show fewer' : `Show all ${word.books.length}`}
+              </button>
+            )}
+          </>
+        ) : (
+          <p>—</p>
+        )}
       </section>
 
       <section className="word-detail-section">

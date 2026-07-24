@@ -208,7 +208,8 @@
   font-variant-numeric: tabular-nums;
 }
 
-.similar-words-list {
+.similar-words-list,
+.source-books-list {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -218,18 +219,36 @@
   font-size: 13px;
 }
 
-.similar-words-list a {
+.similar-words-list a,
+.source-books-list a {
   color: var(--text-h);
   font-weight: 600;
   text-decoration: none;
 }
 
-.similar-words-list a:hover {
+.similar-words-list a:hover,
+.source-books-list a:hover {
   text-decoration: underline;
 }
 
 .similar-word-definition {
   color: var(--text);
+}
+
+.word-detail-books-toggle {
+  align-self: flex-start;
+  margin-top: 8px;
+  border: none;
+  background: none;
+  color: var(--text-h);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+}
+
+.word-detail-books-toggle:hover {
+  text-decoration: underline;
 }
 
 .word-detail-graph {
