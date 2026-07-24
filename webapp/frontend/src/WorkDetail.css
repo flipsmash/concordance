@@ -8,6 +8,17 @@
   text-decoration: none;
 }
 
+.work-detail-source-link {
+  margin-left: 12px;
+  font-size: 13px;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.work-detail-source-link:hover {
+  text-decoration: underline;
+}
+
 .work-detail-section {
   display: flex;
   flex-direction: column;

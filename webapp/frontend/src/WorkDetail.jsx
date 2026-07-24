@@ -77,6 +77,16 @@ function WorkDetail() {
               {book.author}
             </Link>
           )}
+          {book?.archive_path && (
+            <a
+              href={`/api/browse/books/${bookId}/text`}
+              className="work-detail-source-link"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              View source text
+            </a>
+          )}
         </div>
         <Link to={`/app/authors/${encodeURIComponent(author)}`} className="authors-back-link">
           ← {author}'s works

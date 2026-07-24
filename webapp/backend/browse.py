@@ -36,9 +36,11 @@ Mixing these up in either direction is the bug to avoid.
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from concordance import usas_domains
@@ -46,6 +48,13 @@ from concordance.db import PLACEHOLDER_AUTHORS
 from webapp.backend import main as _main
 
 router = APIRouter()
+
+# archive_path (concordance/archive_metadata.py) is repo-root-relative
+# (e.g. "archive/1601 -- Twain, Mark.txt") -- resolved against this, the
+# same "root + basename only" defensive pattern main.py's word_audio route
+# already uses for _AUDIO_ROOT, so this route only ever serves a real file
+# actually inside archive/ regardless of what's stored in the column.
+_ARCHIVE_ROOT = Path(__file__).resolve().parents[2] / "archive"
 
 _WORD_SORT_COLUMNS = {
     "lemma": "w.lemma",
@@ -211,10 +220,14 @@ class BookRow(BaseModel):
     id: int
     title: str
     author: str | None
-    word_count: int
+    word_count: int  # distinct EXTRACTED VOCABULARY words for this book (word_book
+                      # count) -- NOT concordance/archive_metadata.py's book.word_count
+                      # (the archived text's own raw word count); unrelated metrics that
+                      # happen to share a name, this one predates the other.
     scored_word_count: int
     mean_difficulty: float | None
     stddev_difficulty: float | None
+    archive_path: str | None  # set -> /api/browse/books/{id}/text can serve it
 
 
 class BookPage(BaseModel):
@@ -285,13 +298,14 @@ def browse_books(
             f"""SELECT b.id, b.title, b.author, count(DISTINCT w.id) AS word_count,
                        count(wd.difficulty) AS scored_word_count,
                        avg(wd.difficulty) AS mean_difficulty,
-                       stddev_samp(wd.difficulty) AS stddev_difficulty
+                       stddev_samp(wd.difficulty) AS stddev_difficulty,
+                       b.archive_path
                 FROM {_main.SCHEMA}.book b
                 JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
                 JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id
                 LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
                 WHERE {where}
-                GROUP BY b.id, b.title, b.author
+                GROUP BY b.id, b.title, b.author, b.archive_path
                 ORDER BY {order_col} {order_dir}, b.title ASC
                 LIMIT %s OFFSET %s""",
             (*params, page_size, offset),
@@ -300,10 +314,28 @@ def browse_books(
 
     items = [
         BookRow(id=r[0], title=r[1], author=r[2], word_count=r[3],
-                scored_word_count=r[4], mean_difficulty=r[5], stddev_difficulty=r[6])
+                scored_word_count=r[4], mean_difficulty=r[5], stddev_difficulty=r[6], archive_path=r[7])
         for r in rows
     ]
     return BookPage(items=items, total=total, page=page, page_size=page_size)
+
+
+@router.get("/api/browse/books/{book_id}/text")
+def book_text(book_id: int, _: dict = Depends(_main.require_viewer)):
+    """Streams the book's own archived full text (concordance/archive_
+    metadata.py's archive_path), the way word_audio streams a word's mp3 --
+    looked up from the DB-controlled column rather than exposing archive/
+    via a raw StaticFiles mount, so this route only ever serves what a
+    book row vouches for."""
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"SELECT archive_path FROM {_main.SCHEMA}.book WHERE id = %s", (book_id,))
+        row = cur.fetchone()
+    if row is None or not row[0]:
+        raise HTTPException(status_code=404, detail="no archived text for this book")
+    full_path = (_ARCHIVE_ROOT / Path(row[0]).name).resolve()
+    if not full_path.is_file():
+        raise HTTPException(status_code=404, detail="archive file missing on disk")
+    return FileResponse(full_path, media_type="text/plain", filename=full_path.name)
 
 
 # --- /api/browse/books/{id}/related -----------------------------------------
