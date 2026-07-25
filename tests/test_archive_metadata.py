@@ -9,6 +9,7 @@ from concordance.archive_metadata import (
     extract_gutenberg_id,
     strip_gutenberg_boilerplate,
     word_stats,
+    year_to_era,
 )
 
 _HEADER = """The Project Gutenberg eBook of Some Book
@@ -100,3 +101,26 @@ def test_era_regex_does_not_fire_when_year_regex_already_matched():
     # real values to choose between.
     summary = '"Middlemarch" by George Eliot is a novel published in 1871-1872.'
     assert _YEAR_RE.search(summary).group(1) == "1871"
+
+
+def test_year_to_era_early_mid_late_thirds():
+    assert year_to_era(1905) == "early 20th century"   # the user's own example
+    assert year_to_era(1901) == "early 20th century"
+    assert year_to_era(1933) == "early 20th century"
+    assert year_to_era(1934) == "mid 20th century"
+    assert year_to_era(1966) == "mid 20th century"
+    assert year_to_era(1967) == "late 20th century"
+    assert year_to_era(2000) == "late 20th century"    # last year of the 20th century
+
+
+def test_year_to_era_century_boundary_and_ordinal_suffix():
+    assert year_to_era(2001) == "early 21st century"   # first year of the 21st
+    assert year_to_era(1801) == "early 19th century"
+    assert year_to_era(1650) == "mid 17th century"
+    assert year_to_era(1667) == "late 17th century"
+
+
+def test_year_to_era_avoids_11th_12th_13th_ordinal_mistakes():
+    assert year_to_era(1005) == "early 11th century"
+    assert year_to_era(1105) == "early 12th century"
+    assert year_to_era(1205) == "early 13th century"

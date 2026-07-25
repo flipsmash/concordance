@@ -541,7 +541,12 @@ def archive_metadata_cmd(
     best-effort, publication_year/publication_era) for every book whose
     full text sits in archive/ -- see concordance/archive_metadata.py's own
     docstring for the word-counting method and why publication date is two
-    columns, not one, neither reliably populated. `concordance ingest`
+    columns, not one, neither reliably populated. Always starts with a
+    quick, network-free pass (db.backfill_publication_era) deriving era
+    from year for any book that already has one but not the other --
+    covers both older runs predating that derivation and any Gutenberg
+    summary that stated a year without phrasing a matching century hedge.
+    `concordance ingest`
     computes the same fields inline for every NEW book as it's archived
     (via archive_metadata.compute_book_metadata, the one shared
     implementation) -- this command exists for the historical backlog and
@@ -567,6 +572,11 @@ def archive_metadata_cmd(
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
     db.apply_schema(conn, schema)
+
+    era_stats = db.backfill_publication_era(conn, schema)
+    if era_stats["backfilled"]:
+        console.print(f"[green]✓[/green] backfilled publication_era for [bold]{era_stats['backfilled']}[/bold] "
+                      f"book(s) with a year but no era")
 
     if not archive_dir.is_dir():
         console.print(f"[red]✗[/red] no such directory: {archive_dir}/")

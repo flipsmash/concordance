@@ -1929,6 +1929,28 @@ def get_book_by_title(conn, title: str, schema: str = DEFAULT_SCHEMA) -> tuple[i
         return cur.fetchone()
 
 
+def backfill_publication_era(conn, schema: str = DEFAULT_SCHEMA) -> dict:
+    """Derives publication_era from publication_year (archive_metadata.year_to_era)
+    for every book that has an exact year but no free-text era hedge -- a
+    pure computation from data already in `book`, no network involved, so
+    this is cheap enough to run unconditionally at the start of
+    `archive-metadata` rather than needing its own command. Covers both
+    books processed before year_to_era existed and any RDF summary that
+    stated a year without phrasing a matching century hedge."""
+    from .archive_metadata import year_to_era
+
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT id, publication_year FROM {s}.book
+                        WHERE publication_year IS NOT NULL AND coalesce(publication_era,'') = ''""")
+        rows = cur.fetchall()
+        for book_id, year in rows:
+            cur.execute(f"UPDATE {s}.book SET publication_era=%s WHERE id=%s",
+                        (year_to_era(year), book_id))
+    conn.commit()
+    return {"backfilled": len(rows)}
+
+
 def update_book_archive_metadata(conn, book_id: int, *, archive_path: str, word_count: int,
                                   distinct_nonstop_word_count: int, publication_year: int | None,
                                   publication_era: str | None, schema: str = DEFAULT_SCHEMA) -> None:

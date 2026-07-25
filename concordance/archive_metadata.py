@@ -107,6 +107,24 @@ def word_stats(text: str) -> tuple[int, int]:
     return len(words), len(distinct_nonstop)
 
 
+def year_to_era(year: int) -> str:
+    """A year -> the same "early/mid/late Nth century" hedge _ERA_RE parses
+    out of Gutenberg's free text (1905 -> "early 20th century") -- so a book
+    with an exact year but no free-text era hedge (the RDF summary didn't
+    happen to phrase it that way, or simply didn't survive to marc520) still
+    gets a human-readable era rather than staying blank. Century is split
+    into thirds (01-33 early, 34-66 mid, 67-00 late), matching how the
+    hedge phrases already found in this corpus use those same three bands."""
+    century = (year - 1) // 100 + 1
+    pos = (year - 1) % 100 + 1  # 1..100 within the century
+    part = "early" if pos <= 33 else "mid" if pos <= 66 else "late"
+    if century % 100 in (11, 12, 13):
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(century % 10, "th")
+    return f"{part} {century}{suffix} century"
+
+
 def fetch_publication_info(gutenberg_id: int, timeout: float = 15.0) -> tuple[int | None, str | None]:
     """(publication_year, publication_era) from Gutenberg's per-book RDF
     catalog metadata -- see this module's own docstring for why both exist
@@ -165,6 +183,8 @@ def compute_book_metadata(path, *, skip_network: bool = False, delay: float = 0.
                 import time
 
                 year, era = fetch_publication_info(gutenberg_id)
+                if year and not era:
+                    era = year_to_era(year)
                 time.sleep(delay)
     else:
         from .extract import extract as extract_book
