@@ -300,6 +300,31 @@ def load_taxonomy(
                   f"({stats['top_level']} top-level fields) into {schema}.category")
 
 
+@app.command("import-defined")
+def import_defined_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Only import the first N candidates (0 = all)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """One-time/occasional bootstrap: import genuinely-new terms from the legacy
+    vocab.defined table (term/POS/definition, no book source) into word, as
+    book-less words. Skips phrases, bad=1 rows, terms already in word, and
+    terms ever rejected in any book for any reason. Not part of `maintain` --
+    run this, then run `maintain` normally to classify/score the new words."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    stats = db.import_defined_words(conn, schema, limit=limit)
+    conn.close()
+    if not stats["available"]:
+        console.print("[yellow]![/yellow] vocab.defined not found -- nothing to import")
+        return
+    console.print(f"[green]✓[/green] import-defined: [bold]{stats['imported']}[/bold]/{stats['candidates']} "
+                  f"words imported into {schema}.word"
+                  + (f" ({stats['skipped_conflict']} skipped, already present)" if stats["skipped_conflict"] else ""))
+
 
 @app.command()
 def classify(

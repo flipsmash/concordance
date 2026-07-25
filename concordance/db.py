@@ -1114,6 +1114,99 @@ def deepen_definitions(conn, schema: str = DEFAULT_SCHEMA, use_web: bool = False
                             model_path=model_path, recheck_after_days=0)
 
 
+def import_defined_words(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
+                         commit_every: int = 500) -> dict:
+    """One-time/occasional bootstrap: pull genuinely-new terms from the
+    legacy `vocab.defined` table (a predecessor project's term/POS/definition
+    list, collected outside any book) into `word` as book-less words -- no
+    `word_book` row, since there's no book occurrence to attach. They pick up
+    all the normal `maintain` processing (classify, difficulty, quizdef,
+    etc.) the next time it runs, same as any book-sourced word; only the
+    three purely book/author-relatedness computations
+    (compute_book_similarity/compute_author_similarity/compute_author_clustering)
+    read exclusively FROM word_book and so simply won't see these words --
+    a correct no-op, not something this import needs to handle.
+
+    Excludes: phrases (the `phrase` flag column, confirmed to match 100% of
+    space-containing terms -- skipped outright per instruction, not just
+    deprioritized), rows flagged `bad=1`, terms already in `word`, and terms
+    ever rejected in ANY book for ANY reason (not just "hard" rejection
+    reasons -- confirmed with the user). Multiple `vocab.defined` rows per
+    term (different senses/POS) are collapsed to the single richest row
+    before insert, since `word.lemma_lc` is UNIQUE.
+
+    `vocab.defined` has no ipa/etymology/synonyms columns. fill_definitions'
+    gate (`WHERE coalesce(definition,'') = ''`) will never revisit these
+    words to backfill ipa/etymology since they arrive with a non-blank
+    definition, so this reuses localdict.build_lexicon (the same
+    vocab.wiktionary lookup the ingestion pipeline already does) once for
+    the whole batch to best-effort fill those two; synonyms stays blank (no
+    source has it).
+
+    Commits every `commit_every` words, not once at the end -- same
+    crash-safety rationale as classify_and_store (a run over ~11k candidates
+    that dies partway through should keep whatever it already inserted)."""
+    from . import localdict
+
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('vocab.defined')")
+        if cur.fetchone()[0] is None:
+            return {"available": False, "candidates": 0, "imported": 0, "skipped_conflict": 0}
+
+        cur.execute(
+            f"""SELECT DISTINCT ON (lower(d.term))
+                    d.term, d.part_of_speech,
+                    COALESCE(NULLIF(d.corrected_definition,''), d.definition),
+                    d.definition_source
+                FROM vocab.defined d
+                WHERE d.phrase IS DISTINCT FROM 1
+                  AND position(' ' in d.term) = 0
+                  AND COALESCE(d.bad,0) != 1
+                  AND NOT EXISTS (SELECT 1 FROM {s}.word w WHERE w.lemma_lc = lower(d.term))
+                  AND NOT EXISTS (SELECT 1 FROM {s}.rejected_word r WHERE r.lemma_lc = lower(d.term))
+                ORDER BY lower(d.term),
+                    (d.part_of_speech IS NOT NULL AND upper(d.part_of_speech) NOT IN ('', 'TBD')) DESC,
+                    length(COALESCE(NULLIF(d.corrected_definition,''), d.definition)) DESC,
+                    d.id"""
+            + (f" LIMIT {int(limit)}" if limit else ""))
+        rows = cur.fetchall()
+
+    stats = {"available": True, "candidates": len(rows), "imported": 0, "skipped_conflict": 0}
+    if not rows:
+        return stats
+
+    lexicon = localdict.build_lexicon(conn, {term.lower() for term, *_ in rows})
+
+    with conn.cursor() as cur:
+        for i, (term, pos, definition, def_source) in enumerate(rows, 1):
+            raw_pos = "" if (pos or "").strip().upper() == "TBD" else (pos or "")
+            norm_pos = normalize_pos(raw_pos)
+
+            ipa = etymology = ""
+            entries = lexicon.get(term.lower())
+            if entries:
+                match = next((e for e in entries if normalize_pos(e[0]) == norm_pos), entries[0])
+                ipa, etymology = match[2], match[3]
+
+            cur.execute(
+                f"""INSERT INTO {s}.word
+                        (lemma, as_seen, definition, part_of_speech, ipa, etymology,
+                         definition_source, first_added)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s, CURRENT_DATE)
+                    ON CONFLICT (lemma_lc) DO NOTHING""",
+                (term, term, definition, norm_pos, ipa, etymology,
+                 def_source or "vocab.defined import"))
+            if cur.rowcount:
+                stats["imported"] += 1
+            else:
+                stats["skipped_conflict"] += 1
+            if i % commit_every == 0:
+                conn.commit()
+    conn.commit()
+    return stats
+
+
 _PLURAL_OF_RE = re.compile(
     r"^(?:alternative |archaic |dialectal |obsolete )?plural (?:form )?of (\S+?)\.?$",
     re.IGNORECASE,
