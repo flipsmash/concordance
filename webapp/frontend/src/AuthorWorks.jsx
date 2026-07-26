@@ -26,6 +26,16 @@ function AuthorWorks() {
     extraParams: { author },
   })
 
+  function surpriseMe() {
+    fetch(`${API_BASE}/api/browse/authors?random=true`)
+      .then((res) => res.json())
+      .then((data) => {
+        const next = data.items[0]
+        if (next) navigate(`/app/authors/${encodeURIComponent(next.author)}`)
+      })
+      .catch(() => {})
+  }
+
   useEffect(() => {
     setRelated(null)
     fetch(`${API_BASE}/api/browse/authors/${encodeURIComponent(author)}/related?top_k=6`)
@@ -50,7 +60,12 @@ function AuthorWorks() {
     <div className="authors-page">
       <header className="authors-header">
         <h1>{author}</h1>
-        <Link to="/app/authors" className="authors-back-link">← All authors</Link>
+        <div className="authors-header-actions">
+          <button type="button" className="authors-surprise" onClick={surpriseMe}>
+            🎲 Surprise me
+          </button>
+          <Link to="/app/authors" className="authors-back-link">← All authors</Link>
+        </div>
       </header>
 
       <section>

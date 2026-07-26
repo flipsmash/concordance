@@ -39,6 +39,16 @@ function WorkDetail() {
       .catch(() => {})
   }, [bookId])
 
+  function surpriseMe() {
+    fetch(`${API_BASE}/api/browse/books?random=true`)
+      .then((res) => res.json())
+      .then((data) => {
+        const next = data.items[0]
+        if (next) navigate(`/app/authors/${encodeURIComponent(next.author || '')}/${next.id}`)
+      })
+      .catch(() => {})
+  }
+
   useEffect(() => {
     setRelated(null)
     fetch(`${API_BASE}/api/browse/books/${bookId}/related?top_k=6`)
@@ -88,9 +98,14 @@ function WorkDetail() {
             </a>
           )}
         </div>
-        <Link to={`/app/authors/${encodeURIComponent(author)}`} className="authors-back-link">
-          ← {author}'s works
-        </Link>
+        <div className="authors-header-actions">
+          <button type="button" className="authors-surprise" onClick={surpriseMe}>
+            🎲 Surprise me
+          </button>
+          <Link to={`/app/authors/${encodeURIComponent(author)}`} className="authors-back-link">
+            ← {author}'s works
+          </Link>
+        </div>
       </header>
 
       <section className="browse-facets work-detail-section">
