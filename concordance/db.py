@@ -2079,7 +2079,7 @@ def update_book_archive_metadata(conn, book_id: int, *, archive_path: str, word_
 
 
 def compute_book_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
-                            top_k: int = 12, min_shared_words: int = 3,
+                            top_k: int = 20, min_shared_words: int = 3,
                             max_df_fraction: float = 0.5) -> dict:
     """`concordance book-similarity` / `maintain`'s book-similarity step:
     each book's top-k most vocabulary-related books, by IDF-weighted cosine
@@ -2220,7 +2220,7 @@ PLACEHOLDER_AUTHORS = frozenset({"Various", "Unknown Author", "Unknown", "Anonym
 
 
 def compute_author_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
-                              top_k: int = 12, min_shared_words: int = 3,
+                              top_k: int = 20, min_shared_words: int = 3,
                               max_df_fraction: float = 0.5) -> dict:
     """`concordance author-similarity` / `maintain`'s author-similarity step:
     each author's top-k most vocabulary-related authors, by IDF-weighted

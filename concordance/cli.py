@@ -625,7 +625,7 @@ def archive_metadata_cmd(
 @app.command("book-similarity")
 def book_similarity(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
-    top_k: int = typer.Option(12, "--top-k", help="Related books stored per book."),
+    top_k: int = typer.Option(20, "--top-k", help="Related books stored per book."),
     min_shared_words: int = typer.Option(3, "--min-shared-words",
                                           help="Minimum shared rare-word count for a pair to be stored at all."),
     limit: int = typer.Option(0, "--limit", "-l", help="Cap number of books (re)computed."),
@@ -652,7 +652,7 @@ def book_similarity(
 @app.command("author-similarity")
 def author_similarity(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
-    top_k: int = typer.Option(12, "--top-k", help="Related authors stored per author."),
+    top_k: int = typer.Option(20, "--top-k", help="Related authors stored per author."),
     min_shared_words: int = typer.Option(3, "--min-shared-words",
                                           help="Minimum shared rare-word count for a pair to be stored at all."),
     limit: int = typer.Option(0, "--limit", "-l", help="Cap number of authors (re)computed."),
