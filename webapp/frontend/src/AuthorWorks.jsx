@@ -60,12 +60,9 @@ function AuthorWorks() {
     <div className="authors-page">
       <header className="authors-header">
         <h1>{author}</h1>
-        <div className="authors-header-actions">
-          <button type="button" className="authors-surprise" onClick={surpriseMe}>
-            🎲 Surprise me
-          </button>
-          <Link to="/app/authors" className="authors-back-link">← All authors</Link>
-        </div>
+        <button type="button" className="authors-surprise" onClick={surpriseMe}>
+          🎲 Surprise me
+        </button>
       </header>
 
       <section>

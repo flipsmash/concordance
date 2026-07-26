@@ -53,16 +53,6 @@
   border-color: var(--accent);
 }
 
-/* Detail-page headers (AuthorWorks, WorkDetail) pair the surprise-me button
-   with the existing back-link as one flex item, so authors-header's
-   space-between still sees exactly two children. */
-.authors-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-shrink: 0;
-}
-
 .authors-search {
   width: 100%;
   box-sizing: border-box;

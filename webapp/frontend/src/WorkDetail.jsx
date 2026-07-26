@@ -98,14 +98,9 @@ function WorkDetail() {
             </a>
           )}
         </div>
-        <div className="authors-header-actions">
-          <button type="button" className="authors-surprise" onClick={surpriseMe}>
-            🎲 Surprise me
-          </button>
-          <Link to={`/app/authors/${encodeURIComponent(author)}`} className="authors-back-link">
-            ← {author}'s works
-          </Link>
-        </div>
+        <button type="button" className="authors-surprise" onClick={surpriseMe}>
+          🎲 Surprise me
+        </button>
       </header>
 
       <section className="browse-facets work-detail-section">
