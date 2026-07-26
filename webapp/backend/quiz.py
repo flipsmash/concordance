@@ -45,6 +45,20 @@ strips exactly the key fields below before anything is sent to the browser.
                slot letters) specifically so comparing the two lists never
                reveals the pairing -- only correct_mapping (server-only)
                does. definition_slots deliberately carries no word_id.
+  analogy:     {prompt, options:[{key,label}], correct_option_key, style,
+                target_lemma, quiz_definition, degraded, guessing_floor}
+               -- answer key: correct_option_key
+               -- prompt is the full stem, e.g. "FETTER is to ANKLE as CANGUE
+               is to ___". options carry an opaque per-question `key`, NOT a
+               word_id -- an option is frequently an ordinary WordNet term
+               with no `word` row at all (the one-hard-term style; see
+               concordance/analogy_select.py). style ('vocab_only' |
+               'one_hard_term') is informational only, never affects scoring.
+               target_word_ids[0] (and therefore quiz_answer.word_id /
+               _update_review_schedule's target) is always the VOCAB word
+               being probed, regardless of which analogy slot it physically
+               occupies -- see analogy_select.py's own docstring for the
+               fixed per-style slot convention this relies on.
 
 guessing_floor (see concordance/calibration.py) is the structural
 chance-correct probability of the ACTUAL assembled question -- computed once
@@ -72,6 +86,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from psycopg.types.json import Json
 from pydantic import BaseModel, Field
 
+from concordance import analogy_select as asel
 from concordance import calibration as calib
 from concordance import distractors as dx
 from concordance import spaced_repetition as sr
@@ -87,9 +102,10 @@ _SLOT_LETTERS = "ABCDEFGH"
 
 class QuizStartRequest(BaseModel):
     length: int = Field(10, ge=1, le=100)
-    types: list[Literal["mc", "true_false", "matching"]] = Field(default_factory=lambda: ["mc"])
+    types: list[Literal["mc", "true_false", "matching", "analogy"]] = Field(default_factory=lambda: ["mc"])
     mc_choice_count: int = Field(4, ge=2, le=8)
     matching_set_size: int = Field(4, ge=2, le=8)
+    analogy_choice_count: int = Field(4, ge=2, le=8)
     nota_enabled: bool = False
     nota_rate: float = Field(0.15, ge=0.0, le=1.0)
     difficulty_min: float | None = Field(None, ge=0, le=100)
@@ -127,16 +143,22 @@ class QuizDefinitionSlot(BaseModel):
     quiz_definition: str
 
 
+class QuizAnalogyOption(BaseModel):
+    key: str      # opaque per-question key ('opt0'..'optN') -- see module docstring
+    label: str
+
+
 class QuizQuestionClient(BaseModel):
     question_id: int
     seq: int
     question_type: str
-    prompt: str | None = None                                   # mc / true_false
+    prompt: str | None = None                                   # mc / true_false / analogy
     options: list[QuizOption] | None = None                     # mc only
     statement_word: str | None = None                           # true_false only
     statement_definition: str | None = None                     # true_false only
     word_slots: list[QuizWordSlot] | None = None                # matching only
     definition_slots: list[QuizDefinitionSlot] | None = None    # matching only
+    analogy_options: list[QuizAnalogyOption] | None = None      # analogy only
 
 
 class QuizSessionState(BaseModel):
@@ -153,16 +175,18 @@ class QuizAnswerSubmit(BaseModel):
     selected_word_id: int | None = None                    # mc: None means "None of the above"
     answer: bool | None = None                              # true_false
     pairs: list[dict] | None = None                         # matching: [{"word_id": int, "definition_slot": str}]
+    selected_option_key: str | None = None                  # analogy
 
 
 class QuizAnswerResult(BaseModel):
     accepted: bool
-    is_correct: bool | None = None                         # mc / true_false
+    is_correct: bool | None = None                         # mc / true_false / analogy
     correct_word_id: int | None = None                     # mc
-    correct_label: str | None = None                       # mc
+    correct_label: str | None = None                       # mc / analogy
     correct_answer: bool | None = None                     # true_false
     pair_results: list[dict] | None = None                 # matching: [{"word_id", "is_correct", "correct_slot"}]
     quiz_definition: str | None = None
+    correct_option_key: str | None = None                   # analogy
 
 
 class QuizFinishResult(BaseModel):
@@ -259,6 +283,59 @@ def _select_target_words(conn, body: QuizStartRequest, count: int, exclude_ids: 
     # not-yet-eligible ones if that's not enough to fill the request -- a
     # narrow filter config combined with SR-on should degrade gracefully,
     # not return an empty/short question set.
+    order_by = "random()"
+    if body.spaced_repetition_enabled:
+        order_by = "(wrs.next_eligible_at IS NULL OR wrs.next_eligible_at <= now()) DESC, random()"
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT w.id, w.lemma, w.quiz_definition, w.part_of_speech
+                FROM {_main.SCHEMA}.word w
+                JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
+                LEFT JOIN {_main.SCHEMA}.word_review_schedule wrs
+                    ON wrs.word_id = w.id AND wrs.user_id = %s
+                LEFT JOIN {_main.SCHEMA}.word_personal_difficulty wpd
+                    ON wpd.word_id = w.id AND wpd.user_id = %s
+                WHERE {where}
+                ORDER BY {order_by}
+                LIMIT %s""",
+            (user_id, user_id, *params, count),
+        )
+        rows = cur.fetchall()
+    return [{"id": r[0], "lemma": r[1], "quiz_definition": r[2], "pos": r[3]} for r in rows]
+
+
+def _select_analogy_targets(conn, body: QuizStartRequest, count: int, exclude_ids: set[int],
+                             user_id: int) -> list[dict]:
+    """Same shape/filters as _select_target_words, PLUS a restriction to words
+    that actually have at least one verified relation edge -- without this,
+    the generic pool (drawn from every quizzable word) would starve analogy
+    almost entirely (only a fraction of words have a verified edge at all)
+    and start_quiz would silently return a session shorter than requested.
+    Deliberately NOT reusing _select_target_words unchanged: analogy
+    eligibility is "has a usable relation edge," a different predicate than
+    quiz_definition IS NOT NULL, even though both also require quizzable."""
+    filters = ["w.active", "wd.quizzable = true", "w.quiz_definition IS NOT NULL"]
+    params: list = []
+    if exclude_ids:
+        filters.append("NOT (w.id = ANY(%s))")
+        params.append(list(exclude_ids))
+    if body.pos:
+        filters.append("w.part_of_speech = ANY(%s)")
+        params.append(body.pos)
+    if body.difficulty_min is not None:
+        filters.append("coalesce(wpd.personal_difficulty, wd.difficulty) >= %s")
+        params.append(body.difficulty_min)
+    if body.difficulty_max is not None:
+        filters.append("coalesce(wpd.personal_difficulty, wd.difficulty) <= %s")
+        params.append(body.difficulty_max)
+    filters.append(
+        f"""EXISTS (SELECT 1 FROM {_main.SCHEMA}.wn_relation_term t
+                    JOIN {_main.SCHEMA}.word_relation_edge e ON e.term_a_id = t.id
+                    WHERE t.word_id = w.id AND e.verification_status = 'verified')"""
+    )
+    where = " AND ".join(filters)
+
     order_by = "random()"
     if body.spaced_repetition_enabled:
         order_by = "(wrs.next_eligible_at IS NULL OR wrs.next_eligible_at <= now()) DESC, random()"
@@ -437,7 +514,55 @@ def _build_matching_payload(conn, seed: dict, body: QuizStartRequest,
     return payload, member_ids, member_ids
 
 
-_BUILDERS = {"mc": _build_mc_payload, "true_false": _build_tf_payload, "matching": _build_matching_payload}
+def _build_analogy_payload(conn, target: dict, body: QuizStartRequest,
+                            exclude_ids: set[int]) -> tuple[dict, list[int], list[int]] | None:
+    """One MAT-style analogy question ('A is to B as C is to ___') about
+    `target` -- None if no usable relation edge/anchor/distractor set could
+    be assembled (same shortfall contract as every other builder). `target`
+    comes from _select_analogy_targets, already guaranteed to have >=1
+    verified edge, but the SPECIFIC edge analogy_select picks still might
+    have no usable anchor, so this can still legitimately return None."""
+    assembly = asel.select_analogy_edge(conn, _main.SCHEMA, target["id"], exclude_ids)
+    if assembly is None:
+        return None
+
+    distractor_count = body.analogy_choice_count - 1
+    result = dx.select_analogy_distractors(
+        conn, _main.SCHEMA, assembly.style, assembly.d_pos, assembly.a_lemma, assembly.b_lemma,
+        assembly.target_word_id, assembly.d_term_id, assembly.exclusion_lemmas, assembly.trap_lemmas,
+        distractor_count, exclude_word_ids=exclude_ids,
+    )
+    if len(result.candidates) < distractor_count:
+        if not result.candidates:
+            return None
+        distractor_count = len(result.candidates)
+
+    options = [{"key": f"opt{i}", "label": c["lemma"], "word_id": c.get("id")}
+               for i, c in enumerate(result.candidates[:distractor_count])]
+    correct_key = f"opt{len(options)}"
+    options.append({"key": correct_key, "label": assembly.d_lemma, "word_id": assembly.d_word_id})
+    random.shuffle(options)
+    correct_option_key = next(o["key"] for o in options if o["label"] == assembly.d_lemma)
+
+    prompt = f"{assembly.a_lemma.upper()} is to {assembly.b_lemma.upper()} as {assembly.c_lemma.upper()} is to ___"
+    payload = {
+        "prompt": prompt,
+        "options": options,
+        "correct_option_key": correct_option_key,
+        "style": assembly.style,
+        "degraded": result.degraded,
+        "target_lemma": target["lemma"],
+        "quiz_definition": target["quiz_definition"],
+        # From the actual assembled option count, not body.analogy_choice_count --
+        # same "actual, not nominal" rule guessing_floor follows for every other type.
+        "guessing_floor": calib.guessing_floor("analogy", len(options)),
+    }
+    consumed_ids = [target["id"]] + [c["id"] for c in result.candidates[:distractor_count] if c.get("id")]
+    return payload, [assembly.target_word_id], consumed_ids
+
+
+_BUILDERS = {"mc": _build_mc_payload, "true_false": _build_tf_payload, "matching": _build_matching_payload,
+             "analogy": _build_analogy_payload}
 
 
 def _client_question(question_id: int, seq: int, question_type: str, payload: dict) -> QuizQuestionClient:
@@ -455,6 +580,10 @@ def _client_question(question_id: int, seq: int, question_type: str, payload: di
                      for d in payload["definition_slots"]]
         return QuizQuestionClient(question_id=question_id, seq=seq, question_type=question_type,
                                    word_slots=word_slots, definition_slots=def_slots)
+    if question_type == "analogy":
+        options = [QuizAnalogyOption(key=o["key"], label=o["label"]) for o in payload["options"]]
+        return QuizQuestionClient(question_id=question_id, seq=seq, question_type=question_type,
+                                   prompt=payload["prompt"], analogy_options=options)
     raise ValueError(f"unknown question_type {question_type!r}")
 
 
@@ -539,14 +668,37 @@ def start_quiz(body: QuizStartRequest, user: dict = Depends(_main.require_user))
         used_ids: set[int] = set()
         pool = _select_target_words(conn, body, pool_size, used_ids, user["id"])
         pool_idx = 0
+        # analogy draws from its OWN pool (has-a-verified-edge is a much rarer
+        # predicate than quiz_definition IS NOT NULL) -- without this, a session
+        # blending "analogy" with other types would silently return fewer than
+        # body.length questions once the small analogy-eligible pool ran dry
+        # while random.choice(body.types) kept picking it anyway.
+        analogy_pool = (_select_analogy_targets(conn, body, body.length + 10, used_ids, user["id"])
+                         if "analogy" in body.types else [])
+        analogy_idx = 0
 
         # (question_type, payload, target_word_ids -- what quiz_answer rows get
         # written against, NOT the same as every word a question consumed)
         questions: list[tuple[str, dict, list[int]]] = []
-        while len(questions) < body.length and pool_idx < len(pool):
-            qtype = random.choice(body.types)
-            target = pool[pool_idx]
-            pool_idx += 1
+        while len(questions) < body.length and (pool_idx < len(pool) or analogy_idx < len(analogy_pool)):
+            # Every entry here must correspond to a pool that still has room --
+            # otherwise a chosen qtype falls through to a no-op `continue` below
+            # with neither index advancing, which is at best a wasted iteration
+            # and at worst (if it happened for every remaining type) a spin.
+            available_types = [t for t in body.types
+                                if (t == "analogy" and analogy_idx < len(analogy_pool))
+                                or (t != "analogy" and pool_idx < len(pool))]
+            if not available_types:
+                break
+            qtype = random.choice(available_types)
+            if qtype == "analogy":
+                target = analogy_pool[analogy_idx]
+                analogy_idx += 1
+            else:
+                if pool_idx >= len(pool):
+                    continue
+                target = pool[pool_idx]
+                pool_idx += 1
             if target["id"] in used_ids:
                 continue
             built = _BUILDERS[qtype](conn, target, body, used_ids)
@@ -683,6 +835,20 @@ def answer_quiz_question(session_id: int, body: QuizAnswerSubmit,
                     _update_review_schedule(cur, user["id"], wid, pair_correct, frequency)
                     pair_results.append({"word_id": wid, "is_correct": pair_correct, "correct_slot": correct_slot})
                 is_correct = all(p["is_correct"] for p in pair_results)
+            elif qtype == "analogy":
+                if body.selected_option_key is None:
+                    raise HTTPException(status_code=400, detail="selected_option_key is required for an analogy question")
+                is_correct = body.selected_option_key == payload["correct_option_key"]
+                cur.execute(
+                    f"""INSERT INTO {_main.SCHEMA}.quiz_answer
+                            (question_id, word_id, response, is_correct,
+                             guessing_floor, question_type, direction)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    (body.question_id, target_word_ids[0],
+                     Json({"selected_option_key": body.selected_option_key}), is_correct,
+                     guessing_floor, qtype, direction),
+                )
+                _update_review_schedule(cur, user["id"], target_word_ids[0], is_correct, frequency)
             else:
                 raise HTTPException(status_code=500, detail=f"unknown question_type {qtype!r}")
 
@@ -698,6 +864,10 @@ def answer_quiz_question(session_id: int, body: QuizAnswerSubmit,
     if qtype == "mc":
         result.correct_word_id = payload["correct_word_id"]
         result.correct_label = _mc_or_tf_correct_label(qtype, payload)
+    elif qtype == "analogy":
+        result.correct_option_key = payload["correct_option_key"]
+        result.correct_label = next((o["label"] for o in payload["options"]
+                                      if o["key"] == payload["correct_option_key"]), "")
     else:  # true_false
         result.correct_answer = payload["is_true"]
     return result
@@ -770,11 +940,11 @@ def review_quiz(session_id: int, user: dict = Depends(_main.require_user)) -> Qu
     items = []
     for qid, seq, qtype, payload in questions:
         answers = answers_by_question.get(qid, [])
-        if qtype in ("mc", "true_false"):
+        if qtype in ("mc", "true_false", "analogy"):
             is_correct = bool(answers[0][2]) if answers else False
             credit = 1.0 if is_correct else 0.0
-            correct_label = _mc_or_tf_correct_label(qtype, payload)
             if qtype == "mc":
+                correct_label = _mc_or_tf_correct_label(qtype, payload)
                 prompt = payload["prompt"]
                 if not answers:
                     your_label = None
@@ -783,7 +953,17 @@ def review_quiz(session_id: int, user: dict = Depends(_main.require_user)) -> Qu
                     your_label = "None of the above" if sel is None else next(
                         (o["label"] for o in payload["options"] if o["word_id"] == sel), None
                     )
+            elif qtype == "analogy":
+                prompt = payload["prompt"]
+                correct_label = next((o["label"] for o in payload["options"]
+                                      if o["key"] == payload["correct_option_key"]), "")
+                if not answers:
+                    your_label = None
+                else:
+                    sel = (answers[0][1] or {}).get("selected_option_key")
+                    your_label = next((o["label"] for o in payload["options"] if o["key"] == sel), None)
             else:
+                correct_label = _mc_or_tf_correct_label(qtype, payload)
                 prompt = f"{payload['statement_word']}: {payload['statement_definition']}"
                 your_label = None if not answers else str((answers[0][1] or {}).get("answer"))
         else:  # matching

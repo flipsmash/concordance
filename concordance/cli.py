@@ -1045,13 +1045,16 @@ def maintain(
     skip_wordnik: bool = typer.Option(False, "--skip-wordnik", help="Skip the wordnik-pron fetch step."),
     skip_ipa: bool = typer.Option(False, "--skip-ipa", help="Skip the ipa backfill step."),
     skip_embed: bool = typer.Option(False, "--skip-embed"),
+    skip_analogies: bool = typer.Option(False, "--skip-analogies",
+                                         help="Skip the analogy-relation extraction+verification "
+                                              "backfill (loads a local LLM, same as classify/quizdef)."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Run the full post-ingest maintenance chain in dependency order:
     fill-definitions -> classify -> normalize-pos -> ngram -> archaic ->
     difficulty -> quizdef -> quizzable -> calibrate-difficulty ->
     book-similarity -> author-similarity -> author-clustering ->
-    wordnik-pron -> ipa -> embed. This is the whole documented sequence from the README's
+    wordnik-pron -> ipa -> embed -> backfill-analogies. This is the whole documented sequence from the README's
     "Backfilling definitions" / "Enrichment & scoring" / "Definition-quality
     cleanup" / "Pronunciation audio" / "Semantic distance" sections, chained
     into one command instead of twelve to remember and re-order by hand.
@@ -1223,7 +1226,55 @@ def maintain(
     else:
         console.print("[dim]embed skipped.[/dim]")
 
+    if not skip_analogies:
+        from . import analogies
+        cfg = Config()
+        if model:
+            cfg.model_path = str(model)
+        with console.status("[bold]Extracting + verifying analogy relations…"):
+            stats = analogies.backfill_analogies(conn, schema, cfg, limit=limit)
+        console.print(f"[green]✓[/green] backfill-analogies: [bold]{stats['terms_scanned']}[/bold] terms scanned "
+                      f"-> [bold]{stats['edges_verified']}[/bold]/{stats['edges_found']} edges verified")
+    else:
+        console.print("[dim]backfill-analogies skipped.[/dim]")
+
     conn.close()
+
+
+@app.command("backfill-analogies")
+def backfill_analogies_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    model: Optional[Path] = typer.Option(None, "--model", "-m",
+                                          help="Model for relation verification (defaults to the 14B)."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap terms scanned this run (0 = all)."),
+    batch_size: int = typer.Option(20, "--batch-size", help="Verification batch size (mirrors judge_batch)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Harvest WordNet + definition-pattern relation candidates for every
+    eligible vocab word (and, incrementally, discovered common anchor terms),
+    then LLM-verify each against both terms' real definitions before it's
+    usable in a quiz — see concordance/analogies.py's module docstring for
+    why verification is mandatory, not optional. Resumable: a later run only
+    touches terms not yet in wn_relation_scan. Safe to run with a small
+    --limit during development; a real full-corpus run should not be started
+    while `concordance maintain` is already in flight (both load a local LLM
+    and compete for the same GPU)."""
+    from . import analogies
+
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    cfg = Config()
+    if model:
+        cfg.model_path = str(model)
+    with console.status("[bold]Extracting + verifying analogy relations…"):
+        stats = analogies.backfill_analogies(conn, schema, cfg, limit=limit, batch_size=batch_size)
+    conn.close()
+    console.print(f"[green]✓[/green] backfill-analogies: [bold]{stats['terms_scanned']}[/bold] terms scanned "
+                  f"-> [bold]{stats['edges_found']}[/bold] candidate edges "
+                  f"([bold]{stats['edges_verified']}[/bold] verified, {stats['edges_rejected']} rejected)")
 
 
 @app.command()

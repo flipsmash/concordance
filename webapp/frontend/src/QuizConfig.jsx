@@ -9,6 +9,7 @@ const QUESTION_TYPES = [
   { value: 'mc', label: 'Multiple choice' },
   { value: 'true_false', label: 'True / False' },
   { value: 'matching', label: 'Matching' },
+  { value: 'analogy', label: 'Analogy' },
 ]
 
 function QuizConfig() {
@@ -22,6 +23,7 @@ function QuizConfig() {
   const [types, setTypes] = useState(['mc'])
   const [mcChoiceCount, setMcChoiceCount] = useState(4)
   const [matchingSetSize, setMatchingSetSize] = useState(4)
+  const [analogyChoiceCount, setAnalogyChoiceCount] = useState(4)
   const [direction, setDirection] = useState('definition_to_word')
   const [notaEnabled, setNotaEnabled] = useState(false)
   const [notaRate, setNotaRate] = useState(15)
@@ -74,6 +76,7 @@ function QuizConfig() {
         types,
         mc_choice_count: mcChoiceCount,
         matching_set_size: matchingSetSize,
+        analogy_choice_count: analogyChoiceCount,
         direction,
         nota_enabled: notaEnabled,
         nota_rate: notaRate / 100,
@@ -247,6 +250,18 @@ function QuizConfig() {
                   max="8"
                   value={matchingSetSize}
                   onChange={(e) => setMatchingSetSize(Number(e.target.value))}
+                />
+              </label>
+            )}
+            {types.includes('analogy') && (
+              <label className="quiz-inline-number">
+                Options per analogy question
+                <input
+                  type="number"
+                  min="2"
+                  max="8"
+                  value={analogyChoiceCount}
+                  onChange={(e) => setAnalogyChoiceCount(Number(e.target.value))}
                 />
               </label>
             )}

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
+import AnalogyQuestion from './AnalogyQuestion'
 import MatchingQuestion from './MatchingQuestion'
 import McQuestion from './McQuestion'
 import './QuizRun.css'
@@ -36,7 +37,8 @@ function QuizRun() {
   }, [loadState])
 
   // `extra` merges into the request body -- selected_word_id for mc, answer for
-  // true_false, pairs for matching -- each sub-component knows its own shape.
+  // true_false, pairs for matching, selected_option_key for analogy -- each
+  // sub-component knows its own shape.
   function submitAnswer(extra) {
     if (submitting || (result && state.feedback_timing === 'immediate')) return
     setSubmitting(true)
@@ -87,6 +89,10 @@ function QuizRun() {
       {question.question_type === 'matching' && (
         <MatchingQuestion key={question.question_id} question={question} result={result} disabled={disabled}
           onSubmit={(pairs) => submitAnswer({ pairs })} />
+      )}
+      {question.question_type === 'analogy' && (
+        <AnalogyQuestion key={question.question_id} question={question} result={result} disabled={disabled}
+          onSelect={(key) => submitAnswer({ selected_option_key: key })} />
       )}
 
       {result && (

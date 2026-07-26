@@ -172,7 +172,7 @@ def test_quiz_round_trip_and_admin_settings_http():
         # ...so correctness is withheld now, unlike the earlier immediate-mode session.
         assert ans2 == {"accepted": True, "is_correct": None, "correct_word_id": None,
                          "correct_label": None, "correct_answer": None, "pair_results": None,
-                         "quiz_definition": None}
+                         "quiz_definition": None, "correct_option_key": None}
     finally:
         main.SCHEMA = old_schema
         cleanup = db.connect(_URL)
@@ -673,6 +673,183 @@ def test_spaced_repetition_prefers_eligible_words_but_falls_back_when_short_http
                             json={"length": 10, "mc_choice_count": 2, "spaced_repetition_enabled": True})
         assert res2.status_code == 200, res2.text
         assert res2.json()["total_questions"] == 10
+    finally:
+        main.SCHEMA = old_schema
+        cleanup = db.connect(_URL)
+        with cleanup.cursor() as cur:
+            cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        cleanup.commit()
+        cleanup.close()
+
+
+def _seed_analogy_fixture(conn, schema: str, n_plain: int = 6) -> dict:
+    """n_plain generic mc-eligible words plus two vocab-vocab hypernym edges
+    (fetter->shackle, gauntlet->vambrace) that can serve as each other's
+    anchor -- the minimum needed for select_analogy_edge to assemble a
+    style-A item deterministically regardless of which word is randomly
+    picked as the target. Returns {lemma: word_id}."""
+    with conn.cursor() as cur:
+        for i in range(n_plain):
+            cur.execute(
+                f"""INSERT INTO {schema}.word (lemma, definition, quiz_definition, part_of_speech, active)
+                    VALUES (%s, %s, %s, 'noun', true) RETURNING id""",
+                (f"plainword{i}", f"definition {i}", f"quiz definition {i}"),
+            )
+            wid = cur.fetchone()[0]
+            cur.execute(f"INSERT INTO {schema}.word_difficulty (word_id, quizzable, difficulty) VALUES (%s, true, 50.0)",
+                        (wid,))
+
+        cur.execute(
+            f"""INSERT INTO {schema}.word (lemma, definition, quiz_definition, part_of_speech, active)
+                VALUES ('fetter','a chain for the ankles','a chain for the ankles','noun',true),
+                       ('shackle','a metal restraint','a metal restraint','noun',true),
+                       ('gauntlet','an armored glove','an armored glove','noun',true),
+                       ('vambrace','an armored sleeve','an armored sleeve','noun',true)
+                RETURNING id, lemma""")
+        wid = {lemma: i for i, lemma in cur.fetchall()}
+        for i in wid.values():
+            cur.execute(f"INSERT INTO {schema}.word_difficulty (word_id, quizzable, difficulty) VALUES (%s, true, 50.0)",
+                        (i,))
+
+        def add_term(lemma, word_id=None):
+            cur.execute(
+                f"""INSERT INTO {schema}.wn_relation_term (word_id, lemma, wn_pos, synset_name, gloss, is_common)
+                    VALUES (%s, %s, 'n', %s, %s, %s) RETURNING id""",
+                (word_id, lemma, f"{lemma}.n.01", f"{lemma} gloss", word_id is None),
+            )
+            return cur.fetchone()[0]
+
+        t_fetter = add_term("fetter", wid["fetter"])
+        t_shackle = add_term("shackle", wid["shackle"])
+        t_gauntlet = add_term("gauntlet", wid["gauntlet"])
+        t_vambrace = add_term("vambrace", wid["vambrace"])
+
+        for a, b in ((t_fetter, t_shackle), (t_gauntlet, t_vambrace)):
+            cur.execute(
+                f"""INSERT INTO {schema}.word_relation_edge
+                        (term_a_id, term_b_id, relation_type, relation_family, pos_a, pos_b, source, verification_status)
+                    VALUES (%s,%s,'hypernym','is_a','noun','noun','wordnet_hypernym','verified')""",
+                (a, b),
+            )
+    conn.commit()
+    return wid
+
+
+@pg
+def test_analogy_quiz_round_trip_http():
+    from starlette.testclient import TestClient
+
+    from webapp.backend import main
+
+    schema = "cc_test_analogy_http"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+    _seed_analogy_fixture(conn, schema)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"INSERT INTO {schema}.users (username, password_hash) VALUES ('analogyuser', %s)",
+            (auth.hash_password("password123"),),
+        )
+    conn.commit()
+    conn.close()
+
+    valid_pairs = {("FETTER", "shackle"), ("GAUNTLET", "vambrace")}
+    old_schema = main.SCHEMA
+    main.SCHEMA = schema
+    try:
+        client = TestClient(main.app, base_url="https://testserver")
+        client.post("/api/auth/login", json={"username": "analogyuser", "password": "password123"})
+
+        res = client.post("/api/quiz/start", json={"length": 1, "types": ["analogy"]})
+        assert res.status_code == 200, res.text
+        session_id = res.json()["session_id"]
+        assert res.json()["total_questions"] == 1
+
+        q = client.get(f"/api/quiz/{session_id}").json()["question"]
+        assert q["question_type"] == "analogy"
+        assert q["options"] is None            # mc-only field must stay unset
+        assert q["analogy_options"] is not None
+        # prompt = "A is to B as C is to ___" -- both the anchor (A) and the
+        # tested word (C) can legitimately appear as substrings (e.g. both
+        # FETTER and GAUNTLET show up when one anchors the other), so the
+        # tested word must be parsed out of its specific position, not just
+        # matched anywhere in the string.
+        import re
+        m = re.match(r"^(\w+) is to (\w+) as (\w+) is to ___$", q["prompt"])
+        assert m is not None, q["prompt"]
+        c_word = m.group(3)
+        expected_d = dict(valid_pairs)[c_word]
+        labels = {o["label"] for o in q["analogy_options"]}
+        assert expected_d in labels
+
+        correct_key = next(o["key"] for o in q["analogy_options"] if o["label"] == expected_d)
+        ans = client.post(f"/api/quiz/{session_id}/answer",
+                           json={"question_id": q["question_id"], "selected_option_key": correct_key}).json()
+        assert ans["is_correct"] is True
+        assert ans["correct_option_key"] == correct_key
+
+        review = client.get(f"/api/quiz/{session_id}/review").json()
+        assert review["items"][0]["correct_label"] == expected_d
+        assert review["items"][0]["is_correct"] is True
+
+        finish = client.post(f"/api/quiz/{session_id}/finish").json()
+        assert finish["score_pct"] == 100.0
+
+        # target_word_ids[0] (the vocab word being probed) must be exactly who
+        # got the quiz_answer row -- never an anchor/distractor word consumed
+        # along the way.
+        conn2 = db.connect(_URL)
+        with conn2.cursor() as cur:
+            cur.execute(f"SELECT w.lemma FROM {schema}.quiz_answer a JOIN {schema}.word w ON w.id = a.word_id")
+            answered_lemmas = {r[0] for r in cur.fetchall()}
+        conn2.close()
+        assert answered_lemmas == {c_word.lower()}
+    finally:
+        main.SCHEMA = old_schema
+        cleanup = db.connect(_URL)
+        with cleanup.cursor() as cur:
+            cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        cleanup.commit()
+        cleanup.close()
+
+
+@pg
+def test_blended_mc_analogy_quiz_falls_back_when_analogy_pool_thin_http():
+    """Regression test for start_quiz's two-pool loop: analogy is eligible for
+    only 2 words in this fixture, but mc has abundant supply -- a blended
+    session must still return the full requested length by falling back to
+    mc once the (much smaller) analogy pool runs dry, not silently short-fill."""
+    from starlette.testclient import TestClient
+
+    from webapp.backend import main
+
+    schema = "cc_test_analogy_blend_http"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+    _seed_analogy_fixture(conn, schema, n_plain=40)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"INSERT INTO {schema}.users (username, password_hash) VALUES ('analogyblenduser', %s)",
+            (auth.hash_password("password123"),),
+        )
+    conn.commit()
+    conn.close()
+
+    old_schema = main.SCHEMA
+    main.SCHEMA = schema
+    try:
+        client = TestClient(main.app, base_url="https://testserver")
+        client.post("/api/auth/login", json={"username": "analogyblenduser", "password": "password123"})
+
+        res = client.post("/api/quiz/start", json={"length": 5, "types": ["mc", "analogy"]})
+        assert res.status_code == 200, res.text
+        assert res.json()["total_questions"] == 5
     finally:
         main.SCHEMA = old_schema
         cleanup = db.connect(_URL)

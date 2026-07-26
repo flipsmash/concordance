@@ -140,3 +140,37 @@ def junk_pos_reason(pos: str | None) -> RejectReason | None:
     """The RejectReason to use if `pos` (any spelling/case) is never real
     vocabulary here, else None."""
     return JUNK_POS_REASON.get(normalize_pos(pos))
+
+
+# Only these four canonical POS values have a WordNet part-of-speech code at
+# all (WordNet has no pronoun/preposition/conjunction/etc. entries) -- every
+# other normalize_pos() output is ineligible for WordNet-sourced analogy
+# relations, though it may still be eligible for a definition-pattern relation
+# depending on the pattern (see concordance/analogies.py).
+_WORDNET_POS = {"noun": "n", "verb": "v", "adjective": "a", "adverb": "r"}
+
+
+def wordnet_pos(pos: str | None) -> str | None:
+    """Canonical (normalize_pos) POS -> WordNet's n/v/a/r code, or None if this
+    POS has no WordNet mapping."""
+    return _WORDNET_POS.get(normalize_pos(pos))
+
+
+@dataclass
+class RelationCandidate:
+    """One raw (pre-verification) term_a -> term_b analogy relation edge under
+    consideration by the analogy backfill (concordance/analogies.py). A relation
+    PAIR, not a per-word record -- parallel to Candidate's role in the main
+    ingest pipeline but never mixed with it."""
+
+    term_a_lemma: str
+    term_a_pos: str          # canonical (normalize_pos) POS
+    term_a_gloss: str        # real definition/gloss text -- mandatory, non-empty:
+    term_b_lemma: str        # this is what the LLM verification gate judges against,
+    term_b_pos: str          # the entire reason the gate can catch a disguised synonym
+    term_b_gloss: str
+    relation_type: str
+    relation_family: str
+    source: str               # 'wordnet_hypernym' | ... | 'definition_pattern_kind_of' | ...
+    verdict: str | None = None       # 'verified' | 'rejected' | None (pending)
+    verification_note: str = ""

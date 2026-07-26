@@ -316,3 +316,198 @@ def select_matching_set(conn, schema: str, seed_word_id: int, pos: str, cfg: Dis
     pairings in the rendered matching UI are these words' own real definitions."""
     return _select_candidates(conn, schema, seed_word_id, pos, cfg, set_size - 1,
                                exclude_word_ids or set(), require_quiz_definition=True)
+
+
+# --- analogy distractors (§ analogies) -----------------------------------------
+#
+# For an A:B::C:? item, wrong options must additionally exclude every word that
+# satisfies the SAME relation to C (see concordance/analogy_select.py's
+# exclusion_lemmas -- the full, non-vocab-restricted WordNet target set,
+# transitive-closure where applicable, precomputed by concordance/analogies.py)
+# plus D's own synonym set -- this is the synonym-exclusion rule above, extended
+# to cover "second valid completion of the same relation," not just literal
+# synonymy. Conversely, a distractor that completes the SAME relation using A or
+# B instead of C -- trap_lemmas below -- is the authentic MAT "wrong term, right
+# relation" trap and is deliberately PREFERRED, not excluded.
+
+def _resolve_word_by_lemma_pos(cur, schema: str, lemma: str, pos: str) -> dict | None:
+    cur.execute(
+        f"""SELECT w.id, w.lemma, w.quiz_definition FROM {schema}.word w
+            JOIN {schema}.word_difficulty wd ON wd.word_id = w.id
+            WHERE w.active AND wd.quizzable = true AND lower(w.lemma) = %s AND w.part_of_speech = %s
+            LIMIT 1""",
+        (lemma.lower(), pos),
+    )
+    row = cur.fetchone()
+    return {"id": row[0], "lemma": row[1], "quiz_definition": row[2]} if row else None
+
+
+def _trap_candidates(cur, schema: str, trap_lemmas: list[str], d_pos: str,
+                      exclude_ids: set[int], limit: int) -> list[dict]:
+    out = []
+    for lemma in trap_lemmas:
+        if len(out) >= limit:
+            break
+        word = _resolve_word_by_lemma_pos(cur, schema, lemma, d_pos)
+        if word:
+            if word["id"] in exclude_ids:
+                continue
+            out.append({"id": word["id"], "lemma": word["lemma"], "quiz_definition": word["quiz_definition"],
+                        "strategy": "analogy_trap"})
+        else:
+            out.append({"id": None, "lemma": lemma, "quiz_definition": None, "strategy": "analogy_trap"})
+    return out
+
+
+def _embedding_offset_candidates(cur, schema: str, a_lemma: str, b_lemma: str, c_word_id: int, d_pos: str,
+                                  exclude_lemmas: set[str], exclude_ids: set[int], limit: int) -> list[dict]:
+    """vocab_only style only: vec(B) - vec(A) + vec(C), nearest vocab words
+    matching d_pos -- computed entirely in SQL (pgvector supports vector
+    arithmetic operators), same word_embedding.definition_vector HNSW index
+    _semantic_band_candidates already reads."""
+    cur.execute(
+        f"""SELECT
+                (SELECT e.definition_vector FROM {schema}.word_embedding e
+                     JOIN {schema}.word w ON w.id = e.word_id WHERE lower(w.lemma) = %s LIMIT 1),
+                (SELECT e.definition_vector FROM {schema}.word_embedding e
+                     JOIN {schema}.word w ON w.id = e.word_id WHERE lower(w.lemma) = %s LIMIT 1),
+                (SELECT e.definition_vector FROM {schema}.word_embedding e WHERE e.word_id = %s)""",
+        (a_lemma.lower(), b_lemma.lower(), c_word_id),
+    )
+    a_vec, b_vec, c_vec = cur.fetchone()
+    if a_vec is None or b_vec is None or c_vec is None:
+        return []
+    cur.execute(
+        f"""SELECT w.id, w.lemma, w.quiz_definition
+            FROM {schema}.word_embedding e
+            JOIN {schema}.word w ON w.id = e.word_id
+            JOIN {schema}.word_difficulty wd ON wd.word_id = w.id
+            WHERE w.active AND wd.quizzable = true AND w.part_of_speech = %s
+              AND NOT (w.id = ANY(%s)) AND e.definition_vector IS NOT NULL
+            ORDER BY e.definition_vector <=> ((%s::vector) - (%s::vector) + (%s::vector))
+            LIMIT %s""",
+        (d_pos, list(exclude_ids), b_vec, a_vec, c_vec, limit * 3),
+    )
+    out = []
+    for wid, lemma, qdef in cur.fetchall():
+        if lemma.lower() in exclude_lemmas:
+            continue
+        out.append({"id": wid, "lemma": lemma, "quiz_definition": qdef, "strategy": "embedding_offset"})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _sibling_fanout_candidates(cur, schema: str, d_term_id: int, d_pos: str,
+                                exclude_lemmas: set[str], exclude_ids: set[int], limit: int) -> list[dict]:
+    """one_hard_term style only: co-hyponyms of D under D's own hypernym
+    parent, precomputed by analogies.compute_sibling_fanout -- empty for any
+    D whose verified edge wasn't in the is_a family (compute_sibling_fanout
+    is only ever called for those), in which case this simply falls through
+    to the random ordinary-term fallback."""
+    cur.execute(
+        f"""SELECT target_lemma FROM {schema}.wn_relation_fanout
+            WHERE term_id = %s AND relation_type = 'sibling_of_hypernym_parent'
+            ORDER BY random() LIMIT %s""",
+        (d_term_id, limit * 3),
+    )
+    out = []
+    for (lemma,) in cur.fetchall():
+        if lemma.lower() in exclude_lemmas:
+            continue
+        word = _resolve_word_by_lemma_pos(cur, schema, lemma, d_pos)
+        if word and word["id"] in exclude_ids:
+            continue
+        out.append({"id": word["id"] if word else None, "lemma": lemma,
+                    "quiz_definition": word["quiz_definition"] if word else None, "strategy": "sibling_fanout"})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _random_ordinary_candidates(cur, schema: str, d_pos: str, exclude_lemmas: set[str], limit: int) -> list[dict]:
+    """Last-resort fill for the one_hard_term style: a random common
+    (is_common) ordinary term of the right POS, not tied to any word row."""
+    from .model import wordnet_pos
+
+    wn_pos = wordnet_pos(d_pos) or "n"
+    cur.execute(
+        f"""SELECT lemma FROM {schema}.wn_relation_term
+            WHERE word_id IS NULL AND wn_pos = %s AND is_common
+            ORDER BY random() LIMIT %s""",
+        (wn_pos, limit * 3),
+    )
+    out = []
+    for (lemma,) in cur.fetchall():
+        if lemma.lower() in exclude_lemmas:
+            continue
+        out.append({"id": None, "lemma": lemma, "quiz_definition": None, "strategy": "random_ordinary"})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def select_analogy_distractors(conn, schema: str, style: str, d_pos: str, a_lemma: str, b_lemma: str,
+                                c_word_id: int, d_term_id: int, exclusion_lemmas: set[str],
+                                trap_lemmas: list[str], count: int,
+                                exclude_word_ids: set[int] | None = None) -> DistractorResult:
+    """`count` wrong D-options for an analogy item. `d_pos` is the canonical
+    POS (noun/verb/adjective/adverb) of the correct answer D, used to
+    POS-match every strategy. `c_word_id` feeds the vocab_only style's
+    embedding-offset heuristic; `d_term_id` (D's wn_relation_term id, NOT its
+    word id -- D is frequently an ordinary term with no word row at all in
+    the one_hard_term style) feeds that style's precomputed sibling-fanout
+    lookup. Every candidate, regardless of source, is checked against
+    `exclusion_lemmas` -- trap and plausibility strategies are equally
+    capable of accidentally proposing a second right answer, and the
+    exclusion set is what polices that (see module docstring above)."""
+    exclude_ids = set(exclude_word_ids or set())
+    exclusion_lemmas = {l.lower() for l in exclusion_lemmas}
+    picked: list[dict] = []
+
+    with conn.cursor() as cur:
+        for c in _trap_candidates(cur, schema, trap_lemmas, d_pos, exclude_ids, count):
+            if c["lemma"].lower() in exclusion_lemmas or c["lemma"].lower() in {p["lemma"].lower() for p in picked}:
+                continue
+            picked.append(c)
+            if c["id"]:
+                exclude_ids.add(c["id"])
+            if len(picked) >= count:
+                break
+
+        remaining = count - len(picked)
+        degraded = False
+        if remaining > 0:
+            if style == "vocab_only":
+                more = _embedding_offset_candidates(cur, schema, a_lemma, b_lemma, c_word_id, d_pos,
+                                                     exclusion_lemmas, exclude_ids, remaining)
+            else:
+                more = _sibling_fanout_candidates(cur, schema, d_term_id, d_pos, exclusion_lemmas,
+                                                   exclude_ids, remaining)
+            for c in more:
+                if c["lemma"].lower() in {p["lemma"].lower() for p in picked}:
+                    continue
+                picked.append(c)
+                if c["id"]:
+                    exclude_ids.add(c["id"])
+            remaining = count - len(picked)
+
+        if remaining > 0:
+            if style == "vocab_only":
+                cfg = DistractorConfig(strategy_weights={"orthographic": 0, "semantic": 0, "domain": 0, "antonym": 0})
+                more = _random_candidates(conn, schema, d_pos, cfg, exclude_ids, [], False, remaining)
+                for c in more:
+                    c["strategy"] = "random"
+                    if c["lemma"].lower() in exclusion_lemmas or c["lemma"].lower() in {p["lemma"].lower() for p in picked}:
+                        continue
+                    picked.append(c)
+                    exclude_ids.add(c["id"])
+            else:
+                more = _random_ordinary_candidates(cur, schema, d_pos, exclusion_lemmas, remaining)
+                for c in more:
+                    if c["lemma"].lower() in {p["lemma"].lower() for p in picked}:
+                        continue
+                    picked.append(c)
+            degraded = degraded or (len(picked) < count)
+
+    return DistractorResult(candidates=picked[:count], degraded=degraded or len(picked) < count)

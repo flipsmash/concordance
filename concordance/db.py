@@ -379,6 +379,111 @@ CREATE TABLE IF NOT EXISTS {s}.word_set_item (
     added_at     timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (set_id, word_id)
 );
+
+-- Analogy quiz questions (§ analogies, concordance/analogies.py). Every term that
+-- can appear in an analogy relation edge, vocab word or not -- word_id is set iff
+-- this term IS a vocab word. One row per distinct term rather than two nullable
+-- word columns per edge, so vocab-vocab, vocab-ordinary, and ordinary-ordinary
+-- edges all share the same word_relation_edge shape below with no per-row
+-- branching on which side is which.
+CREATE TABLE IF NOT EXISTS {s}.wn_relation_term (
+    id             serial PRIMARY KEY,
+    word_id        integer REFERENCES {s}.word(id) ON DELETE CASCADE,
+    lemma          text NOT NULL,
+    lemma_lc       text GENERATED ALWAYS AS (lower(lemma)) STORED,
+    wn_pos         text NOT NULL,                    -- 'n' | 'v' | 'a' | 'r'
+    synset_name    text,                              -- canonical sense, e.g. 'cangue.n.01';
+                                                        -- NULL for a vocab word with no WordNet
+                                                        -- synset at all (definition-pattern-only)
+    gloss          text,                               -- WordNet gloss (ordinary term) or
+                                                        -- word.definition (vocab term) -- feeds
+                                                        -- ONLY the LLM verification prompt, never
+                                                        -- shown in the quiz UI itself
+    synonym_lemmas text[] NOT NULL DEFAULT '{{}}',       -- other lemma_names sharing synset_name --
+                                                        -- the "D's own synonyms" ambiguity exclusion
+    zipf           double precision,                   -- wordfreq zipf_frequency(lemma, "en")
+    is_common      boolean NOT NULL DEFAULT false,      -- zipf >= 4.0 (same "plainly frequent" bar
+                                                        -- validity_score.py already uses) -- anchor
+                                                        -- (ordinary-term) eligibility for style B
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    updated_at     timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS wn_relation_term_word_id_idx
+    ON {s}.wn_relation_term (word_id) WHERE word_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS wn_relation_term_lemma_pos_idx
+    ON {s}.wn_relation_term (lemma_lc, wn_pos) WHERE word_id IS NULL;
+CREATE INDEX IF NOT EXISTS wn_relation_term_common_idx
+    ON {s}.wn_relation_term (wn_pos) WHERE is_common;
+
+-- Resumability marker, one row per term once its relation edges have been
+-- extracted -- same "we looked and found nothing" shape as word_commons_search
+-- (a term with zero WordNet/definition-pattern relations produces zero rows in
+-- word_relation_edge and would be rescanned every run without this).
+CREATE TABLE IF NOT EXISTS {s}.wn_relation_scan (
+    term_id      integer PRIMARY KEY REFERENCES {s}.wn_relation_term(id) ON DELETE CASCADE,
+    scanned_at   timestamptz NOT NULL DEFAULT now(),
+    edges_found  integer NOT NULL DEFAULT 0,   -- raw (pre-verification) candidates found with
+                                                -- this term as term_a, across every relation type
+    method       text NOT NULL                 -- 'wordnet' | 'definition_pattern' | 'both'
+);
+
+-- One row per candidate relation pair -- vocab-vocab, vocab-ordinary, or
+-- ordinary-ordinary all share this shape. verification_status defaults to
+-- 'pending' and an edge is NEVER usable in a quiz until 'verified' -- an
+-- unverified pair shipping means a live question with two right answers, so
+-- every quiz-time query filters WHERE verification_status = 'verified'
+-- (see word_relation_edge_verified_idx).
+CREATE TABLE IF NOT EXISTS {s}.word_relation_edge (
+    id                   serial PRIMARY KEY,
+    term_a_id            integer NOT NULL REFERENCES {s}.wn_relation_term(id) ON DELETE CASCADE,
+    term_b_id            integer NOT NULL REFERENCES {s}.wn_relation_term(id) ON DELETE CASCADE,
+    relation_type        text NOT NULL,   -- 'hypernym' | 'holonym_part' | 'holonym_member' |
+                                           -- 'holonym_substance' | 'antonym' | 'similar_to' |
+                                           -- 'derivationally_related' | 'attribute' |
+                                           -- 'definition_pattern_kind_of' |
+                                           -- 'definition_pattern_agent' |
+                                           -- 'definition_pattern_part_of' |
+                                           -- 'definition_pattern_purpose'
+    relation_family      text NOT NULL,   -- 'is_a' | 'part_of' | 'opposite' | 'similar' |
+                                           -- 'derived' | 'agentive' | 'purpose' | 'attribute' --
+                                           -- the bucket used to pair this edge with a DIFFERENT
+                                           -- edge as the item's anchor (A:B) leg
+    pos_a                text NOT NULL,   -- canonical POS (model.normalize_pos) of term_a
+    pos_b                text NOT NULL,   -- canonical POS of term_b
+    source               text NOT NULL,   -- 'wordnet_hypernym' | 'wordnet_holonym_part' | ... |
+                                           -- 'definition_pattern_kind_of' | ...
+    verification_status  text NOT NULL DEFAULT 'pending',  -- 'pending' | 'verified' | 'rejected'
+    verification_note    text,
+    verifier_model        text,
+    verified_at            timestamptz,
+    created_at              timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (term_a_id, term_b_id, relation_type)
+);
+CREATE INDEX IF NOT EXISTS word_relation_edge_family_idx
+    ON {s}.word_relation_edge (relation_family, verification_status);
+CREATE INDEX IF NOT EXISTS word_relation_edge_term_a_idx ON {s}.word_relation_edge (term_a_id);
+CREATE INDEX IF NOT EXISTS word_relation_edge_term_b_idx ON {s}.word_relation_edge (term_b_id);
+CREATE INDEX IF NOT EXISTS word_relation_edge_verified_idx
+    ON {s}.word_relation_edge (verification_status) WHERE verification_status = 'verified';
+
+-- The FULL (non-vocab-restricted), transitive-closure-where-applicable WordNet
+-- target set for (term acting as term_a, relation_type) -- populated regardless
+-- of verification, since its only job is the ambiguity exclusion set and
+-- trap-distractor sourcing at quiz-assembly time (concordance/analogy_select.py),
+-- never shown as quiz content itself. Also carries the synthetic relation_type
+-- 'sibling_of_hypernym_parent' (a term's co-hyponyms under its own immediate
+-- parent), used only for one-hard-term distractor plausibility.
+CREATE TABLE IF NOT EXISTS {s}.wn_relation_fanout (
+    id            serial PRIMARY KEY,
+    term_id       integer NOT NULL REFERENCES {s}.wn_relation_term(id) ON DELETE CASCADE,
+    relation_type text NOT NULL,
+    target_lemma  text NOT NULL,
+    target_pos    text NOT NULL,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (term_id, relation_type, target_lemma, target_pos)
+);
+CREATE INDEX IF NOT EXISTS wn_relation_fanout_lookup_idx
+    ON {s}.wn_relation_fanout (term_id, relation_type);
 """
 
 
