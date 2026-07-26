@@ -9,6 +9,7 @@ const LINK_DISTANCE_MIN = 40
 const LINK_DISTANCE_MAX = 220
 const NODE_RADIUS_CENTER = 14
 const NODE_RADIUS_RELATED = 8
+const RING_2_ALPHA = 0.45 // second-hop node/label fade, matching GraphView.jsx's own constant
 
 // Lexical-overlap relatedness graph (books/authors) -- copy-adapted from
 // GraphView.jsx, not imported from it: that component isn't factored into a
@@ -179,7 +180,11 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
     () => (node, ctx, globalScale) => {
       const isCenter = node.id === center?.id
       const isHighlighted = highlightId != null && node.id === highlightId
+      // Second-hop nodes (ring 2) fade rather than disappear -- same
+      // RING_2_ALPHA treatment as the word graph's own ring 2.
+      const isOuter = node.ring === 2
       const r = nodeRadius(node)
+      ctx.globalAlpha = isOuter ? RING_2_ALPHA : 1
       ctx.beginPath()
       ctx.arc(node.x, node.y, r, 0, 2 * Math.PI)
       ctx.fillStyle = isCenter ? cssVar('--graph-center', '#e6d200') : cssVar('--accent', '#aa3bff')
@@ -207,6 +212,7 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
       ctx.textBaseline = 'top'
       ctx.fillStyle = cssVar('--text-h', '#08060d')
       ctx.fillText(getLabel(node), node.x, node.y + r + 2)
+      ctx.globalAlpha = 1
     },
     [center, getLabel, nodeRadius, highlightId],
   )

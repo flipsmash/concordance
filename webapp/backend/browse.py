@@ -393,6 +393,8 @@ class BookRelatedResponse(BaseModel):
 def book_related(
     book_id: int,
     top_k: int = Query(8, ge=1, le=20),
+    k2: int = Query(5, ge=0, le=15, description="Each ring-1 book's own neighbor count, for ring 2."),
+    max_nodes: int = Query(60, ge=10, le=90),
     _: dict = Depends(_main.require_viewer),
 ) -> BookRelatedResponse:
     """A book's most vocabulary-related books, precomputed by
@@ -403,7 +405,13 @@ def book_related(
     already sorted by score) and the drill-down graph page (render the
     whole response) from a single cheap query -- unlike word_graph's
     multi-hop BFS, this is a direct top-k table read, so there's no
-    separate expensive-vs-cheap split worth two endpoints for."""
+    separate expensive-vs-cheap split worth two endpoints for.
+
+    Ring 2 (each ring-1 book's own top-k2 neighbors) follows word_graph's
+    exact pattern one level up: a single LATERAL-joined query, budget-capped
+    at max_nodes, closest-by-score kept first when trimming. Cheap here
+    specifically because book_similarity is a precomputed table read, not
+    word_graph's live vector distance -- no per-seed embedding lookup."""
     with _main.get_conn() as conn, conn.cursor() as cur:
         cur.execute(f"""SELECT b.id, b.title, b.author, count(DISTINCT w.id)
                         FROM {_main.SCHEMA}.book b
@@ -422,9 +430,9 @@ def book_related(
                         ORDER BY bs.score DESC LIMIT %s""", (book_id, top_k))
         related = cur.fetchall()
 
-        # Cross-links: real edges BETWEEN two displayed neighbors, not just
-        # center-to-neighbor -- without this, book_related is a literal star
-        # graph (zero topological information beyond "these are the
+        # Cross-links: real edges BETWEEN two displayed ring-1 neighbors, not
+        # just center-to-neighbor -- without this, book_related is a literal
+        # star graph (zero topological information beyond "these are the
         # neighbors"). Only surfaces links already stored because a neighbor
         # also has another displayed neighbor in ITS OWN top-k -- no new
         # similarity computation, same query shape authors_relatedness
@@ -437,21 +445,57 @@ def book_related(
                     (displayed, displayed, book_id, book_id))
         cross_rows = cur.fetchall()
 
-    nodes = [center] + [
-        BookGraphNode(id=r[0], title=r[1], author=r[2], ring=1, word_count=None) for r in related
-    ]
+        # Ring 2: one LATERAL per ring-1 seed, same shape as word_graph's own
+        # ring-2 query.
+        seed_ids = [r[0] for r in related]
+        ring2_rows = []
+        if k2 and seed_ids:
+            cur.execute(f"""SELECT seed.book_id AS seed_id, nb.id, nb.title, nb.author, nb.score, nb.shared_word_count
+                            FROM unnest(%s::int[]) AS seed(book_id)
+                            CROSS JOIN LATERAL (
+                                SELECT b2.id, b2.title, b2.author, bs2.score, bs2.shared_word_count
+                                FROM {_main.SCHEMA}.book_similarity bs2
+                                JOIN {_main.SCHEMA}.book b2 ON b2.id = bs2.book_b_id
+                                WHERE bs2.book_a_id = seed.book_id AND bs2.book_b_id <> %s
+                                ORDER BY bs2.score DESC
+                                LIMIT %s
+                            ) nb""", (seed_ids, book_id, k2))
+            ring2_rows = cur.fetchall()
+
+    nodes: dict[int, BookGraphNode] = {book_id: center}
+    for r in related:
+        nodes.setdefault(r[0], BookGraphNode(id=r[0], title=r[1], author=r[2], ring=1, word_count=None))
     edges = [
         BookGraphEdge(source=book_id, target=r[0], score=r[3], shared_word_count=r[4], is_center_edge=True)
         for r in related
     ]
     seen_pairs: set[frozenset] = set()
-    for a, b, score, shared in cross_rows:
+
+    def add_cross_edge(a, b, score, shared) -> None:
         pair = frozenset((a, b))
         if pair in seen_pairs:
-            continue
+            return
         seen_pairs.add(pair)
         edges.append(BookGraphEdge(source=a, target=b, score=score, shared_word_count=shared, is_center_edge=False))
-    return BookRelatedResponse(center=center, nodes=nodes, edges=edges)
+
+    for a, b, score, shared in cross_rows:
+        add_cross_edge(a, b, score, shared)
+
+    # ring-2-only additions get trimmed first if we're over budget -- sort
+    # globally by score (higher = closer) so the strongest second-hop books survive.
+    ring2_new = [r for r in ring2_rows if r[1] not in nodes]
+    ring2_new.sort(key=lambda r: r[4], reverse=True)
+    budget_left = max_nodes - len(nodes)
+    keep_ids = {r[1] for r in ring2_new[: max(budget_left, 0)]}
+
+    for seed_id, wid, title, author, score, shared in ring2_rows:
+        if wid in nodes:
+            add_cross_edge(seed_id, wid, score, shared)  # cross-link to an existing node, no new node
+        elif wid in keep_ids:
+            nodes.setdefault(wid, BookGraphNode(id=wid, title=title, author=author, ring=2, word_count=None))
+            add_cross_edge(seed_id, wid, score, shared)
+
+    return BookRelatedResponse(center=center, nodes=list(nodes.values()), edges=edges)
 
 
 class SharedWord(BaseModel):
@@ -560,12 +604,15 @@ class AuthorRelatednessGraph(BaseModel):
 def author_related(
     author: str,
     top_k: int = Query(8, ge=1, le=20),
+    k2: int = Query(5, ge=0, le=15, description="Each ring-1 author's own neighbor count, for ring 2."),
+    max_nodes: int = Query(60, ge=10, le=90),
     _: dict = Depends(_main.require_viewer),
 ) -> AuthorRelatedResponse:
     """An author's most vocabulary-related authors, precomputed by
     `concordance author-similarity` -- same lexical-overlap metric and same
-    top-k-table-read shape as book_related. PLACEHOLDER_AUTHORS ("Various",
-    "Unknown Author", ...) are aggregation labels, not real authors --
+    top-k-table-read shape as book_related, including its ring-2 expansion
+    (see book_related's docstring for the pattern/reasoning). PLACEHOLDER_AUTHORS
+    ("Various", "Unknown Author", ...) are aggregation labels, not real authors --
     author_similarity never has rows for them (see compute_author_similarity),
     so they 404 here too rather than returning a center with an always-empty
     related list."""
@@ -597,21 +644,53 @@ def author_related(
                     (displayed, displayed, author, author))
         cross_rows = cur.fetchall()
 
-    nodes = [center] + [
-        AuthorGraphNode(id=r[0], ring=1, book_count=None, word_count=None) for r in related
-    ]
+        # Ring 2 -- see book_related's identical LATERAL pattern, one level up.
+        seed_names = [r[0] for r in related]
+        ring2_rows = []
+        if k2 and seed_names:
+            cur.execute(f"""SELECT seed.author_name AS seed_id, nb.author_b, nb.score, nb.shared_word_count
+                            FROM unnest(%s::text[]) AS seed(author_name)
+                            CROSS JOIN LATERAL (
+                                SELECT as2.author_b, as2.score, as2.shared_word_count
+                                FROM {_main.SCHEMA}.author_similarity as2
+                                WHERE as2.author_a = seed.author_name AND as2.author_b <> %s
+                                ORDER BY as2.score DESC
+                                LIMIT %s
+                            ) nb""", (seed_names, author, k2))
+            ring2_rows = cur.fetchall()
+
+    nodes: dict[str, AuthorGraphNode] = {author: center}
+    for r in related:
+        nodes.setdefault(r[0], AuthorGraphNode(id=r[0], ring=1, book_count=None, word_count=None))
     edges = [
         AuthorGraphEdge(source=author, target=r[0], score=r[1], shared_word_count=r[2], is_center_edge=True)
         for r in related
     ]
     seen_pairs: set[frozenset] = set()
-    for a, b, score, shared in cross_rows:
+
+    def add_cross_edge(a, b, score, shared) -> None:
         pair = frozenset((a, b))
         if pair in seen_pairs:
-            continue
+            return
         seen_pairs.add(pair)
         edges.append(AuthorGraphEdge(source=a, target=b, score=score, shared_word_count=shared, is_center_edge=False))
-    return AuthorRelatedResponse(center=center, nodes=nodes, edges=edges)
+
+    for a, b, score, shared in cross_rows:
+        add_cross_edge(a, b, score, shared)
+
+    ring2_new = [r for r in ring2_rows if r[1] not in nodes]
+    ring2_new.sort(key=lambda r: r[2], reverse=True)
+    budget_left = max_nodes - len(nodes)
+    keep_ids = {r[1] for r in ring2_new[: max(budget_left, 0)]}
+
+    for seed_id, name, score, shared in ring2_rows:
+        if name in nodes:
+            add_cross_edge(seed_id, name, score, shared)
+        elif name in keep_ids:
+            nodes.setdefault(name, AuthorGraphNode(id=name, ring=2, book_count=None, word_count=None))
+            add_cross_edge(seed_id, name, score, shared)
+
+    return AuthorRelatedResponse(center=center, nodes=list(nodes.values()), edges=edges)
 
 
 @router.get("/api/browse/authors/{author_a}/shared-words/{author_b}", response_model=SharedWordsResponse)

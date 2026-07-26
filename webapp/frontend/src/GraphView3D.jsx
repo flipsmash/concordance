@@ -21,11 +21,19 @@ import { cssVar, radiusForZipf } from './graphUtils'
 function buildNode(node, isCenterId) {
   const group = new THREE.Group()
   const isCenter = node.id === isCenterId
+  // Same second-hop fade as GraphView.jsx's 2D canvas (RING_2_ALPHA there) --
+  // kept in sync visually, not literally shared, since one's a canvas alpha
+  // and the other's a THREE.Material property.
+  const isOuter = node.ring === 2
   const radius = isCenter ? Math.max(radiusForZipf(node.zipf), 10) : radiusForZipf(node.zipf)
 
   const sphere = new THREE.Mesh(
     new THREE.SphereGeometry(radius, 16, 16),
-    new THREE.MeshLambertMaterial({ color: isCenter ? cssVar('--graph-center', '#e6d200') : colorForBucket(node.color_bucket) }),
+    new THREE.MeshLambertMaterial({
+      color: isCenter ? cssVar('--graph-center', '#e6d200') : colorForBucket(node.color_bucket),
+      transparent: isOuter,
+      opacity: isOuter ? 0.45 : 1,
+    }),
   )
   group.add(sphere)
 
@@ -48,8 +56,10 @@ function buildNode(node, isCenterId) {
   }
 
   const label = new SpriteText(node.lemma)
-  label.textHeight = 4
+  label.textHeight = isOuter ? 3 : 4
   label.color = cssVar('--text-h', '#08060d')
+  label.material.transparent = true
+  label.material.opacity = isOuter ? 0.45 : 1
   label.position.set(0, -(radius + 5), 0)
   group.add(label)
 

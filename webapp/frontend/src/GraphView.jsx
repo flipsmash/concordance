@@ -12,6 +12,7 @@ const GraphView3D = lazy(() => import('./GraphView3D'))
 const API_BASE = ''
 
 const ROTATE_STEP = Math.PI / 8 // 22.5° per click
+const RING_2_ALPHA = 0.45 // second-hop node/label fade -- see paintNode's comment
 const ROTATE_PHI_MIN = 0.1 // radians off the top pole
 const ROTATE_PHI_MAX = Math.PI - 0.1 // radians off the bottom pole
 
@@ -159,6 +160,19 @@ function GraphView({ initialWordId, onNodeNavigate, hideSearch = false }) {
     [rawGraph, mode],
   )
 
+  // ring lookup for link styling -- react-force-graph resolves link.source/
+  // target from a raw id into the node object once the sim ticks, so this
+  // checks either shape rather than assuming which one a given render sees.
+  const ringById = useMemo(() => new Map(rawGraph.nodes.map((n) => [n.id, n.ring])), [rawGraph])
+  const isOuterLink = useCallback(
+    (l) => {
+      const sourceId = typeof l.source === 'object' ? l.source.id : l.source
+      const targetId = typeof l.target === 'object' ? l.target.id : l.target
+      return ringById.get(sourceId) === 2 || ringById.get(targetId) === 2
+    },
+    [ringById],
+  )
+
   // Explicit rotate-along-x/y controls for 3D: read the camera's current
   // spherical position off its live THREE.Camera, nudge azimuth (theta, the
   // "y-axis"/left-right swing) or polar angle (phi, the "x-axis"/up-down
@@ -185,7 +199,13 @@ function GraphView({ initialWordId, onNodeNavigate, hideSearch = false }) {
   const paintNode = useMemo(
     () => (node, ctx, globalScale) => {
       const isCenter = node.id === center?.id
+      // Second-hop words are real data, not noise, but a graph where ring 1
+      // and ring 2 look identical reads as one undifferentiated cloud --
+      // fading ring 2 keeps it legible as "further out" without hiding it
+      // (RING_2_ALPHA, not visibility:none).
+      const isOuter = node.ring === 2
       const r = isCenter ? Math.max(radiusForZipf(node.zipf), 10) : radiusForZipf(node.zipf)
+      ctx.globalAlpha = isOuter ? RING_2_ALPHA : 1
       ctx.beginPath()
       ctx.arc(node.x, node.y, r, 0, 2 * Math.PI)
       ctx.fillStyle = isCenter ? cssVar('--graph-center', '#e6d200') : colorForBucket(node.color_bucket)
@@ -202,6 +222,7 @@ function GraphView({ initialWordId, onNodeNavigate, hideSearch = false }) {
       ctx.textBaseline = 'top'
       ctx.fillStyle = textColor
       ctx.fillText(node.lemma, node.x, node.y + r + 1)
+      ctx.globalAlpha = 1
     },
     [center],
   )
@@ -272,6 +293,7 @@ function GraphView({ initialWordId, onNodeNavigate, hideSearch = false }) {
             nodeCanvasObject={paintNode}
             nodeCanvasObjectMode={() => 'replace'}
             linkColor={() => cssVar('--border', '#e5e4e7')}
+            linkLineDash={(l) => (isOuterLink(l) ? [4, 3] : null)}
             onNodeClick={handleNodeClick}
             onEngineStop={handleEngineStop}
           />
