@@ -3138,7 +3138,12 @@ def maintain_status(conn, schema: str = DEFAULT_SCHEMA) -> list[dict]:
         steps.append({"name": "wordnik-pron", "done": cur.fetchone()[0], "total": active_total,
                       "note": "rate-limited (~seconds/word on the free tier) -- typically the slowest step"})
 
-        cur.execute(f"SELECT count(*) FROM {s}.word WHERE active AND ipa IS NOT NULL")
+        # ipa IS NOT NULL alone overcounts: a prior compute_ipa pass clears an
+        # unresolvable word to '' (empty string, not NULL) rather than leaving
+        # a stale bad value -- see compute_ipa's cleared_no_replacement branch.
+        # Matching the same "still needs work" test the pipeline itself uses
+        # (fetch_wordnik_pronunciations' and compute_ipa's own WHERE clauses).
+        cur.execute(f"SELECT count(*) FROM {s}.word WHERE active AND ipa IS NOT NULL AND ipa <> ''")
         steps.append({"name": "ipa", "done": cur.fetchone()[0], "total": active_total, "note": ""})
 
         cur.execute(f"""SELECT count(*) FROM {s}.word_embedding e
