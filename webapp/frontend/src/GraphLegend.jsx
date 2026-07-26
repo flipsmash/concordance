@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { colorForBucket, UNCATEGORIZED_GRAY } from './domainColors'
+import { cssVar } from './graphUtils'
 
 const API_BASE = ''
 
@@ -19,6 +20,10 @@ function GraphLegend() {
 
   return (
     <div className="graph-legend">
+      <span className="graph-legend-item">
+        <span className="graph-legend-swatch" style={{ background: cssVar('--graph-center', '#e6d200') }} />
+        This word
+      </span>
       {entries.map((e) => (
         <span className="graph-legend-item" key={e.bucket}>
           <span className="graph-legend-swatch" style={{ background: colorForBucket(e.bucket) }} />

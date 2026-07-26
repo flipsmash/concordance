@@ -12,6 +12,10 @@
   --accept: #1d9154;
   --accept-hover: #167042;
   --accent: #aa3bff;
+  /* Deliberately a truer yellow (hue ~55) than emotion_leisure's domain
+     amber (#eda100, hue ~41) in domainColors.js -- close enough to collide
+     at a glance otherwise, defeating the point of a distinct center color. */
+  --graph-center: #e6d200;
 
   --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
   --mono: ui-monospace, Consolas, monospace;
@@ -41,6 +45,7 @@
     --accept: #3ecf82;
     --accept-hover: #63e29c;
     --accent: #c084fc;
+    --graph-center: #f5e050;
   }
 }
 

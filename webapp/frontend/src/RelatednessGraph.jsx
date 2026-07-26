@@ -182,7 +182,7 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
       const r = nodeRadius(node)
       ctx.beginPath()
       ctx.arc(node.x, node.y, r, 0, 2 * Math.PI)
-      ctx.fillStyle = cssVar('--accent', '#aa3bff')
+      ctx.fillStyle = isCenter ? cssVar('--graph-center', '#e6d200') : cssVar('--accent', '#aa3bff')
       ctx.fill()
       if (isCenter) {
         ctx.lineWidth = 2 / globalScale

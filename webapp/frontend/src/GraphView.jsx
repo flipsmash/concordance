@@ -184,13 +184,14 @@ function GraphView({ initialWordId, onNodeNavigate, hideSearch = false }) {
 
   const paintNode = useMemo(
     () => (node, ctx, globalScale) => {
-      const r = node.id === center?.id ? Math.max(radiusForZipf(node.zipf), 10) : radiusForZipf(node.zipf)
+      const isCenter = node.id === center?.id
+      const r = isCenter ? Math.max(radiusForZipf(node.zipf), 10) : radiusForZipf(node.zipf)
       ctx.beginPath()
       ctx.arc(node.x, node.y, r, 0, 2 * Math.PI)
-      ctx.fillStyle = colorForBucket(node.color_bucket)
+      ctx.fillStyle = isCenter ? cssVar('--graph-center', '#e6d200') : colorForBucket(node.color_bucket)
       ctx.fill()
       const textColor = cssVar('--text-h', '#08060d')
-      if (node.id === center?.id) {
+      if (isCenter) {
         ctx.lineWidth = 2 / globalScale
         ctx.strokeStyle = textColor
         ctx.stroke()

@@ -25,7 +25,7 @@ function buildNode(node, isCenterId) {
 
   const sphere = new THREE.Mesh(
     new THREE.SphereGeometry(radius, 16, 16),
-    new THREE.MeshLambertMaterial({ color: colorForBucket(node.color_bucket) }),
+    new THREE.MeshLambertMaterial({ color: isCenter ? cssVar('--graph-center', '#e6d200') : colorForBucket(node.color_bucket) }),
   )
   group.add(sphere)
 
