@@ -31,6 +31,7 @@ function WordDetail({ backTo = '/accepted' }) {
   const [neighbors, setNeighbors] = useState(null) // null = not loaded yet, [] = loaded, none found
   const [surpriseLoading, setSurpriseLoading] = useState(false)
   const [booksExpanded, setBooksExpanded] = useState(false)
+  const [progressHistory, setProgressHistory] = useState(null) // null = not loaded / unavailable, object = loaded
 
   // Same host-route family as this page's own -- /app/words/:id keeps
   // navigating within /app (so `backTo="/app"` keeps working after repeat
@@ -56,6 +57,17 @@ function WordDetail({ backTo = '/accepted' }) {
     setWord(null)
     setNeighbors(null)
     setBooksExpanded(false)
+    setProgressHistory(null)
+
+    // Separate, best-effort fetch -- this is require_user-gated personal data
+    // (unlike /api/words/{id}, which works for the account-less viewer path
+    // too), so a 401 here (viewer not logged in) or a 404 is expected and
+    // must render nothing, never an error banner, since WordDetail also
+    // mounts on the account-less admin/curation route.
+    fetch(`${API_BASE}/api/progress/words/${id}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => setProgressHistory(data))
+      .catch(() => setProgressHistory(null))
 
     fetch(`${API_BASE}/api/words/${id}`)
       .then((res) => {
@@ -228,6 +240,54 @@ function WordDetail({ backTo = '/accepted' }) {
           )}
         </div>
       </section>
+
+      {progressHistory && progressHistory.answers.length > 0 && (
+        <section className="word-detail-section your-history-panel">
+          <h2>Your history with this word</h2>
+          <div className="your-history-dots">
+            {progressHistory.answers.slice(-20).map((a, i) => (
+              <span
+                key={i}
+                className={a.is_correct ? 'quiz-review-mark correct' : 'quiz-review-mark incorrect'}
+                title={new Date(a.answered_at).toLocaleDateString()}
+              >
+                {a.is_correct ? '✓' : '✕'}
+              </span>
+            ))}
+            {progressHistory.answers.length > 20 && (
+              <span className="your-history-more">+{progressHistory.answers.length - 20} more</span>
+            )}
+          </div>
+          <div className="difficulty-factors-grid">
+            <span>Streak</span>
+            <span>{progressHistory.streak}</span>
+            <span>Correct / incorrect</span>
+            <span>{progressHistory.correct_count} / {progressHistory.incorrect_count}</span>
+            {progressHistory.next_eligible_at && (
+              <>
+                <span>Next review</span>
+                <span>{new Date(progressHistory.next_eligible_at).toLocaleDateString()}</span>
+              </>
+            )}
+            {progressHistory.personal_difficulty != null && (
+              <>
+                <span>Your difficulty</span>
+                <span>
+                  {Math.round(progressHistory.personal_difficulty)}/100
+                  {word.difficulty != null &&
+                    ` (population: ${Math.round(word.difficulty)}/100)`}
+                </span>
+              </>
+            )}
+          </div>
+        </section>
+      )}
+      {progressHistory && progressHistory.answers.length === 0 && (
+        <section className="word-detail-section your-history-panel">
+          <h2>Your history with this word</h2>
+          <p className="muted">You haven't been quizzed on this word yet.</p>
+        </section>
+      )}
 
       <section className="word-detail-section">
         <h2>Source</h2>

@@ -27,6 +27,7 @@ const Visualizations = lazy(() => import('./Visualizations'))
 const Sets = lazy(() => import('./Sets'))
 const SetDetail = lazy(() => import('./SetDetail'))
 const FlashcardRun = lazy(() => import('./FlashcardRun'))
+const Progress = lazy(() => import('./Progress'))
 
 function tabClass({ isActive }) {
   return isActive ? 'tab active' : 'tab'
@@ -115,6 +116,14 @@ function App() {
             element={
               <Suspense fallback={<div className="page-loading">Loading…</div>}>
                 <Visualizations />
+              </Suspense>
+            }
+          />
+          <Route
+            path="progress"
+            element={
+              <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                <Progress />
               </Suspense>
             }
           />

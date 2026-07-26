@@ -1048,6 +1048,10 @@ app.include_router(_browse.router)
 from webapp.backend import word_sets as _word_sets  # noqa: E402
 app.include_router(_word_sets.router)
 
+# Same ordering requirement, same reason.
+from webapp.backend import progress as _progress  # noqa: E402
+app.include_router(_progress.router)
+
 # Serves the built frontend (webapp/frontend/dist, from `npm run build`) so a
 # single port can be exposed publicly. Registered last so it never shadows an
 # /api/* route above; absent in plain local dev, where the Vite dev server is

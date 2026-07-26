@@ -211,6 +211,34 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Reuses the exact correct/incorrect color roles QuizReview.css's
+   .quiz-review-mark already establishes (--accept / --danger) -- same class
+   names, defined here rather than importing that stylesheet, so this
+   component doesn't take on a cross-page CSS dependency. */
+.your-history-dots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  margin-bottom: 10px;
+  font-size: 14px;
+  font-family: var(--mono);
+}
+
+.your-history-dots .quiz-review-mark.correct {
+  color: var(--accept);
+}
+
+.your-history-dots .quiz-review-mark.incorrect {
+  color: var(--danger);
+}
+
+.your-history-more {
+  font-size: 12px;
+  color: var(--text);
+  opacity: 0.75;
+}
+
 .similar-words-list,
 .source-books-list {
   list-style: none;

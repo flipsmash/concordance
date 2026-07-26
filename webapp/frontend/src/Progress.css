@@ -1,0 +1,189 @@
+.progress-page {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 28px 20px 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+
+.progress-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.progress-tiles {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+}
+
+.progress-stat-tile {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  text-align: center;
+}
+
+.progress-stat-value {
+  font-family: var(--mono);
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--text-h);
+}
+
+.progress-stat-label {
+  font-size: 13px;
+  color: var(--text);
+  margin-top: 4px;
+}
+
+.progress-stat-empty {
+  font-size: 11px;
+  color: var(--text);
+  opacity: 0.7;
+  margin-top: 2px;
+}
+
+.progress-section h2 {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text-h);
+  margin: 0 0 12px;
+}
+
+.progress-two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 32px;
+}
+
+.progress-empty-state {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.progress-hint {
+  font-size: 12px;
+  color: var(--text);
+  opacity: 0.75;
+  margin: 8px 0 0;
+}
+
+/* --- SparkTrendLine --- */
+
+.spark-trend-wrap {
+  position: relative;
+}
+
+.spark-trend-svg {
+  width: 100%;
+  height: 160px;
+  display: block;
+}
+
+.spark-trend-tooltip {
+  font-size: 13px;
+  color: var(--text-h);
+  margin-top: 6px;
+  font-family: var(--mono);
+}
+
+/* --- SingleHueBarChart --- */
+
+.single-hue-bar-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.single-hue-bar-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 140px 1fr 48px;
+  align-items: center;
+  gap: 10px;
+}
+
+.single-hue-bar-label {
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.single-hue-bar-track {
+  height: 16px;
+  border-radius: 4px;
+  background: var(--row-alt);
+  overflow: hidden;
+}
+
+.single-hue-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.2s ease;
+}
+
+.single-hue-bar-value {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text-h);
+  text-align: right;
+}
+
+.single-hue-bar-tooltip {
+  position: absolute;
+  top: -26px;
+  left: 140px;
+  background: var(--text-h);
+  color: var(--bg);
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+  z-index: 1;
+}
+
+/* --- tables (books / struggling words) --- */
+
+.progress-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.progress-table th {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+}
+
+.progress-table th.progress-th-active {
+  color: var(--text-h);
+  font-weight: 600;
+}
+
+.progress-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.progress-table tbody tr:hover {
+  background: var(--row-hover);
+}
+
+@media (max-width: 700px) {
+  .progress-tiles {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .progress-two-col {
+    grid-template-columns: 1fr;
+  }
+}
