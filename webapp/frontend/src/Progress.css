@@ -53,6 +53,26 @@
   margin: 0 0 12px;
 }
 
+.progress-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.progress-section-head h2 {
+  margin: 0;
+}
+
+.progress-history-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  margin-bottom: 12px;
+}
+
 .progress-two-col {
   display: grid;
   grid-template-columns: 1fr 1fr;

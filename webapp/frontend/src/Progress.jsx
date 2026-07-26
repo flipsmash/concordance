@@ -144,7 +144,10 @@ function Progress() {
       </section>
 
       <section className="progress-section">
-        <h2>Score over time</h2>
+        <div className="progress-section-head">
+          <h2>Score over time</h2>
+          <Link to="/app/quiz/history" className="progress-history-link">View full quiz history →</Link>
+        </div>
         <SparkTrendLine points={overview.trend} />
       </section>
 

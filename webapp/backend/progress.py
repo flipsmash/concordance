@@ -375,6 +375,16 @@ def get_overview(user: dict = Depends(_main.require_user)) -> ProgressOverview:
         )
 
 
+@router.get("/api/progress/history", response_model=list[ScorePoint])
+def get_history(user: dict = Depends(_main.require_user)) -> list[ScorePoint]:
+    """Every finished quiz session -- same ScorePoint shape and same
+    _score_trend query /overview's spark-line trend already uses, just
+    exposed standalone so the calendar history page isn't dragged along
+    behind tiles/breakdowns a trend-only fetch doesn't need."""
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        return _score_trend(cur, _main.SCHEMA, user["id"])
+
+
 @router.get("/api/progress/books", response_model=list[BookAccuracyRow])
 def get_books(user: dict = Depends(_main.require_user)) -> list[BookAccuracyRow]:
     """Plain list, not {items, total} -- a personal user's distinct

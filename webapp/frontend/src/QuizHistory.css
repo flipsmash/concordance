@@ -1,0 +1,155 @@
+.quiz-history-page {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 28px 20px 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.quiz-history-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.quiz-history-nav button {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-h);
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.quiz-history-nav button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.quiz-history-month {
+  font-weight: 600;
+  color: var(--text-h);
+}
+
+.quiz-history-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+}
+
+.quiz-history-weekday {
+  font-size: 11px;
+  color: var(--text);
+  text-align: center;
+  padding-bottom: 4px;
+}
+
+.quiz-history-cell {
+  aspect-ratio: 1;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.quiz-history-cell.empty {
+  border-color: transparent;
+}
+
+.quiz-history-cell.has-sessions {
+  cursor: pointer;
+  background: var(--row-alt);
+}
+
+.quiz-history-cell.has-sessions:hover {
+  background: var(--row-hover);
+}
+
+.quiz-history-daynum {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.quiz-history-dots {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
+}
+
+.quiz-history-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.quiz-history-dot.high {
+  background: var(--accept);
+}
+
+.quiz-history-dot.mid {
+  background: var(--accent);
+}
+
+.quiz-history-dot.low {
+  background: var(--danger);
+}
+
+.quiz-history-more {
+  font-size: 10px;
+  color: var(--text);
+  opacity: 0.75;
+}
+
+.quiz-history-day-detail {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+
+.quiz-history-day-detail h2 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-h);
+  margin: 0 0 10px;
+}
+
+.quiz-history-day-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.quiz-history-day-list a {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-h);
+  text-decoration: none;
+  font-size: 13px;
+  font-family: var(--mono);
+}
+
+.quiz-history-day-list a:hover {
+  color: var(--accent);
+}
+
+.quiz-history-day-list .quiz-history-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+}
+
+@media (max-width: 500px) {
+  .quiz-history-daynum {
+    font-size: 10px;
+  }
+}

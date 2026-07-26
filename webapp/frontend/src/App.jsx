@@ -19,6 +19,7 @@ const Browse = lazy(() => import('./Browse'))
 const QuizConfig = lazy(() => import('./QuizConfig'))
 const QuizRun = lazy(() => import('./QuizRun'))
 const QuizReview = lazy(() => import('./QuizReview'))
+const QuizHistory = lazy(() => import('./QuizHistory'))
 const Authors = lazy(() => import('./Authors'))
 const AuthorWorks = lazy(() => import('./AuthorWorks'))
 const Books = lazy(() => import('./Books'))
@@ -131,6 +132,14 @@ function App() {
               element={
                 <Suspense fallback={<div className="page-loading">Loading…</div>}>
                   <QuizConfig />
+                </Suspense>
+              }
+            />
+            <Route
+              path="quiz/history"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <QuizHistory />
                 </Suspense>
               }
             />

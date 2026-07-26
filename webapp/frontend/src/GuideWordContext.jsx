@@ -8,6 +8,7 @@ const SECTION_DEFAULTS = [
   { test: (p) => p === '/app', left: 'a', center: 'browse', right: 'z' },
   { test: (p) => p.startsWith('/app/books'), left: 'a', center: 'books', right: 'z' },
   { test: (p) => p.startsWith('/app/authors'), left: 'authors', center: 'writers', right: 'works' },
+  { test: (p) => p.startsWith('/app/quiz/history'), left: 'calendar', center: 'quiz history', right: 'review' },
   { test: (p) => p.startsWith('/app/quiz'), left: 'configure', center: 'quiz', right: 'begin' },
   { test: (p) => p.startsWith('/app/progress'), left: 'sessions', center: 'progress', right: 'streaks' },
   { test: (p) => p.startsWith('/app/sets'), left: 'collections', center: 'sets', right: 'flashcards' },
