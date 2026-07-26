@@ -118,7 +118,7 @@ function AuthorClusterMap({ onAuthorClick, highlightAuthor }) {
                   r={radiusFor(p.book_count)}
                   fill={colorForCluster(p.cluster_id)}
                   opacity={active === null || isActive ? 1 : 0.35}
-                  stroke={isHighlighted ? cssVar('--accent', '#aa3bff') : undefined}
+                  stroke={isHighlighted ? cssVar('--accent', '#1c6dbd') : undefined}
                   strokeWidth={isHighlighted ? 3 : undefined}
                 />
                 {isActive && (

@@ -32,7 +32,7 @@ function SparkTrendLine({ points }) {
     return <p className="progress-empty-state">Take a quiz to start your trend line.</p>
   }
 
-  const accent = cssVar('--accent', '#aa3bff')
+  const accent = cssVar('--accent', '#1c6dbd')
   const path = coords.map((c, i) => `${i === 0 ? 'M' : 'L'} ${c.x.toFixed(1)} ${c.y.toFixed(1)}`).join(' ')
   const hovered = hoverIdx !== null ? coords[hoverIdx] : null
 

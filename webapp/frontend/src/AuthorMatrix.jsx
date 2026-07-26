@@ -77,7 +77,7 @@ function AuthorMatrix({ highlightAuthor }) {
     const ctx = canvas.getContext('2d')
     ctx.scale(dpr, dpr)
     ctx.clearRect(0, 0, size, size)
-    const accent = cssVar('--accent', '#aa3bff')
+    const accent = cssVar('--accent', '#1c6dbd')
     ctx.fillStyle = accent
     for (let i = 0; i < n; i++) {
       for (let j = 0; j < n; j++) {

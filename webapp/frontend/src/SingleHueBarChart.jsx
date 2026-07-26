@@ -10,7 +10,7 @@ import { cssVar } from './graphUtils'
  * count never silently drops below what the caller passed in. */
 function SingleHueBarChart({ buckets }) {
   const [hoverKey, setHoverKey] = useState(null)
-  const accent = cssVar('--accent', '#aa3bff')
+  const accent = cssVar('--accent', '#1c6dbd')
 
   return (
     <div className="single-hue-bar-chart">

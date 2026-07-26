@@ -132,7 +132,7 @@ function AuthorDendrogram({ onAuthorClick, highlightAuthor }) {
                 cy={l.y}
                 r={isActive ? 5 : 3}
                 fill={colorForCluster(clusterByAuthor[l.author] ?? 0)}
-                stroke={isHighlighted ? cssVar('--accent', '#aa3bff') : undefined}
+                stroke={isHighlighted ? cssVar('--accent', '#1c6dbd') : undefined}
                 strokeWidth={isHighlighted ? 2 : undefined}
               />
               {isActive && (

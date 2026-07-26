@@ -46,18 +46,18 @@
 }
 
 :root {
-  --paper: #edebe3;
-  --paper-raised: #f5f3ec;
-  --ink: #1b1b18;
-  --ink-soft: #55524a;
-  --rule: #c9c4b4;
-  --rule-strong: #a8a190;
-  --oxblood: #7a1f2b;
-  --oxblood-soft: #9c3d49;
+  --paper: #ffffff;
+  --paper-raised: #f3f6f9;
+  --ink: #10181f;
+  --ink-soft: #5b6572;
+  --rule: #dde2e7;
+  --rule-strong: #c3ccd4;
+  --rail-accent: #123f66;
+  --rail-accent-soft: #2f5a86;
   --ink-blue: #2b3a55;
   --gild: #8a6a2f;
-  --surface-tab-inactive: #e2ddcf;
-  --shadow: rgba(27, 27, 24, 0.14);
+  --surface-tab-inactive: #edf1f5;
+  --shadow: rgba(16, 24, 32, 0.12);
 
   --font-display: 'Fraunces', Georgia, 'Times New Roman', serif;
   --font-ui: 'Work Sans', var(--sans);
@@ -66,17 +66,17 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --paper: #17160f;
-    --paper-raised: #201f16;
-    --ink: #e9e4d3;
-    --ink-soft: #b5ae9a;
-    --rule: #3a3628;
-    --rule-strong: #4d4834;
-    --oxblood: #d17781;
-    --oxblood-soft: #a85560;
+    --paper: #12161b;
+    --paper-raised: #1a1f26;
+    --ink: #eef2f6;
+    --ink-soft: #a9b4bf;
+    --rule: #2b333c;
+    --rule-strong: #3a434d;
+    --rail-accent: #6fa8dc;
+    --rail-accent-soft: #4f86c0;
     --ink-blue: #93a8d6;
     --gild: #c9a45c;
-    --surface-tab-inactive: #201f16;
+    --surface-tab-inactive: #1a1f26;
     --shadow: rgba(0, 0, 0, 0.4);
   }
 }
@@ -86,33 +86,33 @@
    future toggle "just works" against these tokens -- building the toggle
    itself is a separate, unscoped feature. */
 :root[data-theme="dark"] {
-  --paper: #17160f;
-  --paper-raised: #201f16;
-  --ink: #e9e4d3;
-  --ink-soft: #b5ae9a;
-  --rule: #3a3628;
-  --rule-strong: #4d4834;
-  --oxblood: #d17781;
-  --oxblood-soft: #a85560;
+  --paper: #12161b;
+  --paper-raised: #1a1f26;
+  --ink: #eef2f6;
+  --ink-soft: #a9b4bf;
+  --rule: #2b333c;
+  --rule-strong: #3a434d;
+  --rail-accent: #6fa8dc;
+  --rail-accent-soft: #4f86c0;
   --ink-blue: #93a8d6;
   --gild: #c9a45c;
-  --surface-tab-inactive: #201f16;
+  --surface-tab-inactive: #1a1f26;
   --shadow: rgba(0, 0, 0, 0.4);
 }
 
 :root[data-theme="light"] {
-  --paper: #edebe3;
-  --paper-raised: #f5f3ec;
-  --ink: #1b1b18;
-  --ink-soft: #55524a;
-  --rule: #c9c4b4;
-  --rule-strong: #a8a190;
-  --oxblood: #7a1f2b;
-  --oxblood-soft: #9c3d49;
+  --paper: #ffffff;
+  --paper-raised: #f3f6f9;
+  --ink: #10181f;
+  --ink-soft: #5b6572;
+  --rule: #dde2e7;
+  --rule-strong: #c3ccd4;
+  --rail-accent: #123f66;
+  --rail-accent-soft: #2f5a86;
   --ink-blue: #2b3a55;
   --gild: #8a6a2f;
-  --surface-tab-inactive: #e2ddcf;
-  --shadow: rgba(27, 27, 24, 0.14);
+  --surface-tab-inactive: #edf1f5;
+  --shadow: rgba(16, 24, 32, 0.12);
 }
 
 /* ---------- shell layout ---------- */
@@ -153,7 +153,7 @@
   font-family: var(--font-display);
   font-weight: 900;
   font-size: 17px;
-  color: var(--oxblood-soft);
+  color: var(--rail-accent-soft);
   width: 18px;
   flex-shrink: 0;
 }
@@ -178,7 +178,7 @@
 }
 
 .thumb-rail-tab.active .thumb-rail-letter {
-  color: var(--oxblood);
+  color: var(--rail-accent);
 }
 
 .thumb-rail-tab.admin-tab .thumb-rail-letter {
@@ -223,7 +223,7 @@
 }
 
 .rail-foot-logout:hover {
-  color: var(--oxblood);
+  color: var(--rail-accent);
 }
 
 .app-shell-content {
@@ -263,7 +263,7 @@
   font-size: 11px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--oxblood);
+  color: var(--rail-accent);
 }
 
 .app-shell-outlet {

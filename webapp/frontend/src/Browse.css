@@ -414,6 +414,10 @@
   border-bottom: none;
 }
 
+.browse-result-row:nth-child(even) {
+  background: var(--row-alt);
+}
+
 .browse-result-checkbox {
   width: 16px;
   height: 16px;
