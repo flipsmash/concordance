@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import AddToSetMenu from './AddToSetMenu'
 import AuthorSelect from './AuthorSelect'
 import MultiSelect from './MultiSelect'
@@ -251,12 +251,6 @@ function Browse() {
     <div className="browse-page">
       <header className="browse-header">
         <h1>Vocab Browse</h1>
-        {/* Every other destination this row used to link to (authors, quiz,
-            progress, sets) now lives on the persistent shell rail -- this is
-            the one view (a graph over the same word data) that isn't yet a
-            rail tab of its own, see AppShell's SECTIONS comment. Username +
-            logout moved into the rail's footer. */}
-        <Link to="/app/visualizations" className="browse-quiz-link">Visualizations</Link>
       </header>
 
       <div className="browse-search" ref={searchRef}>

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
+import { difficultySummary } from './bookDifficulty'
 import SharedWordsPanel from './SharedWordsPanel'
 import { usePagedTable } from './usePagedTable'
 import './Authors.css'
@@ -7,18 +8,6 @@ import './WorkDetail.css'
 
 const API_BASE = ''
 const PAGE_SIZE = 30
-
-function difficultySummary(book) {
-  if (book.scored_word_count === 0) {
-    return { stat: 'Not yet scored', qualifier: null }
-  }
-  const mean = book.mean_difficulty.toFixed(1)
-  const stat =
-    book.stddev_difficulty === null
-      ? `${mean} difficulty (± N/A — not enough scored words)`
-      : `${mean} ± ${book.stddev_difficulty.toFixed(1)} difficulty`
-  return { stat, qualifier: `based on ${book.scored_word_count} of ${book.word_count} words` }
-}
 
 // Level 2: one author's works, each with entry count + mean/stddev
 // difficulty. Sparse difficulty coverage is a known, real state of the

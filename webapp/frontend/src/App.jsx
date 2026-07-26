@@ -21,6 +21,7 @@ const QuizRun = lazy(() => import('./QuizRun'))
 const QuizReview = lazy(() => import('./QuizReview'))
 const Authors = lazy(() => import('./Authors'))
 const AuthorWorks = lazy(() => import('./AuthorWorks'))
+const Books = lazy(() => import('./Books'))
 const WorkDetail = lazy(() => import('./WorkDetail'))
 const BookRelatedness = lazy(() => import('./BookRelatedness'))
 const AuthorRelatedness = lazy(() => import('./AuthorRelatedness'))
@@ -170,6 +171,14 @@ function App() {
               element={
                 <Suspense fallback={<div className="page-loading">Loading…</div>}>
                   <FlashcardRun />
+                </Suspense>
+              }
+            />
+            <Route
+              path="books"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <Books />
                 </Suspense>
               }
             />

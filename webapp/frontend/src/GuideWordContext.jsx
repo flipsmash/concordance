@@ -6,6 +6,7 @@ import { useLocation } from 'react-router-dom'
 // everywhere else this is the whole answer.
 const SECTION_DEFAULTS = [
   { test: (p) => p === '/app', left: 'a', center: 'browse', right: 'z' },
+  { test: (p) => p.startsWith('/app/books'), left: 'a', center: 'books', right: 'z' },
   { test: (p) => p.startsWith('/app/authors'), left: 'authors', center: 'writers', right: 'works' },
   { test: (p) => p.startsWith('/app/quiz'), left: 'configure', center: 'quiz', right: 'begin' },
   { test: (p) => p.startsWith('/app/progress'), left: 'sessions', center: 'progress', right: 'streaks' },

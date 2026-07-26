@@ -3,13 +3,18 @@ import './AppShell.css'
 import { useAuth } from './AuthContext'
 import { GuideWordProvider, useGuideHeader } from './GuideWordContext'
 
-// The six destinations a reader can always reach, one click away, from
-// anywhere in the app -- the whole point of this shell. Admin is filtered
-// out entirely (not just hidden) for a non-admin user, so the "curation
-// chrome visible to anyone" gap this shell replaces doesn't reappear here.
+// The destinations a reader can always reach, one click away, from anywhere
+// in the app -- the whole point of this shell. Admin is filtered out
+// entirely (not just hidden) for a non-admin user, so the "curation chrome
+// visible to anyone" gap this shell replaces doesn't reappear here. Letter
+// is normally the label's own first letter (the thumb-index conceit); where
+// that collides with an earlier tab (Books vs. Browse) or isn't a letter at
+// all (Admin), a distinct glyph is used instead -- never a wrong letter.
 const SECTIONS = [
   { key: 'browse', letter: 'B', label: 'Browse', to: '/app', end: true },
+  { key: 'books', letter: '❦', label: 'Books', to: '/app/books' },
   { key: 'authors', letter: 'A', label: 'Authors', to: '/app/authors' },
+  { key: 'visualizations', letter: 'V', label: 'Visuals', to: '/app/visualizations' },
   { key: 'quiz', letter: 'Q', label: 'Quiz', to: '/app/quiz' },
   { key: 'progress', letter: 'P', label: 'Progress', to: '/app/progress' },
   { key: 'sets', letter: 'S', label: 'Sets', to: '/app/sets' },
