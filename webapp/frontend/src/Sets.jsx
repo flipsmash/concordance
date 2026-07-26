@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import './Sets.css'
 
 const API_BASE = ''
@@ -59,7 +59,6 @@ function Sets() {
     <div className="sets-page">
       <header className="sets-header">
         <h1>My word sets</h1>
-        <Link to="/app" className="sets-back-link">← Back to browse</Link>
       </header>
 
       <div className="sets-new-row">

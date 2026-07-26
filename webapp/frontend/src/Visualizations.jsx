@@ -24,7 +24,6 @@ function Visualizations() {
     <div className="browse-page">
       <header className="browse-header">
         <h1>Visualizations</h1>
-        <Link to="/app" className="browse-quiz-link">← Back to browse</Link>
       </header>
 
       <section className="browse-facets viz-section">

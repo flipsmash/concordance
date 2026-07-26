@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { usePagedTable } from './usePagedTable'
 import './Authors.css'
 
@@ -31,7 +31,6 @@ function Authors() {
     <div className="authors-page">
       <header className="authors-header">
         <h1>Browse by author</h1>
-        <Link to="/app" className="authors-back-link">← Back to browse</Link>
       </header>
 
       <input

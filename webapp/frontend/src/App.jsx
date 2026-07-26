@@ -1,12 +1,14 @@
 import { Suspense, lazy } from 'react'
-import { NavLink, Outlet, Route, Routes } from 'react-router-dom'
+import { Navigate, NavLink, Outlet, Route, Routes } from 'react-router-dom'
 import AcceptedView from './AcceptedView'
 import AdminSettings from './AdminSettings'
+import AppShell from './AppShell'
 import './App.css'
 import { AuthProvider } from './AuthContext'
 import Login from './Login'
 import Register from './Register'
 import RejectedView from './RejectedView'
+import RequireAdmin from './RequireAdmin'
 import RequireAuth from './RequireAuth'
 
 // Lazy-loaded: pulls in react-force-graph-2d's canvas/d3-force bundle only
@@ -33,22 +35,27 @@ function tabClass({ isActive }) {
   return isActive ? 'tab active' : 'tab'
 }
 
+// The admin curation shell -- now nested under /app/admin, inside AppShell's
+// thumb rail (reached via its own "Admin" tab, role-gated by RequireAdmin
+// one level up) rather than living at the site root with no way back to the
+// reader side. Tab targets are relative (accepted/rejected/...), which is
+// what makes this component correct regardless of the /app/admin prefix.
 function Layout() {
   return (
     <div className="review-app">
       <header>
         <h1>Vocab Review</h1>
         <div className="tabs">
-          <NavLink to="/accepted" className={tabClass}>
+          <NavLink to="accepted" className={tabClass}>
             Accepted
           </NavLink>
-          <NavLink to="/rejected" className={tabClass}>
+          <NavLink to="rejected" className={tabClass}>
             Rejected
           </NavLink>
-          <NavLink to="/graph" className={tabClass}>
+          <NavLink to="graph" className={tabClass}>
             Graph
           </NavLink>
-          <NavLink to="/settings" className={tabClass}>
+          <NavLink to="settings" className={tabClass}>
             Settings
           </NavLink>
         </div>
@@ -63,27 +70,17 @@ function App() {
   return (
     <AuthProvider>
       <Routes>
-        <Route element={<Layout />}>
-          <Route index element={<AcceptedView />} />
-          <Route path="accepted" element={<AcceptedView />} />
-          <Route path="rejected" element={<RejectedView />} />
-          <Route path="settings" element={<AdminSettings />} />
-          <Route
-            path="graph"
-            element={
-              <Suspense fallback={<div className="page-loading">Loading…</div>}>
-                <GraphView />
-              </Suspense>
-            }
-          />
-        </Route>
-        {/* Outside Layout's 820px-max-width column -- the detail page's embedded
-            graph wants more horizontal room than the table views do. */}
+        <Route index element={<Navigate to="/app" replace />} />
+
+        {/* Outside AppShell's rail entirely -- the detail page's embedded
+            graph wants more horizontal room than a page inside the shell
+            has, and this mount has no persistent nav around it, so it keeps
+            its own "back" link (see WordDetail's showBackLink prop). */}
         <Route
           path="words/:id"
           element={
             <Suspense fallback={<div className="page-loading">Loading…</div>}>
-              <WordDetail />
+              <WordDetail backTo="/app/admin/accepted" />
             </Suspense>
           }
         />
@@ -95,134 +92,156 @@ function App() {
         <Route path="login" element={<Login />} />
         <Route path="register" element={<Register />} />
         <Route path="app" element={<RequireAuth />}>
-          <Route
-            index
-            element={
-              <Suspense fallback={<div className="page-loading">Loading…</div>}>
-                <Browse />
-              </Suspense>
-            }
-          />
-          <Route
-            path="words/:id"
-            element={
-              <Suspense fallback={<div className="page-loading">Loading…</div>}>
-                <WordDetail backTo="/app" />
-              </Suspense>
-            }
-          />
-          <Route
-            path="visualizations"
-            element={
-              <Suspense fallback={<div className="page-loading">Loading…</div>}>
-                <Visualizations />
-              </Suspense>
-            }
-          />
-          <Route
-            path="progress"
-            element={
-              <Suspense fallback={<div className="page-loading">Loading…</div>}>
-                <Progress />
-              </Suspense>
-            }
-          />
-          <Route
-            path="quiz"
-            element={
-              <Suspense fallback={<div className="page-loading">Loading…</div>}>
-                <QuizConfig />
-              </Suspense>
-            }
-          />
-          <Route
-            path="quiz/:sessionId"
-            element={
-              <Suspense fallback={<div className="page-loading">Loading…</div>}>
-                <QuizRun />
-              </Suspense>
-            }
-          />
-          <Route
-            path="quiz/:sessionId/review"
-            element={
-              <Suspense fallback={<div className="page-loading">Loading…</div>}>
-                <QuizReview />
-              </Suspense>
-            }
-          />
-          <Route
-            path="sets"
-            element={
-              <Suspense fallback={<div className="page-loading">Loading…</div>}>
-                <Sets />
-              </Suspense>
-            }
-          />
-          <Route
-            path="sets/:setId"
-            element={
-              <Suspense fallback={<div className="page-loading">Loading…</div>}>
-                <SetDetail />
-              </Suspense>
-            }
-          />
-          <Route
-            path="sets/:setId/flashcards"
-            element={
-              <Suspense fallback={<div className="page-loading">Loading…</div>}>
-                <FlashcardRun />
-              </Suspense>
-            }
-          />
-          <Route
-            path="authors"
-            element={
-              <Suspense fallback={<div className="page-loading">Loading…</div>}>
-                <Authors />
-              </Suspense>
-            }
-          />
-          <Route
-            path="authors/relatedness"
-            element={
-              <Suspense fallback={<div className="page-loading">Loading…</div>}>
-                <AuthorsRelatedness />
-              </Suspense>
-            }
-          />
-          <Route
-            path="authors/:author"
-            element={
-              <Suspense fallback={<div className="page-loading">Loading…</div>}>
-                <AuthorWorks />
-              </Suspense>
-            }
-          />
-          <Route
-            path="authors/:author/relatedness"
-            element={
-              <Suspense fallback={<div className="page-loading">Loading…</div>}>
-                <AuthorRelatedness />
-              </Suspense>
-            }
-          />
-          <Route
-            path="authors/:author/:bookId"
-            element={
-              <Suspense fallback={<div className="page-loading">Loading…</div>}>
-                <WorkDetail />
-              </Suspense>
-            }
-          />
-          <Route
-            path="authors/:author/:bookId/relatedness"
-            element={
-              <Suspense fallback={<div className="page-loading">Loading…</div>}>
-                <BookRelatedness />
-              </Suspense>
-            }
-          />
+          <Route element={<AppShell />}>
+            <Route
+              index
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <Browse />
+                </Suspense>
+              }
+            />
+            <Route
+              path="words/:id"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <WordDetail backTo="/app" showBackLink={false} />
+                </Suspense>
+              }
+            />
+            <Route
+              path="visualizations"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <Visualizations />
+                </Suspense>
+              }
+            />
+            <Route
+              path="progress"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <Progress />
+                </Suspense>
+              }
+            />
+            <Route
+              path="quiz"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <QuizConfig />
+                </Suspense>
+              }
+            />
+            <Route
+              path="quiz/:sessionId"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <QuizRun />
+                </Suspense>
+              }
+            />
+            <Route
+              path="quiz/:sessionId/review"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <QuizReview />
+                </Suspense>
+              }
+            />
+            <Route
+              path="sets"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <Sets />
+                </Suspense>
+              }
+            />
+            <Route
+              path="sets/:setId"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <SetDetail />
+                </Suspense>
+              }
+            />
+            <Route
+              path="sets/:setId/flashcards"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <FlashcardRun />
+                </Suspense>
+              }
+            />
+            <Route
+              path="authors"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <Authors />
+                </Suspense>
+              }
+            />
+            <Route
+              path="authors/relatedness"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <AuthorsRelatedness />
+                </Suspense>
+              }
+            />
+            <Route
+              path="authors/:author"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <AuthorWorks />
+                </Suspense>
+              }
+            />
+            <Route
+              path="authors/:author/relatedness"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <AuthorRelatedness />
+                </Suspense>
+              }
+            />
+            <Route
+              path="authors/:author/:bookId"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <WorkDetail />
+                </Suspense>
+              }
+            />
+            <Route
+              path="authors/:author/:bookId/relatedness"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <BookRelatedness />
+                </Suspense>
+              }
+            />
+
+            {/* Admin, one level deeper, gated additionally by is_admin --
+                closes the gap where this chrome used to render (with every
+                data fetch then 401/403ing) for anyone, admin or not. */}
+            <Route path="admin" element={<RequireAdmin />}>
+              <Route element={<Layout />}>
+                <Route index element={<AcceptedView />} />
+                <Route path="accepted" element={<AcceptedView />} />
+                <Route path="rejected" element={<RejectedView />} />
+                <Route path="settings" element={<AdminSettings />} />
+                <Route
+                  path="graph"
+                  element={
+                    <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                      <GraphView />
+                    </Suspense>
+                  }
+                />
+              </Route>
+            </Route>
+          </Route>
         </Route>
       </Routes>
     </AuthProvider>

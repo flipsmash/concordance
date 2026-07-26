@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import AddToSetMenu from './AddToSetMenu'
-import { useAuth } from './AuthContext'
 import AuthorSelect from './AuthorSelect'
 import MultiSelect from './MultiSelect'
 import { colorForBucket } from './domainColors'
+import { useGuideWords } from './GuideWordContext'
 import { usePagedTable } from './usePagedTable'
 import './Browse.css'
 
@@ -23,7 +23,6 @@ const PAGE_SIZE = 30
 function Browse() {
   const [searchParams, setSearchParams] = useSearchParams()
   const navigate = useNavigate()
-  const { user, logout } = useAuth()
 
   // Existing quick-jump search box -- untouched. Different intent ("I know
   // the word, take me there") from the faceted browse below ("let me explore").
@@ -241,21 +240,23 @@ function Browse() {
     },
   })
 
+  // Feeds the shell's guide-word header real first/last-on-screen text --
+  // the list is reliably lemma-ascending (no sort-toggle UI here), so this
+  // mirrors exactly what a dictionary page's own running head would show.
+  // The 'a'/'z' fallback keeps the header non-blank while loading or on an
+  // empty filtered result.
+  useGuideWords(items[0]?.lemma || 'a', 'browse', items.at(-1)?.lemma || 'z')
+
   return (
     <div className="browse-page">
       <header className="browse-header">
         <h1>Vocab Browse</h1>
-        <div className="browse-user">
-          <Link to="/app/authors" className="browse-quiz-link">Browse by author</Link>
-          {' · '}
-          <Link to="/app/visualizations" className="browse-quiz-link">Visualizations</Link>
-          {' · '}
-          <Link to="/app/quiz" className="browse-quiz-link">Take a quiz</Link>
-          {' · '}
-          <Link to="/app/sets" className="browse-quiz-link">My sets</Link>
-          {' · '}
-          {user?.username} · <button type="button" onClick={logout}>Log out</button>
-        </div>
+        {/* Every other destination this row used to link to (authors, quiz,
+            progress, sets) now lives on the persistent shell rail -- this is
+            the one view (a graph over the same word data) that isn't yet a
+            rail tab of its own, see AppShell's SECTIONS comment. Username +
+            logout moved into the rail's footer. */}
+        <Link to="/app/visualizations" className="browse-quiz-link">Visualizations</Link>
       </header>
 
       <div className="browse-search" ref={searchRef}>

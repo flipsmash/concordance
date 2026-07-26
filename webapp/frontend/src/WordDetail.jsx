@@ -20,7 +20,7 @@ function CategoryChip({ category }) {
   )
 }
 
-function WordDetail({ backTo = '/accepted' }) {
+function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
   const { id } = useParams()
   const navigate = useNavigate()
   const location = useLocation()
@@ -94,7 +94,7 @@ function WordDetail({ backTo = '/accepted' }) {
     return (
       <div className="word-detail word-detail-not-found">
         <p>Word not found.</p>
-        <Link to={backTo}>← Back</Link>
+        {showBackLink && <Link to={backTo}>← Back</Link>}
       </div>
     )
   }
@@ -103,7 +103,7 @@ function WordDetail({ backTo = '/accepted' }) {
     return (
       <div className="word-detail">
         <div className="error-banner">{error || 'failed to load word'}</div>
-        <Link to={backTo}>← Back</Link>
+        {showBackLink && <Link to={backTo}>← Back</Link>}
       </div>
     )
   }
@@ -113,9 +113,11 @@ function WordDetail({ backTo = '/accepted' }) {
 
   return (
     <div className="word-detail">
-      <Link to={backTo} className="word-detail-back">
-        ← Back
-      </Link>
+      {showBackLink && (
+        <Link to={backTo} className="word-detail-back">
+          ← Back
+        </Link>
+      )}
 
       <div className="word-detail-header">
         <h1>{word.lemma}</h1>

@@ -80,9 +80,6 @@ function QuizReview() {
         <Link to="/app/quiz" className="quiz-start-btn">
           New quiz
         </Link>
-        <Link to="/app" className="quiz-review-back">
-          ← Back to browse
-        </Link>
       </div>
     </div>
   )

@@ -1,0 +1,365 @@
+/* New, shell-only design tokens -- deliberately NOT appended to index.css.
+   index.css's --text/--bg/--accent/etc are depended on by all 24 existing
+   stylesheets; this file stays additive so every existing page keeps
+   rendering exactly as it does today. Every class below is prefixed
+   (.thumb-rail, .guide-header, ...) since a plain CSS import is still
+   global -- no collision with App.css's .tab/.tabs or any page's classes. */
+
+@font-face {
+  font-family: 'Fraunces';
+  font-style: normal;
+  font-weight: 700 900;
+  font-display: swap;
+  src: url('/fonts/Fraunces-700-900.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Fraunces';
+  font-style: italic;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/Fraunces-600italic.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Work Sans';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('/fonts/WorkSans-400-600.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/PlexMono-400.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/PlexMono-500.woff2') format('woff2');
+}
+
+:root {
+  --paper: #edebe3;
+  --paper-raised: #f5f3ec;
+  --ink: #1b1b18;
+  --ink-soft: #55524a;
+  --rule: #c9c4b4;
+  --rule-strong: #a8a190;
+  --oxblood: #7a1f2b;
+  --oxblood-soft: #9c3d49;
+  --ink-blue: #2b3a55;
+  --gild: #8a6a2f;
+  --surface-tab-inactive: #e2ddcf;
+  --shadow: rgba(27, 27, 24, 0.14);
+
+  --font-display: 'Fraunces', Georgia, 'Times New Roman', serif;
+  --font-ui: 'Work Sans', var(--sans);
+  --font-data: 'IBM Plex Mono', var(--mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #17160f;
+    --paper-raised: #201f16;
+    --ink: #e9e4d3;
+    --ink-soft: #b5ae9a;
+    --rule: #3a3628;
+    --rule-strong: #4d4834;
+    --oxblood: #d17781;
+    --oxblood-soft: #a85560;
+    --ink-blue: #93a8d6;
+    --gild: #c9a45c;
+    --surface-tab-inactive: #201f16;
+    --shadow: rgba(0, 0, 0, 0.4);
+  }
+}
+
+/* No in-app theme toggle exists yet (confirmed: zero data-theme usage
+   anywhere in this repo as of this pass). This selector is emitted so a
+   future toggle "just works" against these tokens -- building the toggle
+   itself is a separate, unscoped feature. */
+:root[data-theme="dark"] {
+  --paper: #17160f;
+  --paper-raised: #201f16;
+  --ink: #e9e4d3;
+  --ink-soft: #b5ae9a;
+  --rule: #3a3628;
+  --rule-strong: #4d4834;
+  --oxblood: #d17781;
+  --oxblood-soft: #a85560;
+  --ink-blue: #93a8d6;
+  --gild: #c9a45c;
+  --surface-tab-inactive: #201f16;
+  --shadow: rgba(0, 0, 0, 0.4);
+}
+
+:root[data-theme="light"] {
+  --paper: #edebe3;
+  --paper-raised: #f5f3ec;
+  --ink: #1b1b18;
+  --ink-soft: #55524a;
+  --rule: #c9c4b4;
+  --rule-strong: #a8a190;
+  --oxblood: #7a1f2b;
+  --oxblood-soft: #9c3d49;
+  --ink-blue: #2b3a55;
+  --gild: #8a6a2f;
+  --surface-tab-inactive: #e2ddcf;
+  --shadow: rgba(27, 27, 24, 0.14);
+}
+
+/* ---------- shell layout ---------- */
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 132px 1fr;
+  min-height: 100vh;
+  background: var(--paper);
+}
+
+.thumb-rail {
+  border-right: 1px solid var(--rule-strong);
+  background: var(--surface-tab-inactive);
+  display: flex;
+  flex-direction: column;
+  padding: 18px 0;
+}
+
+.thumb-rail-tab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-decoration: none;
+  text-align: left;
+  color: var(--ink-soft);
+  padding: 13px 10px 13px 18px;
+  margin: 2px 0 2px -1px;
+  border-radius: 0 60px 60px 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  transition: transform 120ms ease, background 120ms ease, color 120ms ease;
+}
+
+.thumb-rail-tab .thumb-rail-letter {
+  font-family: var(--font-display);
+  font-weight: 900;
+  font-size: 17px;
+  color: var(--oxblood-soft);
+  width: 18px;
+  flex-shrink: 0;
+}
+
+.thumb-rail-tab .thumb-rail-label {
+  font-family: var(--font-ui);
+  font-weight: 500;
+  font-size: 13.5px;
+  white-space: nowrap;
+}
+
+.thumb-rail-tab:hover {
+  background: var(--paper-raised);
+  transform: translateX(2px);
+}
+
+.thumb-rail-tab.active {
+  background: var(--paper);
+  color: var(--ink);
+  transform: translateX(6px);
+  box-shadow: inset 0 0 0 1px var(--rule-strong);
+}
+
+.thumb-rail-tab.active .thumb-rail-letter {
+  color: var(--oxblood);
+}
+
+.thumb-rail-tab.admin-tab .thumb-rail-letter {
+  color: var(--gild);
+}
+
+.rail-divider {
+  height: 1px;
+  background: var(--rule);
+  margin: 10px 16px 10px 18px;
+}
+
+.rail-foot {
+  margin-top: auto;
+  padding: 14px 10px 6px 18px;
+  border-top: 1px solid var(--rule);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-family: var(--font-ui);
+}
+
+.rail-foot-user {
+  font-size: 12px;
+  color: var(--ink-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-foot-logout {
+  appearance: none;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  padding: 0;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink-blue);
+}
+
+.rail-foot-logout:hover {
+  color: var(--oxblood);
+}
+
+.app-shell-content {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.guide-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 14px 26px;
+  border-bottom: 1px solid var(--rule);
+  font-family: var(--font-data);
+  background: var(--paper);
+}
+
+.guide-word {
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.guide-word-left::before {
+  content: "\25c2 ";
+  opacity: 0.5;
+}
+
+.guide-word-right::after {
+  content: " \25b8";
+  opacity: 0.5;
+}
+
+.guide-label {
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--oxblood);
+}
+
+.app-shell-outlet {
+  flex: 1;
+  min-width: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thumb-rail-tab {
+    transition: none;
+  }
+}
+
+/* ---------- mobile collapse: rail becomes a thumb-reachable bottom bar ---------- */
+
+@media (max-width: 700px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr;
+  }
+
+  /* Fixed, not just reordered in flow -- a long page (Browse's filters
+     alone run well past one screen) would otherwise push a merely-reordered
+     rail below the fold, defeating the entire "thumb's reach" point of a
+     thumb index. Pinned to the viewport, the same way a native app's bottom
+     tab bar stays put regardless of scroll position. */
+  .thumb-rail {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 20;
+    flex-direction: row;
+    border-right: none;
+    border-top: 1px solid var(--rule-strong);
+    padding: 6px 4px;
+    overflow-x: auto;
+    box-shadow: 0 -6px 16px -8px var(--shadow);
+  }
+
+  /* Reserves room at the bottom of the scrollable content so the fixed
+     rail never covers the last bit of it -- approximate height of the
+     mobile tab row (padding + letter/label stack + safe-area cushion). */
+  .app-shell-content {
+    padding-bottom: 72px;
+  }
+
+  .thumb-rail-tab {
+    flex-direction: column;
+    border-radius: 10px 10px 0 0;
+    padding: 8px 12px;
+    margin: 0 1px;
+    gap: 3px;
+  }
+
+  .thumb-rail-tab .thumb-rail-label {
+    font-size: 10.5px;
+  }
+
+  .thumb-rail-tab .thumb-rail-letter {
+    width: auto;
+    font-size: 15px;
+  }
+
+  .thumb-rail-tab.active {
+    transform: translateY(-3px);
+  }
+
+  .rail-divider {
+    display: none;
+  }
+
+  /* Kept visible, not hidden -- a mobile user still needs a way to log out.
+     Rejoins the horizontal scroll row as one more compact item rather than
+     the vertical footer block the desktop rail uses. */
+  .rail-foot {
+    margin-top: 0;
+    padding: 8px 12px;
+    border-top: none;
+    border-left: 1px solid var(--rule);
+    flex-direction: column;
+    justify-content: center;
+    gap: 2px;
+    flex-shrink: 0;
+  }
+
+  .rail-foot-user {
+    font-size: 10px;
+    max-width: 72px;
+  }
+
+  .rail-foot-logout {
+    font-size: 10.5px;
+  }
+
+  .app-shell-content {
+    order: 1;
+  }
+}
