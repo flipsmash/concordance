@@ -1115,6 +1115,16 @@ def maintain(
         console.print("[dim]normalize-pos skipped.[/dim]")
 
     if not skip_ngram:
+        # No console.status() wrapper here (unlike classify/quizdef/embed) --
+        # fetch_ngrams prints its own periodic progress internally (every 200
+        # words), and interleaving that with a rich Live spinner renders badly.
+        # But without ANY announcement, this step (rate-limited, one HTTP call
+        # per word) can sit fully silent for minutes before its first 200-word
+        # checkpoint -- easy to mistake for "stuck" right after normalize-pos's
+        # near-instant finish. This print is the fix: announce the step by name
+        # the instant it starts, same as every console.status()-wrapped step
+        # already does, before any internal progress has a chance to land.
+        console.print("[bold]Fetching Google Ngram data (rate-limited, one request per word)…[/bold]")
         stats = db.fetch_ngrams(conn, schema, only_missing=True, limit=limit)
         console.print(f"[green]✓[/green] ngram: fetched [bold]{stats['fetched']}[/bold]/{stats['words']} "
                       f"({stats['in_corpus']} in corpus, {stats['failed']} failed)")
@@ -1122,6 +1132,7 @@ def maintain(
         console.print("[dim]ngram skipped.[/dim]")
 
     if not skip_archaic:
+        console.print("[bold]Computing archaic-spelling confidence…[/bold]")
         dist = db.compute_archaic(conn, schema, limit=limit)
         total = sum(dist.values())
         parts = ", ".join(f"{k} {v}" for k, v in sorted(dist.items()))
@@ -1130,6 +1141,7 @@ def maintain(
         console.print("[dim]archaic skipped.[/dim]")
 
     if not skip_difficulty:
+        console.print("[bold]Computing ex-ante difficulty scores…[/bold]")
         stats = db.compute_difficulty(conn, schema, limit=limit)
         console.print(f"[green]✓[/green] difficulty set on [bold]{stats['words']}[/bold] words "
                       f"(mean {stats['mean']}, median {stats['median']})")
@@ -1145,6 +1157,7 @@ def maintain(
         console.print("[dim]quizdef skipped.[/dim]")
 
     if not skip_quizzable:
+        console.print("[bold]Recomputing quizzable flags…[/bold]")
         dist = db.compute_quizzable(conn, schema, limit=limit)
         console.print(f"[green]✓[/green] quizzable: [bold]{dist.get('quizzable',0)}[/bold] quizzable, "
                       f"{dist.get('excluded',0)} excluded")
@@ -1152,6 +1165,7 @@ def maintain(
         console.print("[dim]quizzable skipped.[/dim]")
 
     if not skip_calibrate_difficulty:
+        console.print("[bold]Calibrating personal difficulty from quiz answers…[/bold]")
         stats = db.compute_personal_difficulty(conn, schema, limit=limit)
         console.print(f"[green]✓[/green] calibrate-difficulty: [bold]{stats['words']}[/bold] "
                       f"(user, word) pairs personalized")
@@ -1183,6 +1197,7 @@ def maintain(
         console.print("[dim]author-clustering skipped.[/dim]")
 
     if not skip_wordnik:
+        console.print("[bold]Fetching Wordnik pronunciations (rate-limited)…[/bold]")
         stats = db.fetch_wordnik_pronunciations(conn, schema, only_missing=True, limit=limit)
         if "error" in stats:
             console.print(f"[red]✗[/red] wordnik-pron: {stats['error']}")
@@ -1193,6 +1208,7 @@ def maintain(
         console.print("[dim]wordnik-pron skipped.[/dim]")
 
     if not skip_ipa:
+        console.print("[bold]Backfilling IPA pronunciations…[/bold]")
         try:
             stats = db.compute_ipa(conn, schema, dump_path=dump_path, only_missing=True, limit=limit)
         except FileNotFoundError as exc:
@@ -1275,6 +1291,62 @@ def backfill_analogies_cmd(
     console.print(f"[green]✓[/green] backfill-analogies: [bold]{stats['terms_scanned']}[/bold] terms scanned "
                   f"-> [bold]{stats['edges_found']}[/bold] candidate edges "
                   f"([bold]{stats['edges_verified']}[/bold] verified, {stats['edges_rejected']} rejected)")
+
+
+@app.command("maintain-status")
+def maintain_status_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    watch: int = typer.Option(0, "--watch", "-w",
+                               help="Re-render every N seconds instead of printing once (0 = one-shot)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Read-only progress snapshot for `maintain`'s step sequence — for
+    checking in on a run that's been going for hours in a terminal nobody's
+    watching anymore. Reconstructs step-by-step progress from DB state
+    (words touched vs. total eligible per step, same "only-missing" signal
+    each step already uses to skip already-done work) rather than from the
+    running process's own console output, which this command has no access
+    to. Safe to run at any time, including while a real `maintain` or
+    `backfill-analogies` is actively writing — it only ever SELECTs."""
+    import time as _time
+
+    from rich.table import Table
+
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+
+    def render() -> Table:
+        steps = db.maintain_status(conn, schema)
+        table = Table(title="concordance maintain — progress")
+        table.add_column("step")
+        table.add_column("progress", justify="right")
+        table.add_column("note")
+        for s in steps:
+            if s["done"] is None or s["total"] is None or s["total"] == 0:
+                progress = "—" if s["done"] is None else f"{s['done']} rows"
+            else:
+                pct = 100.0 * s["done"] / s["total"]
+                bar_style = "green" if pct >= 99.9 else ("yellow" if pct > 0 else "dim")
+                progress = f"[{bar_style}]{s['done']}/{s['total']} ({pct:.1f}%)[/{bar_style}]"
+            table.add_row(s["name"], progress, s["note"])
+        return table
+
+    try:
+        if watch > 0:
+            from rich.live import Live
+
+            with Live(render(), console=console, refresh_per_second=1) as live:
+                while True:
+                    _time.sleep(watch)
+                    live.update(render())
+        else:
+            console.print(render())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        conn.close()
 
 
 @app.command()

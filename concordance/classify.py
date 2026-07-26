@@ -254,4 +254,6 @@ def classify_and_store(conn, schema: str, cfg: Config | None = None, limit: int 
                         (it["_id"], cid, conf, src, rank == 0))
                     stats["assignments"] += 1
         conn.commit()
+        print(f"  ...{min(start + commit_every, len(items))}/{len(items)} words classified "
+              f"({stats['classified']} tagged, {stats['vanished']} vanished mid-run)")
     return stats

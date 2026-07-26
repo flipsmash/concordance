@@ -130,6 +130,9 @@ class Rewriter:
         result: dict[str, tuple[str, str]] = {}
         for i in range(0, len(items), self.batch):
             self._batch(items[i : i + self.batch], result)
+            done = min(i + self.batch, len(items))
+            if done % (self.batch * 10) == 0 or done == len(items):
+                print(f"  ...{done}/{len(items)} leaker definitions rewritten")
 
         # Anything not resolved by a normal rewrite would fall straight to
         # redact() -- but when that redaction would leave too little content

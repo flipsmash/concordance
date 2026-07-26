@@ -564,6 +564,11 @@ def verify_candidates(cfg, candidates: list[RelationCandidate], batch_size: int 
             except Exception:  # noqa: BLE001 -- a flaky model call shouldn't crash the backfill
                 verdicts = None
         apply_verify_verdicts(batch, verdicts)
+        done = min(i + batch_size, len(candidates))
+        if done % (batch_size * 5) == 0 or done == len(candidates):
+            verified_so_far = sum(1 for c in candidates[:done] if c.verdict == "verified")
+            print(f"[backfill-analogies]   ...{done}/{len(candidates)} edges verified "
+                  f"({verified_so_far} passed so far)")
 
 
 # --- sibling fanout (one-hard-term distractor plausibility) -------------------
@@ -627,7 +632,8 @@ def backfill_analogies(conn, schema: str, cfg, limit: int = 0, batch_size: int =
     edges_found_by_term: dict[int, int] = {}
     method_by_term: dict[int, str] = {}
 
-    for term_id, word_id, lemma, wn_pos, synset_name, gloss in to_scan:
+    print(f"[backfill-analogies] extracting relations for {len(to_scan)} terms...")
+    for i, (term_id, word_id, lemma, wn_pos, synset_name, gloss) in enumerate(to_scan, 1):
         term_row = {"id": term_id, "word_id": word_id, "lemma": lemma, "wn_pos": wn_pos,
                     "pos": _WN_POS_TO_CANONICAL.get(wn_pos, wn_pos), "synset_name": synset_name, "gloss": gloss}
         candidates: list[RelationCandidate] = []
@@ -644,7 +650,20 @@ def backfill_analogies(conn, schema: str, cfg, limit: int = 0, batch_size: int =
         edges_found_by_term[term_id] = len(candidates)
         method_by_term[term_id] = method or "wordnet"
         all_candidates.extend(candidates)
+        # Periodic commit: extraction inserts wn_relation_term/wn_relation_fanout
+        # rows as it discovers ordinary (anchor-bank) terms, and without this the
+        # entire extraction phase (which can run over thousands of terms) stays
+        # in one uncommitted transaction until backfill_analogies's own final
+        # commit -- a crash or kill partway through would lose all of it, the
+        # same failure mode classify_and_store's own docstring describes fixing.
+        if i % 100 == 0:
+            conn.commit()
+            print(f"[backfill-analogies]   ...{i}/{len(to_scan)} terms scanned "
+                  f"({len(all_candidates)} candidate edges found so far)")
+    conn.commit()
 
+    print(f"[backfill-analogies] verifying {len(all_candidates)} candidate edges "
+          f"(batches of {batch_size})...")
     verify_candidates(cfg, all_candidates, batch_size=batch_size)
 
     verified_count = 0
@@ -654,8 +673,13 @@ def backfill_analogies(conn, schema: str, cfg, limit: int = 0, batch_size: int =
     # Re-resolve term ids for insertion (candidates carry lemmas, not ids, to
     # stay decoupled from extraction's cursor-scoped lookups above); _find_term_id
     # prefers a vocab-word row over an ordinary one for the same lemma+POS.
+    print(f"[backfill-analogies] writing {len(all_candidates)} verified/rejected edges...")
     with conn.cursor() as cur:
-        for c in all_candidates:
+        for i, c in enumerate(all_candidates, 1):
+            if i % 200 == 0:
+                conn.commit()
+                print(f"[backfill-analogies]   ...{i}/{len(all_candidates)} edges written "
+                      f"({verified_count} verified, {rejected_count} rejected so far)")
             a_wn_pos = wordnet_pos(c.term_a_pos)
             b_wn_pos = wordnet_pos(c.term_b_pos)
             if not a_wn_pos or not b_wn_pos:
