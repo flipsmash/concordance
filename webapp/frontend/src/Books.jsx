@@ -4,6 +4,7 @@ import { difficultySummary } from './bookDifficulty'
 import { usePagedTable } from './usePagedTable'
 import './Authors.css'
 
+const API_BASE = ''
 const PAGE_SIZE = 30
 
 // Level 1 of the book drilldown: every book, browsable/searchable by title --
@@ -28,11 +29,25 @@ function Books() {
     extraParams: { q: debounced },
   })
 
+  function surpriseMe() {
+    fetch(`${API_BASE}/api/browse/books?random=true`)
+      .then((res) => res.json())
+      .then((data) => {
+        const next = data.items[0]
+        if (next) navigate(`/app/authors/${encodeURIComponent(next.author || '')}/${next.id}`)
+      })
+      .catch(() => {})
+  }
+
   return (
     <div className="authors-page">
       <header className="authors-header">
         <h1>Browse by book</h1>
       </header>
+
+      <button type="button" className="authors-surprise" onClick={surpriseMe}>
+        🎲 Surprise me
+      </button>
 
       <input
         type="text"

@@ -149,6 +149,7 @@ def browse_authors(
     archaic: list[str] = Query([]),
     pos: list[str] = Query([]),
     quizzable_only: bool = False,
+    random: bool = False,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     sort: Literal["author", "word_count"] = "word_count",
@@ -177,9 +178,15 @@ def browse_authors(
         filters.append("b.author ILIKE %s")
         params.append(f"%{q}%")
     where = " AND ".join(filters)
-    order_col = "b.author" if sort == "author" else "word_count"
-    order_dir = "ASC" if dir == "asc" else "DESC"
-    offset = (page - 1) * page_size
+    if random:
+        order_by = "random()"
+        limit = 1
+    else:
+        order_col = "b.author" if sort == "author" else "word_count"
+        order_dir = "ASC" if dir == "asc" else "DESC"
+        order_by = f"{order_col} {order_dir}, b.author ASC"
+        limit = page_size
+    offset = 0 if random else (page - 1) * page_size
 
     with _main.get_conn() as conn, conn.cursor() as cur:
         cur.execute(
@@ -204,9 +211,9 @@ def browse_authors(
                 LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
                 WHERE {where}
                 GROUP BY b.author
-                ORDER BY {order_col} {order_dir}, b.author ASC
+                ORDER BY {order_by}
                 LIMIT %s OFFSET %s""",
-            (*params, page_size, offset),
+            (*params, limit, offset),
         )
         rows = cur.fetchall()
 
@@ -248,6 +255,7 @@ def browse_books(
     archaic: list[str] = Query([]),
     pos: list[str] = Query([]),
     quizzable_only: bool = False,
+    random: bool = False,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     sort: Literal["title", "word_count"] = "title",
@@ -275,9 +283,15 @@ def browse_books(
         filters.append("b.title ILIKE %s")
         params.append(f"%{q}%")
     where = " AND ".join(filters)
-    order_col = "b.title" if sort == "title" else "word_count"
-    order_dir = "ASC" if dir == "asc" else "DESC"
-    offset = (page - 1) * page_size
+    if random:
+        order_by = "random()"
+        limit = 1
+    else:
+        order_col = "b.title" if sort == "title" else "word_count"
+        order_dir = "ASC" if dir == "asc" else "DESC"
+        order_by = f"{order_col} {order_dir}, b.title ASC"
+        limit = page_size
+    offset = 0 if random else (page - 1) * page_size
 
     with _main.get_conn() as conn, conn.cursor() as cur:
         cur.execute(
@@ -306,9 +320,9 @@ def browse_books(
                 LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
                 WHERE {where}
                 GROUP BY b.id, b.title, b.author, b.archive_path
-                ORDER BY {order_col} {order_dir}, b.title ASC
+                ORDER BY {order_by}
                 LIMIT %s OFFSET %s""",
-            (*params, page_size, offset),
+            (*params, limit, offset),
         )
         rows = cur.fetchall()
 
