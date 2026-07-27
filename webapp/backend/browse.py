@@ -43,11 +43,19 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from concordance import usas_domains
+from concordance import usas, usas_domains
 from concordance.db import PLACEHOLDER_AUTHORS
 from webapp.backend import main as _main
 
 router = APIRouter()
+
+# The 21 top-level USAS discourse fields ("discipline categories"), in
+# usas.py's own fixed _TAGSET order -- level 0 is exactly the single-letter
+# top fields (categories()'s own definition: parent_code is None). Computed
+# once at import time, not per-request: it's 21 static (code, name) pairs
+# derived from a module-level constant, not data that can change at runtime.
+_TOP_CODES = [c["code"] for c in usas.categories() if c["level"] == 0]
+_TOP_CODE_NAMES = {c["code"]: c["name"] for c in usas.categories() if c["level"] == 0}
 
 # archive_path (concordance/archive_metadata.py) is repo-root-relative
 # (e.g. "archive/1601 -- Twain, Mark.txt") -- resolved against this, the
@@ -1353,3 +1361,230 @@ def browse_pos_values(_: dict = Depends(_main.require_viewer)) -> list[str]:
                 ORDER BY 1"""
         )
         return [r[0] for r in cur.fetchall()]
+
+
+# --- /api/browse/domain-map ------------------------------------------------------
+
+class DomainMapNode(BaseModel):
+    id: str            # book id (as a string) or author name
+    label: str          # book title, or author name (same as id for authors)
+    subtitle: str | None  # author (for a book node); None for author nodes
+    word_count: int
+    x: float
+    y: float
+    dominant_code: str | None      # the USAS top-level field this entity's vocabulary
+                                    # leans on most, e.g. "Y" -- None only if an entity
+                                    # somehow has zero categorized words (not seen live)
+    dominant_name: str | None      # e.g. "SCIENCE & TECHNOLOGY"
+    dominant_bucket: str | None    # usas_domains.py's 6-hue compression of dominant_code,
+                                    # for colorForBucket() -- same palette the word graph uses
+    dominant_fraction: float | None  # e.g. 0.34 -- this category's share of the entity's
+                                      # own category-incidence distribution
+
+
+class DomainMapResponse(BaseModel):
+    entity: Literal["book", "author"]
+    nodes: list[DomainMapNode]
+
+
+def _domain_vectors_to_map(rows: list[tuple], id_is_int: bool) -> list[DomainMapNode]:
+    """Shared second half of browse_domain_map for both entities: rows is
+    (id, label, subtitle, total_words, {code: count}) tuples. Builds each
+    entity's distribution over the 21 USAS top-level fields, projects to 2D,
+    and picks a dominant category for color.
+
+    PCA, not classical MDS-from-a-distance-matrix (compute_author_clustering's
+    approach in db.py): that machinery exists because ITS feature space is
+    thousands of sparse word columns, forcing an n x n Gram matrix. Here the
+    feature space is a fixed 21 dense columns, so building the n x 21 matrix
+    directly and eigh-ing its 21 x 21 covariance is the identical embedding
+    (classical MDS on Euclidean distance IS PCA on the centered data) at a
+    fraction of the cost -- no scipy, no O(n^2) distance matrix, and it scales
+    to the corpus directly rather than needing a top-N cap for tractability.
+
+    Each row is L1-normalized first (so it's a genuine distribution over
+    categories, matching this codebase's existing multi-label-domain
+    convention -- a word can count toward more than one field, so rows don't
+    represent a strict partition of the entity's words) and THEN L2-normalized
+    before the PCA step, so Euclidean distance between rows corresponds to
+    cosine similarity between the underlying distributions -- the same
+    distance definition compute_author_clustering uses, for the same reason
+    (a proper metric, not raw 1-cosine).
+    """
+    import numpy as np
+
+    ids, labels, subtitles, totals, count_dicts = [], [], [], [], []
+    for id_, label, subtitle, total, counts in rows:
+        ids.append(id_)
+        labels.append(label)
+        subtitles.append(subtitle)
+        totals.append(total)
+        count_dicts.append(counts)
+
+    n = len(ids)
+    raw = np.array([[cd.get(code, 0) for code in _TOP_CODES] for cd in count_dicts], dtype=float)
+    row_sums = raw.sum(axis=1)
+    # Not seen live (a corpus-wide scan found >=98.6% category coverage even
+    # at the lowest qualifying word counts) but guarded rather than trusted:
+    # an entity with zero categorized words can't be L1-normalized.
+    valid = row_sums > 0
+    if valid.sum() < 2:
+        return []
+
+    l1 = np.zeros_like(raw)
+    l1[valid] = raw[valid] / row_sums[valid, None]
+
+    # Dominant category is picked by LIFT (this entity's share / the corpus's
+    # own average share for that category), not raw share -- "A GENERAL &
+    # ABSTRACT TERMS" is corpus-wide the single largest field by a wide
+    # margin (general/abstract vocabulary pervades every kind of writing),
+    # so a raw-argmax dominant category came back "A" for 3752/4559 books
+    # (82%) in a live check -- a map where 4 in 5 dots share one color tells
+    # you almost nothing. Dividing by each category's corpus-wide mean share
+    # before taking the argmax surfaces what a book/author leans on MORE
+    # THAN THE CORPUS TYPICALLY DOES, which is what "the discipline this
+    # work belongs to" actually means -- the same relative-to-baseline
+    # instinct as this file's own idf fields elsewhere (book_shared_words/
+    # author_shared_words), just lift instead of log-lift. The live check
+    # above confirmed it: the same 4559 books spread across all 21 fields
+    # instead of clustering on 13, none dominating.
+    baseline = l1[valid].mean(axis=0)
+    baseline[baseline == 0] = 1e-9  # guard only -- corpus scale makes this unreachable live
+    lift = l1 / baseline
+
+    l2_norms = np.linalg.norm(l1, axis=1)
+    l2_norms[l2_norms == 0] = 1.0
+    unit = l1 / l2_norms[:, None]
+
+    mean = unit[valid].mean(axis=0)
+    centered = unit - mean
+    cov = centered[valid].T @ centered[valid]
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    top2 = np.argsort(eigvals)[::-1][:2]
+    coords = centered @ eigvecs[:, top2]
+
+    # Same arbitrary-eigenvector-sign guard compute_author_clustering uses --
+    # eigh's sign is otherwise undetermined and can flip between runs on
+    # near-identical input.
+    for axis in range(coords.shape[1]):
+        col = coords[:, axis]
+        if col[np.argmax(np.abs(col))] < 0:
+            coords[:, axis] = -col
+
+    nodes = []
+    for i in range(n):
+        if not valid[i]:
+            continue
+        dom_idx = int(np.argmax(lift[i]))
+        dom_code = _TOP_CODES[dom_idx]
+        nodes.append(DomainMapNode(
+            id=str(ids[i]) if id_is_int else ids[i],
+            label=labels[i],
+            subtitle=subtitles[i],
+            word_count=totals[i],
+            x=float(coords[i, 0]),
+            y=float(coords[i, 1]),
+            dominant_code=dom_code,
+            dominant_name=_TOP_CODE_NAMES.get(dom_code),
+            dominant_bucket=usas_domains.bucket_for(dom_code),
+            dominant_fraction=round(float(l1[i, dom_idx]), 4),
+        ))
+    return nodes
+
+
+@router.get("/api/browse/domain-map", response_model=DomainMapResponse)
+def browse_domain_map(
+    entity: Literal["book", "author"] = "book",
+    min_words: int = Query(0, ge=0, description="Overrides the entity's own default floor (50 for books, 100 for authors) if higher."),
+    _: dict = Depends(_main.require_viewer),
+) -> DomainMapResponse:
+    """Relationship map (§ discipline-category visualization): every
+    qualifying book/author positioned by how their vocabulary distributes
+    across the 21 USAS discourse fields -- distinct from every other
+    relatedness view in this file, which is all built on SHARED-WORD overlap
+    (author_similarity/book_similarity). Two books here can sit close
+    together with zero words in common, as long as their words lean on the
+    same mix of fields (e.g. both heavy in Nature & Science).
+
+    Live-computed on every request, not precomputed via `maintain` like
+    author_cluster -- see _domain_vectors_to_map's docstring for why that's
+    cheap enough here (a 21-dim dense feature space, not thousands of sparse
+    word columns), and precomputing would mean new schema/DDL on the same
+    apply_schema path that's already been seen blocking an app restart for
+    minutes behind `maintain`'s own long-running transactions.
+
+    Default floor is 50 qualifying vocab words for a book, 100 for an author
+    -- below that a 21-way category distribution is mostly sampling noise,
+    not a real profile. A corpus-wide scan found >=98.6% category coverage
+    among words even at these floors, so the floor is applied to TOTAL
+    vocabulary words, not just categorized ones -- there was no meaningful
+    gap between the two to worry about."""
+    default_floor = 50 if entity == "book" else 100
+    floor = max(min_words, default_floor)
+
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        if entity == "book":
+            cur.execute(
+                f"""WITH book_words AS (
+                        SELECT b.id, b.title, b.author, w.id AS word_id
+                        FROM {_main.SCHEMA}.book b
+                        JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
+                        JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id AND w.active
+                    ),
+                    book_totals AS (
+                        SELECT id, title, author, count(DISTINCT word_id) AS total
+                        FROM book_words
+                        GROUP BY id, title, author
+                        HAVING count(DISTINCT word_id) >= %s
+                    )
+                    SELECT bt.id, bt.title, bt.author, bt.total,
+                           left(c.code, 1) AS top_code, count(DISTINCT bw.word_id) AS n
+                    FROM book_totals bt
+                    JOIN book_words bw ON bw.id = bt.id
+                    LEFT JOIN {_main.SCHEMA}.word_category wc ON wc.word_id = bw.word_id
+                    LEFT JOIN {_main.SCHEMA}.category c ON c.id = wc.category_id
+                    GROUP BY bt.id, bt.title, bt.author, bt.total, left(c.code, 1)""",
+                (floor,),
+            )
+            rows = cur.fetchall()
+            entities: dict[int, dict] = {}
+            for id_, title, author, total, top_code, n in rows:
+                e = entities.setdefault(id_, {"label": title, "subtitle": author, "total": total, "counts": {}})
+                if top_code:
+                    e["counts"][top_code] = n
+            tuples = [(id_, e["label"], e["subtitle"], e["total"], e["counts"]) for id_, e in entities.items()]
+            nodes = _domain_vectors_to_map(tuples, id_is_int=True)
+        else:
+            cur.execute(
+                f"""WITH author_words AS (
+                        SELECT DISTINCT b.author, w.id AS word_id
+                        FROM {_main.SCHEMA}.book b
+                        JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
+                        JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id AND w.active
+                        WHERE b.author IS NOT NULL AND b.author != ALL(%s)
+                    ),
+                    author_totals AS (
+                        SELECT author, count(DISTINCT word_id) AS total
+                        FROM author_words
+                        GROUP BY author
+                        HAVING count(DISTINCT word_id) >= %s
+                    )
+                    SELECT at.author, at.total,
+                           left(c.code, 1) AS top_code, count(DISTINCT aw.word_id) AS n
+                    FROM author_totals at
+                    JOIN author_words aw ON aw.author = at.author
+                    LEFT JOIN {_main.SCHEMA}.word_category wc ON wc.word_id = aw.word_id
+                    LEFT JOIN {_main.SCHEMA}.category c ON c.id = wc.category_id
+                    GROUP BY at.author, at.total, left(c.code, 1)""",
+                (list(PLACEHOLDER_AUTHORS), floor),
+            )
+            rows = cur.fetchall()
+            entities = {}
+            for author, total, top_code, n in rows:
+                e = entities.setdefault(author, {"total": total, "counts": {}})
+                if top_code:
+                    e["counts"][top_code] = n
+            tuples = [(author, author, None, e["total"], e["counts"]) for author, e in entities.items()]
+            nodes = _domain_vectors_to_map(tuples, id_is_int=False)
+
+    return DomainMapResponse(entity=entity, nodes=nodes)

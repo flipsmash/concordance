@@ -55,6 +55,17 @@ function Visualizations() {
       </section>
 
       <section className="browse-facets viz-section">
+        <h2 className="viz-heading">Works &amp; authors by discipline category</h2>
+        <p className="viz-description">
+          See how vocabulary distributes across subject-matter fields (science, law, arts…) --
+          works and authors with a similar mix sit close together, even with no words in common.
+        </p>
+        <Link to="/app/visualizations/domain-map" className="browse-quiz-link">
+          Open the map →
+        </Link>
+      </section>
+
+      <section className="browse-facets viz-section">
         <h2 className="viz-heading">Words by meaning</h2>
         <p className="viz-description">
           Search for a word to see its nearest neighbors by definition or spelling.
