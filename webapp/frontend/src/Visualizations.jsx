@@ -29,12 +29,18 @@ function Visualizations() {
       <section className="browse-facets viz-section">
         <h2 className="viz-heading">Books by vocabulary overlap</h2>
         <p className="viz-description">
-          Pick a book to see the other books that share the most rare vocabulary with it.
+          Pick a book to see the other books that share the most rare vocabulary with it, or view
+          every book at once.
         </p>
-        <BookSelect
-          placeholder="Search for a book…"
-          onPick={(book) => navigate(`/app/authors/${encodeURIComponent(book.author || '')}/${book.id}/relatedness`)}
-        />
+        <div className="viz-author-row">
+          <BookSelect
+            placeholder="Search for a book…"
+            onPick={(book) => navigate(`/app/authors/${encodeURIComponent(book.author || '')}/${book.id}/relatedness`)}
+          />
+          <Link to="/app/books/relatedness" className="browse-quiz-link">
+            See all books at once →
+          </Link>
+        </div>
       </section>
 
       <section className="browse-facets viz-section">

@@ -1,0 +1,43 @@
+.book-dendrogram {
+  width: 100%;
+  height: calc(100vh - 260px);
+  min-height: 400px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.book-dendrogram-controls {
+  justify-content: flex-end;
+  padding: 8px;
+  flex: 0 0 auto;
+}
+
+.book-dendrogram-svg {
+  width: 100%;
+  flex: 1;
+  display: block;
+}
+
+.book-dendrogram:fullscreen {
+  background: var(--bg);
+  padding: 12px;
+}
+
+.book-dendrogram-edge {
+  stroke: var(--border);
+  stroke-width: 1;
+  fill: none;
+}
+
+.book-dendrogram-leaf {
+  cursor: pointer;
+}
+
+.book-dendrogram-label {
+  font-size: 11px;
+  fill: var(--text-h);
+  pointer-events: none;
+}

@@ -187,6 +187,32 @@ CREATE TABLE IF NOT EXISTS {s}.author_cluster_run (
     computed_at  timestamptz NOT NULL DEFAULT now()
 );
 
+-- Same idea as author_cluster/author_cluster_run, one level down -- see
+-- compute_book_clustering. book_cluster_run.leaf_order is jsonb, not
+-- text[]: an author is uniquely identified by their name alone (the
+-- string IS the display label AND the navigation key), but a book needs
+-- id (navigation, e.g. two books can share a title), title (display),
+-- AND author (to build a /app/authors/:author/:bookId link) together, so
+-- a flat string array isn't enough here the way it is for authors.
+CREATE TABLE IF NOT EXISTS {s}.book_cluster (
+    book_id      integer PRIMARY KEY REFERENCES {s}.book(id) ON DELETE CASCADE,
+    title        text NOT NULL,
+    author       text,
+    cluster_id   integer NOT NULL,
+    mds_x        double precision NOT NULL,
+    mds_y        double precision NOT NULL,
+    word_count   integer NOT NULL,
+    computed_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS {s}.book_cluster_run (
+    id           integer PRIMARY KEY CHECK (id = 1),
+    leaf_order   jsonb NOT NULL,    -- [{{"id","title","author"}}, ...] in seriated order
+    grid         jsonb NOT NULL,    -- NxN [[score, shared_word_count], ...] in leaf_order
+    tree_json    jsonb NOT NULL,    -- nested linkage tree, for the dendrogram
+    computed_at  timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS {s}.word_audio (
     word_id      integer PRIMARY KEY REFERENCES {s}.word(id) ON DELETE CASCADE,
     source       text,          -- 'commons' | 'azure' | 'none' (looked up, nothing found)
@@ -2343,14 +2369,20 @@ def compute_author_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int 
     return {"authors": len(author_names), "pairs_stored": stored}
 
 
-def _linkage_to_tree(Z, labels: list[str]) -> dict:
+def _linkage_to_tree(Z, leaf_data: list[dict]) -> dict:
     """scipy.cluster.hierarchy.linkage's output (an (n-1)x4 array: each row
     [left, right, distance, size], where left/right index either an
     original leaf (0..n-1) or a previously-built internal node (n..)) into
     a nested, JSON-serializable tree for the frontend dendrogram -- one
-    bottom-up pass, no recursion needed since Z is already in merge order."""
-    n = len(labels)
-    nodes: dict[int, dict] = {i: {"author": labels[i], "size": 1} for i in range(n)}
+    bottom-up pass, no recursion needed since Z is already in merge order.
+
+    leaf_data[i] is spread directly into leaf i's dict (e.g. {"author": name}
+    for compute_author_clustering, {"id", "title", "author"} for
+    compute_book_clustering) -- generic over what identifies a leaf rather
+    than assuming a single string label, since a book (unlike an author)
+    needs more than one field to be both displayable and navigable."""
+    n = len(leaf_data)
+    nodes: dict[int, dict] = {i: {**leaf_data[i], "size": 1} for i in range(n)}
     for i, (a, b, dist, size) in enumerate(Z):
         nodes[n + i] = {
             "left": nodes[int(a)],
@@ -2527,7 +2559,7 @@ def compute_author_clustering(conn, schema: str = DEFAULT_SCHEMA, *, top_n: int 
             coords[i, 1] += radius * math.sin(angle)
 
     grid = [[[float(cosine[i, j]), int(shared_counts[i, j])] for j in leaf_order_idx] for i in leaf_order_idx]
-    tree_json = _linkage_to_tree(tree, top_author_names)
+    tree_json = _linkage_to_tree(tree, [{"author": name} for name in top_author_names])
 
     from psycopg.types.json import Json
 
@@ -2550,6 +2582,177 @@ def compute_author_clustering(conn, schema: str = DEFAULT_SCHEMA, *, top_n: int 
         )
     conn.commit()
     return {"authors": n, "clusters": int(cluster_ids.max()) if n else 0}
+
+
+def compute_book_clustering(conn, schema: str = DEFAULT_SCHEMA, *, top_n: int = 200,
+                            max_df_fraction: float = 0.5, n_clusters: int = 12) -> dict:
+    """`concordance book-clustering` / `maintain`'s clustering step, one
+    level down from compute_author_clustering: the data behind the cluster
+    map, similarity matrix, and dendrogram views for the top `top_n` books
+    by (extracted-vocabulary) word count.
+
+    Reuses the exact corpus-wide book-df IDF setup compute_book_similarity
+    uses (same n_books/df/max_df_fraction computation over ALL books, not
+    just the top_n) -- so "the why" (book_similarity's scores) and "the
+    map" (cluster positions here) share one consistent notion of
+    similarity; only WHICH books enter the pairwise/clustering step is
+    restricted to top_n, not how a shared word is weighted. Unlike
+    compute_author_clustering, there's no PLACEHOLDER_AUTHORS filter here --
+    that's an author-level aggregation-label concept ("Various" isn't a
+    real writer), and doesn't disqualify an individual book from having a
+    real, clusterable vocabulary of its own; a book by a placeholder author
+    just carries that through to book_cluster.author as-is (nullable,
+    same as book.author itself).
+
+    See compute_author_clustering's own docstring for the distance
+    definition (sqrt(2*(1-cosine)), a proper Euclidean distance for
+    L2-normalized vectors), classical MDS technique (direct eigh, no
+    sklearn, deterministic axis-sign pinning), and jitter reasoning
+    (identical qualifying word sets landing on the same point) -- all
+    reused verbatim here, just keyed by book_id instead of author name.
+
+    Writes book_cluster and the singleton book_cluster_run in one
+    transaction at the end, same all-or-nothing reasoning as
+    compute_author_clustering (top_n=200 is small enough that one clean
+    transaction is trivial, and the map/matrix/dendrogram must never
+    disagree with each other)."""
+    import hashlib
+    import math
+
+    import numpy as np
+    from scipy.cluster.hierarchy import fcluster, leaves_list, linkage
+    from scipy.spatial.distance import squareform
+    from scipy.sparse import csr_matrix
+
+    s = _safe_schema(schema)
+
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT count(DISTINCT wb.book_id) FROM {s}.word_book wb
+                        JOIN {s}.word w ON w.id = wb.word_id WHERE w.active""")
+        n_books = cur.fetchone()[0]
+        if n_books < 3:
+            conn.commit()  # see compute_book_similarity's own early-return commit note
+            return {"books": 0, "clusters": 0}
+
+        cur.execute(f"""SELECT wb.word_id, count(DISTINCT wb.book_id) AS df
+                        FROM {s}.word_book wb JOIN {s}.word w ON w.id = wb.word_id
+                        WHERE w.active GROUP BY wb.word_id""")
+        max_df = max_df_fraction * n_books
+        idf = {wid: math.log(n_books / df) for wid, df in cur.fetchall() if df <= max_df}
+        if not idf:
+            conn.commit()
+            return {"books": 0, "clusters": 0}
+
+        cur.execute(f"""SELECT b.id, b.title, b.author, count(DISTINCT w.id) AS word_count
+                        FROM {s}.book b
+                        JOIN {s}.word_book wb ON wb.book_id = b.id
+                        JOIN {s}.word w ON w.id = wb.word_id AND w.active
+                        GROUP BY b.id, b.title, b.author
+                        ORDER BY word_count DESC
+                        LIMIT %s""", (top_n,))
+        top_books = cur.fetchall()
+        top_book_ids = [r[0] for r in top_books]
+        title_by_id = {r[0]: r[1] for r in top_books}
+        author_by_id = {r[0]: r[2] for r in top_books}
+        word_count_by_id = {r[0]: r[3] for r in top_books}
+
+        if len(top_book_ids) < 3:
+            conn.commit()
+            return {"books": 0, "clusters": 0}
+
+        cur.execute(f"""SELECT DISTINCT wb.word_id, wb.book_id FROM {s}.word_book wb
+                        JOIN {s}.word w ON w.id = wb.word_id
+                        WHERE w.active AND wb.book_id = ANY(%s)
+                          AND wb.word_id = ANY(%s)""",
+                    (top_book_ids, list(idf.keys())))
+        rows = cur.fetchall()
+
+    n = len(top_book_ids)
+    book_index = {bid: i for i, bid in enumerate(top_book_ids)}
+    word_index: dict[int, int] = {}
+    row_idx, col_idx, weighted_data = [], [], []
+    for wid, bid in rows:
+        j = word_index.setdefault(wid, len(word_index))
+        row_idx.append(book_index[bid])
+        col_idx.append(j)
+        weighted_data.append(idf[wid])
+
+    matrix = csr_matrix((weighted_data, (row_idx, col_idx)), shape=(n, len(word_index)))
+    binary = csr_matrix(([1] * len(row_idx), (row_idx, col_idx)), shape=(n, len(word_index)))
+    shared_counts = (binary @ binary.T).toarray().astype(int)
+
+    norms = np.sqrt(np.asarray(matrix.multiply(matrix).sum(axis=1))).reshape(-1)
+    norms[norms == 0] = 1.0  # a book with zero qualifying words (all excluded by max_df) -- avoid /0
+    normalized = matrix.multiply(1 / norms[:, None]).tocsr()
+    cosine = (normalized @ normalized.T).toarray()
+    np.clip(cosine, -1.0, 1.0, out=cosine)  # guard float round-off past 1 on a self-pair
+
+    dist = np.sqrt(np.clip(2 * (1 - cosine), 0, None))
+    np.fill_diagonal(dist, 0.0)
+
+    condensed = squareform(dist, checks=False)
+    tree = linkage(condensed, method="ward", optimal_ordering=True)
+    leaf_order_idx = leaves_list(tree)
+    leaf_order_ids = [top_book_ids[i] for i in leaf_order_idx]
+    cluster_ids = fcluster(tree, t=n_clusters, criterion="maxclust")
+
+    # Classical (Torgerson) MDS: double-center the squared-distance matrix,
+    # take the top-2 eigenvectors of the resulting Gram matrix.
+    d2 = dist ** 2
+    centering = np.eye(n) - np.ones((n, n)) / n
+    gram = -0.5 * centering @ d2 @ centering
+    eigvals, eigvecs = np.linalg.eigh(gram)
+    top2 = np.argsort(eigvals)[::-1][:2]
+    coords = eigvecs[:, top2] * np.sqrt(np.clip(eigvals[top2], 0, None))
+
+    for axis in range(coords.shape[1]):
+        col = coords[:, axis]
+        if col[np.argmax(np.abs(col))] < 0:
+            coords[:, axis] = -col
+
+    seen_points: dict[tuple, list[int]] = {}
+    for i in range(n):
+        key = (round(float(coords[i, 0]), 6), round(float(coords[i, 1]), 6))
+        seen_points.setdefault(key, []).append(i)
+    spread = max(float(np.abs(coords).max()), 1.0)
+    for idxs in seen_points.values():
+        if len(idxs) < 2:
+            continue
+        for k, i in enumerate(idxs):
+            h = int(hashlib.sha256(str(top_book_ids[i]).encode()).hexdigest(), 16)
+            angle = (h % 360) * math.pi / 180
+            radius = 0.02 * (k + 1) * spread
+            coords[i, 0] += radius * math.cos(angle)
+            coords[i, 1] += radius * math.sin(angle)
+
+    grid = [[[float(cosine[i, j]), int(shared_counts[i, j])] for j in leaf_order_idx] for i in leaf_order_idx]
+    leaf_order = [{"id": bid, "title": title_by_id[bid], "author": author_by_id[bid]} for bid in leaf_order_ids]
+    tree_json = _linkage_to_tree(
+        tree, [{"id": bid, "title": title_by_id[bid], "author": author_by_id[bid]} for bid in top_book_ids]
+    )
+
+    from psycopg.types.json import Json
+
+    with conn.cursor() as cur:
+        cur.execute(f"TRUNCATE {s}.book_cluster")
+        for i, bid in enumerate(top_book_ids):
+            cur.execute(
+                f"""INSERT INTO {s}.book_cluster (book_id, title, author, cluster_id, mds_x, mds_y,
+                                                    word_count, computed_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s, now())""",
+                (bid, title_by_id[bid], author_by_id[bid], int(cluster_ids[i]),
+                 float(coords[i, 0]), float(coords[i, 1]), word_count_by_id[bid]),
+            )
+        cur.execute(
+            f"""INSERT INTO {s}.book_cluster_run (id, leaf_order, grid, tree_json, computed_at)
+                VALUES (1, %s, %s, %s, now())
+                ON CONFLICT (id) DO UPDATE SET
+                    leaf_order=EXCLUDED.leaf_order, grid=EXCLUDED.grid,
+                    tree_json=EXCLUDED.tree_json, computed_at=now()""",
+            (Json(leaf_order), Json(grid), Json(tree_json)),
+        )
+    conn.commit()
+    return {"books": n, "clusters": int(cluster_ids.max()) if n else 0}
 
 
 def compute_definition_embeddings(conn, schema: str = DEFAULT_SCHEMA, only_missing: bool = True,
@@ -3082,8 +3285,8 @@ def maintain_status(conn, schema: str = DEFAULT_SCHEMA) -> list[dict]:
     """One dict per MAINTAIN_STEPS entry, in maintain's own run order:
     {name, done, total, note}. `done`/`total` are None for a step with no
     meaningful fraction (normalize-pos, quizzable, calibrate-difficulty,
-    author-clustering -- each recomputes fully in one fast pass rather than
-    incrementally skipping already-touched rows, so there's nothing to be
+    book-clustering, author-clustering -- each recomputes fully in one fast
+    pass rather than incrementally skipping already-touched rows, so there's nothing to be
     partway through between runs)."""
     s = _safe_schema(schema)
     steps: list[dict] = []
@@ -3126,6 +3329,9 @@ def maintain_status(conn, schema: str = DEFAULT_SCHEMA) -> list[dict]:
         cur.execute(f"SELECT count(*) FROM {s}.book_similarity")
         steps.append({"name": "book-similarity", "done": None, "total": cur.fetchone()[0],
                       "note": "row count only -- pairwise, no fixed target to divide by"})
+
+        steps.append({"name": "book-clustering", "done": None, "total": None,
+                      "note": "recomputes fully each run -- fast, no meaningful fraction"})
 
         cur.execute(f"SELECT count(*) FROM {s}.author_similarity")
         steps.append({"name": "author-similarity", "done": None, "total": cur.fetchone()[0],

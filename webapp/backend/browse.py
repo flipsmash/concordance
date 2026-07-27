@@ -749,6 +749,171 @@ def book_shared_words(
     return SharedWordsResponse(shared_words=shared, total_shared=len(shared))
 
 
+# --- /api/browse/books/relatedness, /map, /matrix, /dendrogram ------------------
+#
+# The book-level counterpart to the four global author views below --
+# book_related above is the single-book ego graph (one book + its
+# neighbors); these four are "every book at once", all reading
+# concordance/db.py's precomputed book_similarity/book_cluster/
+# book_cluster_run tables (populated by `concordance book-similarity` /
+# `book-clustering` / `maintain`), same division of labor as the author
+# versions: relatedness reads book_similarity directly (bounded by `limit`,
+# the busiest-by-word-count books), while map/matrix/dendrogram all read
+# ONE shared book_cluster_run computation pass so they never disagree with
+# each other.
+
+class BookRelatednessGraph(BaseModel):
+    nodes: list[BookGraphNode]
+    edges: list[BookGraphEdge]
+
+
+@router.get("/api/browse/books/relatedness", response_model=BookRelatednessGraph)
+def books_relatedness(
+    top_k: int = Query(5, ge=1, le=20, description="Neighbors per book, from book_similarity's stored top-k."),
+    limit: int = Query(60, ge=5, le=300, description="Cap on how many books appear at all, by word count."),
+    _: dict = Depends(_main.require_viewer),
+) -> BookRelatednessGraph:
+    """The global all-books relatedness graph -- same reasoning as
+    authors_relatedness one level up: real corpus scale (~11,000+ books)
+    makes an unbounded graph both an expensive query and an unreadable
+    hairball, so `limit` restricts it to the busiest books by (extracted-
+    vocabulary) word count, and edges are only kept between two books that
+    both made the cut. Deliberately a SEPARATE response type from
+    BookRelatedResponse (the single-book ego graph), not that type reused
+    with a fake center -- there's no real center on a global graph, only
+    peers, and RelatednessGraph.jsx already handles a center-less
+    {nodes, edges} response correctly (every node falls back to uniform
+    "related" styling when `data.center` is undefined), exactly how
+    AuthorRelatednessGraph already works for the equivalent author view."""
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"""SELECT b.id, b.title, b.author, count(DISTINCT w.id) AS word_count
+                        FROM {_main.SCHEMA}.book b
+                        JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
+                        JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id AND w.active
+                        GROUP BY b.id, b.title, b.author
+                        ORDER BY word_count DESC
+                        LIMIT %s""", (limit,))
+        books = cur.fetchall()
+        book_ids = [r[0] for r in books]
+
+        cur.execute(f"""SELECT book_a_id, book_b_id, score, shared_word_count FROM (
+                            SELECT book_a_id, book_b_id, score, shared_word_count,
+                                   row_number() OVER (PARTITION BY book_a_id ORDER BY score DESC) AS rn
+                            FROM {_main.SCHEMA}.book_similarity
+                            WHERE book_a_id = ANY(%s) AND book_b_id = ANY(%s)
+                        ) ranked WHERE rn <= %s""", (book_ids, book_ids, top_k))
+        rows = cur.fetchall()
+
+    nodes = [BookGraphNode(id=r[0], title=r[1], author=r[2], ring=0, word_count=r[3]) for r in books]
+    seen_pairs: set[frozenset] = set()
+    edges: list[BookGraphEdge] = []
+    for a, b, score, shared in rows:
+        pair = frozenset((a, b))
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        edges.append(BookGraphEdge(source=a, target=b, score=score, shared_word_count=shared, is_center_edge=False))
+    return BookRelatednessGraph(nodes=nodes, edges=edges)
+
+
+class BookMapNode(BaseModel):
+    id: int
+    title: str
+    author: str | None
+    cluster_id: int
+    x: float
+    y: float
+    word_count: int
+
+
+class BookMapResponse(BaseModel):
+    nodes: list[BookMapNode]
+
+
+@router.get("/api/browse/books/map", response_model=BookMapResponse)
+def books_map(_: dict = Depends(_main.require_viewer)) -> BookMapResponse:
+    """The cluster map: every book in the precomputed book_cluster table
+    (top-N by word count -- see compute_book_clustering), positioned by
+    classical MDS over the same IDF-weighted cosine distance book_similarity's
+    scores use, colored by hierarchical cluster membership. Same rationale
+    as authors_map one level up: a physics-simulation force-directed layout
+    becomes an unstable hairball at this many nodes, where MDS position is
+    principled (derived from the real similarity structure) instead."""
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"""SELECT book_id, title, author, cluster_id, mds_x, mds_y, word_count
+                        FROM {_main.SCHEMA}.book_cluster
+                        ORDER BY cluster_id, title""")
+        rows = cur.fetchall()
+    nodes = [BookMapNode(id=r[0], title=r[1], author=r[2], cluster_id=r[3], x=r[4], y=r[5], word_count=r[6])
+             for r in rows]
+    return BookMapResponse(nodes=nodes)
+
+
+class BookMatrixEntry(BaseModel):
+    id: int
+    title: str
+    author: str | None
+
+
+class BookMatrixCell(BaseModel):
+    score: float
+    shared_word_count: int
+
+
+class BookMatrixResponse(BaseModel):
+    books: list[BookMatrixEntry]
+    grid: list[list[BookMatrixCell]]  # grid[i][j] compares books[i] to books[j]
+
+
+@router.get("/api/browse/books/matrix", response_model=BookMatrixResponse)
+def books_matrix(_: dict = Depends(_main.require_viewer)) -> BookMatrixResponse:
+    """The seriated similarity matrix/heatmap -- same top-N books as the
+    cluster map, in compute_book_clustering's hierarchical-clustering leaf
+    order so related books form visible blocks. Reads straight from
+    book_cluster_run (no new computation), same as authors_matrix."""
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"SELECT leaf_order, grid FROM {_main.SCHEMA}.book_cluster_run WHERE id = 1")
+        row = cur.fetchone()
+    if row is None:
+        return BookMatrixResponse(books=[], grid=[])
+    leaf_order, grid = row
+    books = [BookMatrixEntry(id=b["id"], title=b["title"], author=b["author"]) for b in leaf_order]
+    cells = [[BookMatrixCell(score=c[0], shared_word_count=c[1]) for c in grid_row] for grid_row in grid]
+    return BookMatrixResponse(books=books, grid=cells)
+
+
+class BookDendrogramNode(BaseModel):
+    id: int | None = None            # set on leaves only
+    title: str | None = None
+    author: str | None = None
+    size: int                        # number of leaves in this subtree
+    distance: float | None = None    # merge height -- unset on leaves (they merge at nothing)
+    left: "BookDendrogramNode | None" = None
+    right: "BookDendrogramNode | None" = None
+
+
+BookDendrogramNode.model_rebuild()
+
+
+class BookDendrogramResponse(BaseModel):
+    tree: BookDendrogramNode | None  # None if no clustering run has completed yet
+    leaf_order: list[BookMatrixEntry]
+
+
+@router.get("/api/browse/books/dendrogram", response_model=BookDendrogramResponse)
+def books_dendrogram(_: dict = Depends(_main.require_viewer)) -> BookDendrogramResponse:
+    """The dendrogram: the same clustering run's linkage tree, straight
+    from book_cluster_run (no new computation), same as authors_dendrogram."""
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"SELECT tree_json, leaf_order FROM {_main.SCHEMA}.book_cluster_run WHERE id = 1")
+        row = cur.fetchone()
+    if row is None:
+        return BookDendrogramResponse(tree=None, leaf_order=[])
+    tree_json, leaf_order = row
+    books = [BookMatrixEntry(id=b["id"], title=b["title"], author=b["author"]) for b in leaf_order]
+    return BookDendrogramResponse(tree=tree_json, leaf_order=books)
+
+
 # --- /api/browse/authors/{author}/related, /api/browse/authors/relatedness -----
 #
 # Both read concordance/db.py's precomputed author_similarity table --

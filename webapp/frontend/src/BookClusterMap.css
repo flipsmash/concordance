@@ -1,0 +1,44 @@
+.book-cluster-map {
+  position: relative;
+  width: 100%;
+  height: calc(100vh - 260px);
+  min-height: 400px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.book-cluster-map-controls {
+  justify-content: flex-end;
+  padding: 8px;
+  flex: 0 0 auto;
+}
+
+.book-cluster-map-svg {
+  width: 100%;
+  flex: 1;
+  display: block;
+}
+
+.book-cluster-map:fullscreen {
+  background: var(--bg);
+  padding: 12px;
+}
+
+.book-cluster-map-point {
+  cursor: pointer;
+}
+
+.book-cluster-map-point circle {
+  stroke: var(--bg);
+  stroke-width: 1;
+  transition: opacity 120ms ease;
+}
+
+.book-cluster-map-label {
+  font-size: 11px;
+  fill: var(--text-h);
+  pointer-events: none;
+}

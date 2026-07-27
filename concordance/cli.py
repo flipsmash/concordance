@@ -705,6 +705,34 @@ def author_clustering(
                   f"-> [bold]{stats['clusters']}[/bold] clusters")
 
 
+@app.command("book-clustering")
+def book_clustering(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    top_n: int = typer.Option(200, "--top-n", help="Number of books (by word count) to cluster."),
+    n_clusters: int = typer.Option(12, "--n-clusters", help="Target cluster count (fcluster maxclust)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Hierarchical clustering + 2D (classical MDS) projection over the
+    top-N books by word count -- the data behind the cluster map,
+    similarity matrix, and dendrogram views, one level down from
+    author-clustering. Same IDF-weighted cosine metric as book-similarity
+    (corpus-wide, not scoped to the top-N), so the map's positions and
+    book-similarity's scores stay consistent. Always recomputes the whole
+    top-N set in one pass -- see compute_book_clustering's docstring for
+    why a partial write here would be worse than in book-similarity/
+    author-similarity."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    with console.status("[bold]Clustering books by vocabulary overlap…"):
+        stats = db.compute_book_clustering(conn, schema, top_n=top_n, n_clusters=n_clusters)
+    conn.close()
+    console.print(f"[green]✓[/green] book-clustering: [bold]{stats['books']}[/bold] books "
+                  f"-> [bold]{stats['clusters']}[/bold] clusters")
+
+
 @app.command("dedupe-plurals")
 def dedupe_plurals(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
@@ -1040,6 +1068,7 @@ def maintain(
     skip_quizzable: bool = typer.Option(False, "--skip-quizzable"),
     skip_calibrate_difficulty: bool = typer.Option(False, "--skip-calibrate-difficulty"),
     skip_book_similarity: bool = typer.Option(False, "--skip-book-similarity"),
+    skip_book_clustering: bool = typer.Option(False, "--skip-book-clustering"),
     skip_author_similarity: bool = typer.Option(False, "--skip-author-similarity"),
     skip_author_clustering: bool = typer.Option(False, "--skip-author-clustering"),
     skip_wordnik: bool = typer.Option(False, "--skip-wordnik", help="Skip the wordnik-pron fetch step."),
@@ -1053,8 +1082,9 @@ def maintain(
     """Run the full post-ingest maintenance chain in dependency order:
     fill-definitions -> classify -> normalize-pos -> ngram -> archaic ->
     difficulty -> quizdef -> quizzable -> calibrate-difficulty ->
-    book-similarity -> author-similarity -> author-clustering ->
-    wordnik-pron -> ipa -> embed -> backfill-analogies. This is the whole documented sequence from the README's
+    book-similarity -> book-clustering -> author-similarity ->
+    author-clustering -> wordnik-pron -> ipa -> embed -> backfill-analogies.
+    This is the whole documented sequence from the README's
     "Backfilling definitions" / "Enrichment & scoring" / "Definition-quality
     cleanup" / "Pronunciation audio" / "Semantic distance" sections, chained
     into one command instead of twelve to remember and re-order by hand.
@@ -1179,6 +1209,14 @@ def maintain(
                       f"-> [bold]{stats['pairs_stored']}[/bold] related-book pairs stored")
     else:
         console.print("[dim]book-similarity skipped.[/dim]")
+
+    if not skip_book_clustering:
+        with console.status("[bold]Clustering books by vocabulary overlap…"):
+            stats = db.compute_book_clustering(conn, schema)
+        console.print(f"[green]✓[/green] book-clustering: [bold]{stats['books']}[/bold] books "
+                      f"-> [bold]{stats['clusters']}[/bold] clusters")
+    else:
+        console.print("[dim]book-clustering skipped.[/dim]")
 
     if not skip_author_similarity:
         with console.status("[bold]Computing author vocabulary overlap…"):

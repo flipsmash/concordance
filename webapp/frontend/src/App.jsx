@@ -27,6 +27,7 @@ const WorkDetail = lazy(() => import('./WorkDetail'))
 const BookRelatedness = lazy(() => import('./BookRelatedness'))
 const AuthorRelatedness = lazy(() => import('./AuthorRelatedness'))
 const AuthorsRelatedness = lazy(() => import('./AuthorsRelatedness'))
+const BooksRelatedness = lazy(() => import('./BooksRelatedness'))
 const Visualizations = lazy(() => import('./Visualizations'))
 const DomainMap = lazy(() => import('./DomainMap'))
 const Sets = lazy(() => import('./Sets'))
@@ -197,6 +198,14 @@ function App() {
               element={
                 <Suspense fallback={<div className="page-loading">Loading…</div>}>
                   <Books />
+                </Suspense>
+              }
+            />
+            <Route
+              path="books/relatedness"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <BooksRelatedness />
                 </Suspense>
               }
             />
