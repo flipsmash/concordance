@@ -29,8 +29,8 @@ function Visualizations() {
       <section className="browse-facets viz-section">
         <h2 className="viz-heading">Books by vocabulary overlap</h2>
         <p className="viz-description">
-          Pick a book to see the other books that share the most rare vocabulary with it, or view
-          every book at once.
+          Pick a book to see the other books that share the most rare vocabulary with it, or
+          browse the top books at once.
         </p>
         <div className="viz-author-row">
           <BookSelect
@@ -38,7 +38,7 @@ function Visualizations() {
             onPick={(book) => navigate(`/app/authors/${encodeURIComponent(book.author || '')}/${book.id}/relatedness`)}
           />
           <Link to="/app/books/relatedness" className="browse-quiz-link">
-            See all books at once →
+            See the top books at once →
           </Link>
         </div>
       </section>
@@ -46,8 +46,8 @@ function Visualizations() {
       <section className="browse-facets viz-section">
         <h2 className="viz-heading">Authors by vocabulary overlap</h2>
         <p className="viz-description">
-          Pick an author to see who shares the most rare vocabulary with them, or view every
-          author at once.
+          Pick an author to see who shares the most rare vocabulary with them, or browse the top
+          authors at once.
         </p>
         <div className="viz-author-row">
           <AuthorSelect
@@ -55,7 +55,7 @@ function Visualizations() {
             onChange={(author) => author && navigate(`/app/authors/${encodeURIComponent(author)}/relatedness`)}
           />
           <Link to="/app/authors/relatedness" className="browse-quiz-link">
-            See all authors at once →
+            See the top authors at once →
           </Link>
         </div>
       </section>

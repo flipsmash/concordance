@@ -689,7 +689,7 @@ Every relatedness view in one place, linked from the main Browse page:
   exactly the pair being compared. The precomputed top-k tables above only
   ever answer *how* related two things are; this is the only view that
   answers *in what words*.
-- **All authors/books at once** (`/app/authors/relatedness`,
+- **Top authors/books at once** (`/app/authors/relatedness`,
   `/app/books/relatedness`) — four tabs over one shared clustering run
   (`author-clustering` / `book-clustering` respectively): a **cluster map**
   (default — position and color are principled, derived from real
@@ -707,6 +707,10 @@ Every relatedness view in one place, linked from the main Browse page:
   books) — an unbounded 11k-book or 3.5k-author force-directed layout would
   be an unreadable hairball regardless of compute cost, so a bounded,
   principled subset stands in for "everything," same reasoning either way.
+  The page header shows the real, live count (`Top {N} authors`/`books`),
+  not a hardcoded "all," and the highlight search box only offers entities
+  actually in that run — picking from the full corpus meant most picks
+  landed on "isn't in this view," a control that mostly didn't work.
 - **Discipline-category relationship map** (`/app/visualizations/domain-map`)
   — a different axis entirely from every view above: instead of
   shared-vocabulary overlap, this positions books (≥50 words) and authors
@@ -821,7 +825,22 @@ export, scanned-PDF OCR, a curated names/gazetteer list to close the one
 known gap in proper-noun filtering (every validity authority is itself
 somewhat name-polluted; deliberately not started — see
 `concordance/validity.py`'s module docstring for the shape of the gap if
-picking this up).
+picking this up), and a genuinely full-corpus (or near-it) relatedness
+view — the cluster map/matrix/dendrogram pages are honestly labeled "top
+N," not "all," because both the clustering math (an n×n distance matrix
+plus its `eigh` call) and the rendering itself (an 11k-leaf dendrogram or
+an 11k×11k matrix is illegible regardless of how fast it loads) stop being
+tractable well before real corpus scale. Two separate pieces, neither
+started: (1) a standalone `concordance full-relatedness`-style maintenance
+command — deliberately NOT folded into `maintain` any more than
+`commons-download`/`audio` are, since a real full-corpus run (as opposed
+to today's top-200) is a heavy, occasional, run-it-yourself pass, not
+routine per-batch upkeep — that computes the complete all-by-all
+similarity/clustering rather than a top-N subset; (2) a new frontend view
+actually capable of showing that many entities usefully (a
+searchable/filterable list, level-of-detail zoom), since the current
+map/matrix/dendrogram components would stay illegible at that scale no
+matter how the data behind them is computed.
 
 CSV-based ingestion (`run` → hand-edit → `finalize` → `sync-db`) still works
 but is no longer the primary workflow — `ingest` writing straight to Postgres,
