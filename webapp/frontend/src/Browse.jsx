@@ -56,6 +56,7 @@ function Browse() {
   const author = searchParams.get('author')
   const bookIds = searchParams.getAll('book_id')
   const domains = searchParams.getAll('domain')
+  const topCodes = searchParams.getAll('top_code')
   const difficultyMin = searchParams.get('difficulty_min') || ''
   const difficultyMax = searchParams.get('difficulty_max') || ''
   const archaic = searchParams.getAll('archaic')
@@ -92,6 +93,18 @@ function Browse() {
       next.delete('domain')
       const nextList = current.includes(bucket) ? current.filter((d) => d !== bucket) : [...current, bucket]
       nextList.forEach((d) => next.append('domain', d))
+    })
+  }
+
+  // top_code has no clickable facet row of its own here (21 fields is too
+  // many for a chip row) -- it only ever arrives via a Categories
+  // field-detail deep link (/app/browse?top_code=X), and is otherwise only
+  // removable from the active-filter shelf below.
+  function removeTopCode(code) {
+    updateParams((next) => {
+      const current = next.getAll('top_code')
+      next.delete('top_code')
+      current.filter((c) => c !== code).forEach((c) => next.append('top_code', c))
     })
   }
 
@@ -132,7 +145,7 @@ function Browse() {
   }
 
   const activeFacetCount =
-    (author ? 1 : 0) + bookIds.length + domains.length +
+    (author ? 1 : 0) + bookIds.length + domains.length + topCodes.length +
     (difficultyMin || difficultyMax ? 1 : 0) + archaic.length +
     (quizzableOnly ? 1 : 0) + (letter ? 1 : 0)
 
@@ -146,6 +159,7 @@ function Browse() {
     if (author) p.set('author', author)
     bookIds.forEach((id) => p.append('book_id', id))
     domains.forEach((d) => p.append('domain', d))
+    topCodes.forEach((c) => p.append('top_code', c))
     if (difficultyMin !== '') p.set('difficulty_min', difficultyMin)
     if (difficultyMax !== '') p.set('difficulty_max', difficultyMax)
     archaic.forEach((a) => p.append('archaic', a))
@@ -185,6 +199,18 @@ function Browse() {
   }, [paramsKey])
 
   const bucketName = Object.fromEntries(domainCounts.map((d) => [d.bucket, d.name]))
+
+  // --- top_code facet: no chip row of its own (see removeTopCode above),
+  // just a name lookup for the active-filter shelf. Fetched once, unfiltered
+  // -- unlike domainCounts this never needs to reflect other active facets,
+  // it only ever supplies display names for whatever codes are in the URL.
+  const [topCodeNames, setTopCodeNames] = useState({})
+  useEffect(() => {
+    fetch(`${API_BASE}/api/browse/category-counts`)
+      .then((res) => res.json())
+      .then((data) => setTopCodeNames(Object.fromEntries(data.map((c) => [c.code, c.name]))))
+      .catch(() => {})
+  }, [])
 
   // --- difficulty facet: dual input + a band histogram -----------------------
   const [bands, setBands] = useState([])
@@ -232,6 +258,7 @@ function Browse() {
       author: author || '',
       book_id: bookIds,
       domain: domains,
+      top_code: topCodes,
       difficulty_min: difficultyMin,
       difficulty_max: difficultyMax,
       archaic,
@@ -370,6 +397,11 @@ function Browse() {
             {domains.map((d) => (
               <button type="button" key={d} className="browse-chip" onClick={() => toggleDomain(d)}>
                 Domain: {bucketName[d] || d} ×
+              </button>
+            ))}
+            {topCodes.map((c) => (
+              <button type="button" key={c} className="browse-chip" onClick={() => removeTopCode(c)}>
+                Field: {topCodeNames[c] || c} ×
               </button>
             ))}
             {(difficultyMin || difficultyMax) && (

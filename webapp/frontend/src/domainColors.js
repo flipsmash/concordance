@@ -16,8 +16,10 @@ export const DOMAIN_COLORS = {
   time_space_commerce: { light: '#eb6834', dark: '#d95926' },
 }
 
-// Client-side-only concept for words with no USAS category yet (~90% of the
-// corpus today) — not a real bucket, so it's not part of the backend legend.
+// Client-side-only concept for words with no USAS category yet (a live
+// corpus scan found coverage is actually ~99.99% today, so this is a rare
+// edge case, not the common case) — not a real bucket, so it's not part of
+// the backend legend.
 export const UNCATEGORIZED_GRAY = '#898781'
 
 export function isDark() {

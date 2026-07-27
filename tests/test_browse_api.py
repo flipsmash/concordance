@@ -87,6 +87,21 @@ def _insert_word(conn, schema, lemma, *, definition="a definition", pos="noun",
     return wid
 
 
+def _insert_bulk_words(conn, schema, prefix, n):
+    """N distinct plain words in one round trip -- for tests that need a
+    book/author to clear a qualification floor (e.g. category-leaders' 50-
+    words/book minimum) without a slow one-row-at-a-time loop."""
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""INSERT INTO {schema}.word (lemma, definition, part_of_speech, active)
+                SELECT %s || gs::text, 'a definition', 'noun', true
+                FROM generate_series(1, %s) AS gs
+                RETURNING id""",
+            (prefix, n),
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
 def _insert_book(conn, schema, title, author=None):
     with conn.cursor() as cur:
         cur.execute(
@@ -863,5 +878,129 @@ def test_authors_matrix_and_dendrogram_read_the_same_clustering_run():
         assert set(dendro["leaf_order"]) == set(matrix["authors"])
         assert dendro["tree"]["size"] == 10
         assert dendro["tree"]["left"] is not None and dendro["tree"]["right"] is not None
+    finally:
+        restore()
+
+
+# --- Categories section: top_code filter, category-counts, category-leaders ----
+
+@pg
+def test_top_code_filters_to_one_field_not_the_whole_bucket():
+    # "S" (People) and "G" (Government) both live in the people_society
+    # bucket -- domain=people_society must match both, but top_code=S is the
+    # level-2 drill-down and must match only the "S" word.
+    schema = "cc_test_browse_topcode"
+    client, conn, restore = _setup(schema)
+    try:
+        cat_s = _category(conn, schema, "S", "People Test")
+        cat_g = _category(conn, schema, "G", "Government Test")
+
+        s_word = _insert_word(conn, schema, "peopleword")
+        _tag_domain(conn, schema, s_word, cat_s)
+        g_word = _insert_word(conn, schema, "govword")
+        _tag_domain(conn, schema, g_word, cat_g)
+        conn.commit()
+
+        res = client.get("/api/browse/words", params={"domain": ["people_society"]})
+        lemmas = {w["lemma"] for w in res.json()["items"]}
+        assert lemmas == {"peopleword", "govword"}
+
+        res2 = client.get("/api/browse/words", params={"top_code": ["S"]})
+        lemmas2 = {w["lemma"] for w in res2.json()["items"]}
+        assert lemmas2 == {"peopleword"}
+    finally:
+        restore()
+
+
+@pg
+def test_category_counts_scoped_by_bucket_and_unscoped():
+    schema = "cc_test_browse_catcounts"
+    client, conn, restore = _setup(schema)
+    try:
+        cat_people = _category(conn, schema, "S", "People Test")
+        tagged = _insert_word(conn, schema, "peopleword")
+        _tag_domain(conn, schema, tagged, cat_people)
+        conn.commit()
+
+        # Unscoped: all 21 USAS top-level fields, zero-count ones included --
+        # usas.categories() is a fixed module-level constant, not read from
+        # this (empty) test schema's own category table.
+        all_counts = client.get("/api/browse/category-counts").json()
+        assert len(all_counts) == 21
+        by_code = {c["code"]: c for c in all_counts}
+        assert by_code["S"]["word_count"] == 1
+        assert by_code["S"]["bucket"] == "people_society"
+        assert by_code["F"]["word_count"] == 0
+
+        # Scoped to the bucket "S" belongs to: only that bucket's own codes.
+        scoped = client.get("/api/browse/category-counts", params={"bucket": "people_society"}).json()
+        assert {c["code"] for c in scoped} == {"B", "S", "G", "Z"}
+
+        assert client.get("/api/browse/category-counts", params={"bucket": "not_a_real_bucket"}).status_code == 404
+    finally:
+        restore()
+
+
+@pg
+def test_category_leaders_ranks_by_lift_not_raw_count():
+    # Regression target: _domain_vectors_to_map's own docstring found that a
+    # raw-share argmax lands on one field for 82% of books, because some
+    # fields are corpus-wide dominant everywhere -- ranking leaders by raw
+    # category word COUNT has the analogous failure (the same prolific
+    # author/long book tops every category's list). This asserts
+    # /api/browse/category-leaders instead ranks by LIFT: a book that leans
+    # harder on a category (bigger SHARE), even with a smaller raw count,
+    # must outrank a book with a bigger raw count but a smaller share.
+    schema = "cc_test_browse_leaders"
+    client, conn, restore = _setup(schema)
+    try:
+        cat_f = _category(conn, schema, "F", "Food and Farming Test")
+
+        prolific = _insert_book(conn, schema, "Prolific Tome", author="Prolific, Writer")
+        focused = _insert_book(conn, schema, "Focused Pamphlet", author="Focused, Writer")
+
+        # Both clear the 50-word/book qualification floor.
+        prolific_words = _insert_bulk_words(conn, schema, "prolific", 200)
+        focused_words = _insert_bulk_words(conn, schema, "focused", 50)
+        for wid in prolific_words:
+            _link(conn, schema, wid, prolific)
+        for wid in focused_words:
+            _link(conn, schema, wid, focused)
+
+        # Prolific: 30/200 = 15% share, the bigger raw count (30 > 20).
+        # Focused: 20/50 = 40% share, the smaller raw count but far bigger share.
+        for wid in prolific_words[:30]:
+            _tag_domain(conn, schema, wid, cat_f)
+        for wid in focused_words[:20]:
+            _tag_domain(conn, schema, wid, cat_f)
+        conn.commit()
+
+        res = client.get("/api/browse/category-leaders", params={"entity": "book", "top_code": "F"})
+        assert res.status_code == 200, res.text
+        data = res.json()
+        titles = [item["label"] for item in data["items"]]
+        assert titles[0] == "Focused Pamphlet", (
+            f"expected the higher-SHARE book to rank first despite a lower raw "
+            f"category word count, got order {titles}"
+        )
+        by_title = {item["label"]: item for item in data["items"]}
+        assert by_title["Prolific Tome"]["category_word_count"] == 30
+        assert by_title["Focused Pamphlet"]["category_word_count"] == 20
+        assert by_title["Focused Pamphlet"]["share"] > by_title["Prolific Tome"]["share"]
+        assert by_title["Focused Pamphlet"]["lift"] > by_title["Prolific Tome"]["lift"]
+    finally:
+        restore()
+
+
+@pg
+def test_category_leaders_requires_exactly_one_scope_param():
+    schema = "cc_test_browse_leaders_scope"
+    client, conn, restore = _setup(schema)
+    try:
+        assert client.get("/api/browse/category-leaders").status_code == 400
+        both = client.get("/api/browse/category-leaders",
+                           params={"bucket": "nature_science", "top_code": "F"})
+        assert both.status_code == 400
+        assert client.get("/api/browse/category-leaders", params={"bucket": "not_a_real_bucket"}).status_code == 404
     finally:
         restore()

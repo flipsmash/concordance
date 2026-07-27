@@ -28,6 +28,9 @@ const BookRelatedness = lazy(() => import('./BookRelatedness'))
 const AuthorRelatedness = lazy(() => import('./AuthorRelatedness'))
 const AuthorsRelatedness = lazy(() => import('./AuthorsRelatedness'))
 const BooksRelatedness = lazy(() => import('./BooksRelatedness'))
+const CategoriesOverview = lazy(() => import('./CategoriesOverview'))
+const CategoryBucketDetail = lazy(() => import('./CategoryBucketDetail'))
+const CategoryFieldDetail = lazy(() => import('./CategoryFieldDetail'))
 const Visualizations = lazy(() => import('./Visualizations'))
 const DomainMap = lazy(() => import('./DomainMap'))
 const Sets = lazy(() => import('./Sets'))
@@ -254,6 +257,30 @@ function App() {
               element={
                 <Suspense fallback={<div className="page-loading">Loading…</div>}>
                   <BookRelatedness />
+                </Suspense>
+              }
+            />
+            <Route
+              path="categories"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <CategoriesOverview />
+                </Suspense>
+              }
+            />
+            <Route
+              path="categories/:bucket"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <CategoryBucketDetail />
+                </Suspense>
+              }
+            />
+            <Route
+              path="categories/:bucket/:code"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <CategoryFieldDetail />
                 </Suspense>
               }
             />

@@ -113,12 +113,20 @@ def _build_word_filters(
     archaic: list[str],
     pos: list[str],
     quizzable_only: bool,
+    top_code: list[str] = [],
 ) -> tuple[list[str], list]:
     """The combinable-facet WHERE clause every endpoint below shares, each
     facet independently optional -- author and book_id can both be set at
     once (author picked, then narrowed to one of their books), not mutually
     exclusive branches. `w`/`wd` alias `word`/`word_difficulty` (LEFT JOIN)
-    in every caller."""
+    in every caller.
+
+    `top_code` is a second, independent category filter alongside `domain`:
+    `domain` resolves a 6-hue bucket key to its member USAS top-level codes
+    (usas_domains.DOMAIN_BUCKETS), while `top_code` matches one or more raw
+    USAS top-level codes (e.g. "S") directly, with no bucket indirection --
+    the level-2 (single discourse field) Categories drill-down needs this,
+    since a field's own code generally isn't a bucket key."""
     filters = ["w.active"]
     params: list = []
 
@@ -145,6 +153,13 @@ def _build_word_filters(
                             WHERE wc.word_id = w.id AND left(c.code, 1) = ANY(%s))"""
             )
             params.append(codes)
+    if top_code:
+        filters.append(
+            f"""EXISTS (SELECT 1 FROM {_main.SCHEMA}.word_category wc
+                        JOIN {_main.SCHEMA}.category c ON c.id = wc.category_id
+                        WHERE wc.word_id = w.id AND left(c.code, 1) = ANY(%s))"""
+        )
+        params.append(top_code)
     if archaic:
         filters.append("wd.archaic = ANY(%s)")
         params.append(archaic)
@@ -1269,6 +1284,7 @@ def browse_words(
     author: str | None = None,
     book_id: list[int] = Query([]),
     domain: list[str] = Query([]),
+    top_code: list[str] = Query([]),
     difficulty_min: float | None = None,
     difficulty_max: float | None = None,
     archaic: list[str] = Query([]),
@@ -1284,7 +1300,7 @@ def browse_words(
     _: dict = Depends(_main.require_viewer),
 ) -> BrowseWordPage:
     filters, params = _build_word_filters(
-        author, book_id, domain, difficulty_min, difficulty_max, archaic, pos, quizzable_only
+        author, book_id, domain, difficulty_min, difficulty_max, archaic, pos, quizzable_only, top_code
     )
     if letter:
         filters.append("w.lemma_lc LIKE %s")
@@ -1526,6 +1542,211 @@ def browse_pos_values(_: dict = Depends(_main.require_viewer)) -> list[str]:
                 ORDER BY 1"""
         )
         return [r[0] for r in cur.fetchall()]
+
+
+# --- /api/browse/category-counts --------------------------------------------------
+
+class CategoryCount(BaseModel):
+    code: str
+    name: str
+    bucket: str | None
+    word_count: int
+
+
+@router.get("/api/browse/category-counts", response_model=list[CategoryCount])
+def browse_category_counts(
+    bucket: str | None = None,
+    _: dict = Depends(_main.require_viewer),
+) -> list[CategoryCount]:
+    """Word count per USAS top-level discourse field (21 total), optionally
+    narrowed to one bucket's member codes -- feeds the Categories section's
+    level-2 (bucket detail) field subgrid. A single GROUP BY left(c.code, 1),
+    not _bucket_counts's sequential-EXISTS-per-bucket loop: that loop exists
+    because the 6 BUCKETS can each match more than one top-level code and a
+    word can straddle two different buckets, so summing independent bucket
+    counts would double count a word across buckets. Here every row is
+    already grouped by its own single top-level code, so one query is both
+    correct and 21x cheaper."""
+    if bucket is not None and bucket not in usas_domains.DOMAIN_BUCKETS:
+        raise HTTPException(404, f"unknown bucket {bucket!r}")
+    codes = usas_domains.DOMAIN_BUCKETS[bucket]["codes"] if bucket else _TOP_CODES
+
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT left(c.code, 1) AS top, count(DISTINCT w.id)
+                FROM {_main.SCHEMA}.word w
+                JOIN {_main.SCHEMA}.word_category wc ON wc.word_id = w.id
+                JOIN {_main.SCHEMA}.category c ON c.id = wc.category_id
+                WHERE w.active AND left(c.code, 1) = ANY(%s)
+                GROUP BY left(c.code, 1)""",
+            (codes,),
+        )
+        counts = dict(cur.fetchall())
+
+    return [
+        CategoryCount(code=code, name=_TOP_CODE_NAMES[code], bucket=usas_domains.bucket_for(code),
+                      word_count=counts.get(code, 0))
+        for code in codes
+    ]
+
+
+# --- /api/browse/category-leaders ---------------------------------------------------
+
+class CategoryLeaderRow(BaseModel):
+    id: str            # book id (as a string) or author name -- same convention as DomainMapNode
+    label: str
+    subtitle: str | None  # author (book rows only); None for author rows
+    total_word_count: int
+    category_word_count: int
+    share: float        # category_word_count / total_word_count
+    lift: float          # share / mean(share) across every qualifying entity in this ranking
+
+
+class CategoryLeaderPage(BaseModel):
+    entity: Literal["book", "author"]
+    items: list[CategoryLeaderRow]
+    total: int
+    page: int
+    page_size: int
+
+
+@router.get("/api/browse/category-leaders", response_model=CategoryLeaderPage)
+def browse_category_leaders(
+    entity: Literal["book", "author"] = "book",
+    bucket: str | None = None,
+    top_code: str | None = None,
+    min_words: int = Query(0, ge=0, description="Overrides the entity's own default floor (50 for books, 100 for authors) if higher."),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    _: dict = Depends(_main.require_viewer),
+) -> CategoryLeaderPage:
+    """Ranked "who/what leans on this category's vocabulary the most" list --
+    the Categories section's core drill-down mechanism, at either the
+    broadest (bucket) or secondary (single top-level field) granularity.
+
+    Deliberately NOT a deep-link into /api/browse/authors|books with their
+    existing `domain` filter: passing `domain` there makes THEIR OWN
+    word_count column silently mean "words in this domain" rather than total
+    vocabulary, and sorting by it ranks by raw count -- which
+    _domain_vectors_to_map's own docstring already found empirically useless
+    as an intensity signal (a raw-share argmax landed on one field for 82%
+    of books, since some fields are corpus-wide dominant everywhere). This
+    endpoint applies the same fix that function does: rank by LIFT (an
+    entity's own share of the category, divided by the qualifying
+    population's OWN mean share for it), not raw share or raw count.
+
+    Exactly one of `bucket`/`top_code` is required -- `bucket` resolves to
+    its member USAS top-level codes (usas_domains.DOMAIN_BUCKETS); `top_code`
+    is used directly, for the level-2 single-field drill-down. Same
+    qualification floors as /api/browse/domain-map (50 words/book, 100/
+    author): below that a category share is mostly sampling noise, and
+    without a floor a book with 3 words all in one field would rank #1 on
+    lift alone.
+    """
+    if bool(bucket) == bool(top_code):
+        raise HTTPException(400, "exactly one of bucket or top_code is required")
+    if bucket is not None:
+        if bucket not in usas_domains.DOMAIN_BUCKETS:
+            raise HTTPException(404, f"unknown bucket {bucket!r}")
+        codes = usas_domains.DOMAIN_BUCKETS[bucket]["codes"]
+    else:
+        codes = [top_code]
+
+    default_floor = 50 if entity == "book" else 100
+    floor = max(min_words, default_floor)
+
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        if entity == "book":
+            cur.execute(
+                f"""WITH book_words AS (
+                        SELECT b.id, b.title, b.author, w.id AS word_id
+                        FROM {_main.SCHEMA}.book b
+                        JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
+                        JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id AND w.active
+                    ),
+                    book_totals AS (
+                        SELECT id, title, author, count(DISTINCT word_id) AS total
+                        FROM book_words
+                        GROUP BY id, title, author
+                        HAVING count(DISTINCT word_id) >= %s
+                    ),
+                    book_cat AS (
+                        SELECT bt.id, count(DISTINCT bw.word_id) AS cat_count
+                        FROM book_totals bt
+                        JOIN book_words bw ON bw.id = bt.id
+                        JOIN {_main.SCHEMA}.word_category wc ON wc.word_id = bw.word_id
+                        JOIN {_main.SCHEMA}.category c ON c.id = wc.category_id AND left(c.code, 1) = ANY(%s)
+                        GROUP BY bt.id
+                    )
+                    SELECT bt.id::text, bt.title, bt.author, bt.total, coalesce(bc.cat_count, 0)
+                    FROM book_totals bt
+                    LEFT JOIN book_cat bc ON bc.id = bt.id""",
+                (floor, codes),
+            )
+        else:
+            cur.execute(
+                f"""WITH author_words AS (
+                        SELECT DISTINCT b.author, w.id AS word_id
+                        FROM {_main.SCHEMA}.book b
+                        JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
+                        JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id AND w.active
+                        WHERE b.author IS NOT NULL AND b.author != ALL(%s)
+                    ),
+                    author_totals AS (
+                        SELECT author, count(DISTINCT word_id) AS total
+                        FROM author_words
+                        GROUP BY author
+                        HAVING count(DISTINCT word_id) >= %s
+                    ),
+                    author_cat AS (
+                        SELECT at.author, count(DISTINCT aw.word_id) AS cat_count
+                        FROM author_totals at
+                        JOIN author_words aw ON aw.author = at.author
+                        JOIN {_main.SCHEMA}.word_category wc ON wc.word_id = aw.word_id
+                        JOIN {_main.SCHEMA}.category c ON c.id = wc.category_id AND left(c.code, 1) = ANY(%s)
+                        GROUP BY at.author
+                    )
+                    SELECT at.author, at.author, NULL::text, at.total, coalesce(ac.cat_count, 0)
+                    FROM author_totals at
+                    LEFT JOIN author_cat ac ON ac.author = at.author""",
+                (list(PLACEHOLDER_AUTHORS), floor, codes),
+            )
+        rows = cur.fetchall()
+
+    entries = []
+    for id_, label, subtitle, total, cat_count in rows:
+        share = cat_count / total if total else 0.0
+        entries.append({"id": id_, "label": label, "subtitle": subtitle,
+                         "total": total, "cat_count": cat_count, "share": share})
+
+    if not entries:
+        return CategoryLeaderPage(entity=entity, items=[], total=0, page=page, page_size=page_size)
+
+    # Same lift definition _domain_vectors_to_map uses: this entity's share
+    # divided by the unweighted mean share across every OTHER qualifying
+    # entity in this same ranking -- "leans on this MORE than a typical
+    # qualifying book/author does," not "has a high raw share" (which a
+    # corpus-wide-dominant field would win everywhere) or "has a high raw
+    # count" (which a long book/prolific author would win everywhere).
+    mean_share = sum(e["share"] for e in entries) / len(entries)
+    mean_share = mean_share or 1e-9  # guard only -- unreachable while any entity has >0 words in these codes
+    for e in entries:
+        e["lift"] = e["share"] / mean_share
+
+    entries.sort(key=lambda e: e["lift"], reverse=True)
+    total_count = len(entries)
+    start = (page - 1) * page_size
+    page_entries = entries[start:start + page_size]
+
+    items = [
+        CategoryLeaderRow(
+            id=e["id"], label=e["label"], subtitle=e["subtitle"],
+            total_word_count=e["total"], category_word_count=e["cat_count"],
+            share=round(e["share"], 4), lift=round(e["lift"], 3),
+        )
+        for e in page_entries
+    ]
+    return CategoryLeaderPage(entity=entity, items=items, total=total_count, page=page, page_size=page_size)
 
 
 # --- /api/browse/domain-map ------------------------------------------------------

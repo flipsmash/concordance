@@ -14,6 +14,7 @@ const SECTIONS = [
   { key: 'browse', letter: 'B', label: 'Browse', to: '/app', end: true },
   { key: 'books', letter: '❦', label: 'Books', to: '/app/books' },
   { key: 'authors', letter: 'A', label: 'Authors', to: '/app/authors' },
+  { key: 'categories', letter: 'C', label: 'Categories', to: '/app/categories' },
   { key: 'visualizations', letter: 'V', label: 'Visuals', to: '/app/visualizations' },
   { key: 'quiz', letter: 'Q', label: 'Quiz', to: '/app/quiz' },
   { key: 'progress', letter: 'P', label: 'Progress', to: '/app/progress' },
