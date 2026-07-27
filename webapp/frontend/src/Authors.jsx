@@ -1,10 +1,34 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import AlphabetStrip from './AlphabetStrip'
+import SortControl from './SortControl'
 import { usePagedTable } from './usePagedTable'
 import './Authors.css'
 
 const API_BASE = ''
 const PAGE_SIZE = 30
+
+const SORT_FIELDS = [
+  { key: 'author', label: 'Name (A–Z)' },
+  { key: 'book_count', label: 'Work count' },
+  { key: 'word_count', label: 'Word count' },
+  { key: 'difficulty', label: 'Avg. difficulty' },
+  { key: 'density', label: 'Vocabulary density' },
+  { key: 'overall_difficulty', label: 'Overall difficulty' },
+]
+
+// Same shape as bookDifficulty.js's densityLabel/overallDifficultyLabel --
+// kept local since AuthorRow is a distinct shape from BookRow (mean of
+// per-book densities, not a single book's own), used in only this one place.
+function densityLabel(density) {
+  if (density == null) return null
+  return `${(density * 100).toFixed(1)}% vocabulary density`
+}
+
+function overallDifficultyLabel(overall) {
+  if (overall == null) return null
+  return `Harder than ${overall}% of the corpus`
+}
 
 // Level 1 of the author drilldown: every author, browsable/searchable.
 // Companion to the faceted Browse page, not a replacement -- a hierarchical
@@ -13,19 +37,25 @@ function Authors() {
   const navigate = useNavigate()
   const [query, setQuery] = useState('')
   const [debounced, setDebounced] = useState('')
+  const [letter, setLetter] = useState(null)
 
   useEffect(() => {
     const handle = setTimeout(() => setDebounced(query.trim()), 200)
     return () => clearTimeout(handle)
   }, [query])
 
-  const { items, total, page, setPage, loading, error, totalPages } = usePagedTable({
+  const { items, total, page, setPage, sort, dir, handleSort, loading, error, totalPages } = usePagedTable({
     endpoint: '/api/browse/authors',
     pageSize: PAGE_SIZE,
     defaultSort: 'author',
     defaultDir: 'asc',
-    extraParams: { q: debounced },
+    extraParams: { q: debounced, letter },
   })
+
+  function changeLetter(l) {
+    setLetter(l)
+    setPage(1)
+  }
 
   function surpriseMe() {
     fetch(`${API_BASE}/api/browse/authors?random=true`)
@@ -56,22 +86,34 @@ function Authors() {
         autoFocus
       />
 
+      <div className="authors-toolbar">
+        <AlphabetStrip letter={letter} onChange={changeLetter} />
+        <SortControl fields={SORT_FIELDS} sort={sort} dir={dir} onSort={handleSort} />
+      </div>
+
       {error && <div className="error-banner">{error}</div>}
 
       <ul className="authors-list">
-        {items.map((a) => (
-          <li
-            key={a.author}
-            className="authors-row"
-            onClick={() => navigate(`/app/authors/${encodeURIComponent(a.author)}`)}
-          >
-            <span className="authors-name">{a.author}</span>
-            <span className="authors-counts">
-              {a.book_count} {a.book_count === 1 ? 'work' : 'works'} · {a.word_count}{' '}
-              {a.word_count === 1 ? 'word' : 'words'}
-            </span>
-          </li>
-        ))}
+        {items.map((a) => {
+          const density = densityLabel(a.density)
+          const overall = overallDifficultyLabel(a.overall_difficulty)
+          return (
+            <li
+              key={a.author}
+              className="authors-row"
+              onClick={() => navigate(`/app/authors/${encodeURIComponent(a.author)}`)}
+            >
+              <span className="authors-name">{a.author}</span>
+              <span className="authors-counts">
+                {a.book_count} {a.book_count === 1 ? 'work' : 'works'} · {a.word_count}{' '}
+                {a.word_count === 1 ? 'word' : 'words'}
+                {a.mean_difficulty != null && <span> · {a.mean_difficulty.toFixed(1)} avg. difficulty</span>}
+                {density && <span> · {density}</span>}
+                {overall && <span> · {overall}</span>}
+              </span>
+            </li>
+          )
+        })}
         {!loading && items.length === 0 && <li className="authors-empty">No authors match.</li>}
       </ul>
 

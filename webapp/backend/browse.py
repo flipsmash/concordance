@@ -62,6 +62,37 @@ _WORD_SORT_COLUMNS = {
     "part_of_speech": "w.part_of_speech",
 }
 
+_BOOK_SORT_COLUMNS = {
+    "title": "sort_title",
+    "word_count": "word_count",
+    "difficulty": "mean_difficulty",
+    "density": "density",
+    "overall_difficulty": "overall_difficulty",
+}
+_AUTHOR_SORT_COLUMNS = {
+    "author": "author",
+    "book_count": "book_count",
+    "word_count": "word_count",
+    "difficulty": "mean_difficulty",
+    "density": "density",
+    "overall_difficulty": "overall_difficulty",
+}
+# difficulty/density/overall_difficulty are all sparse (a book with no scored
+# words, or no distinct_nonstop_word_count from archive_metadata.py, has no
+# value for them) -- NULLS LAST is required explicitly for both directions,
+# since Postgres's implicit default flips between ASC (NULLS LAST already)
+# and DESC (NULLS FIRST by default, which would float unscored books to the
+# top of a "hardest first" sort).
+_NULLABLE_SORTS = {"difficulty", "density", "overall_difficulty"}
+
+# A leading "The"/"A"/"An" is stripped before alphabetizing or bucketing by
+# first letter -- a live corpus scan found 4176 of 11357 titles (37%) start
+# with "The", which would otherwise pile more than a third of the corpus
+# into one letter and make both plain alphabetical sort and an A-Z strip
+# nearly useless. Standard library-catalog convention, not a display change:
+# the title itself is shown unchanged, only its sort/bucket key is affected.
+_SORT_TITLE_EXPR = "regexp_replace(lower(b.title), '^(the|a|an)\\s+', '')"
+
 
 # --- shared filter builder ----------------------------------------------------
 
@@ -130,6 +161,16 @@ class AuthorRow(BaseModel):
     author: str
     book_count: int
     word_count: int
+    scored_word_count: int
+    mean_difficulty: float | None
+    stddev_difficulty: float | None
+    density: float | None  # mean of this author's own per-book densities (see
+                            # BookRow.density) -- NOT unique words / summed
+                            # distinct_nonstop_word_count, which would grow
+                            # the denominator with book_count while the
+                            # (deduped) numerator saturates, systematically
+                            # crushing prolific authors' density.
+    overall_difficulty: float | None  # see BookRow.overall_difficulty
 
 
 class AuthorPage(BaseModel):
@@ -149,10 +190,11 @@ def browse_authors(
     archaic: list[str] = Query([]),
     pos: list[str] = Query([]),
     quizzable_only: bool = False,
+    letter: str | None = Query(None, min_length=1, max_length=1),
     random: bool = False,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
-    sort: Literal["author", "word_count"] = "word_count",
+    sort: Literal["author", "book_count", "word_count", "difficulty", "density", "overall_difficulty"] = "word_count",
     dir: Literal["asc", "desc"] = "desc",
     _: dict = Depends(_main.require_viewer),
 ) -> AuthorPage:
@@ -174,6 +216,16 @@ def browse_authors(
         filters.append("b.id = ANY(%s)")
         params.append(book_id)
     filters.append("b.author IS NOT NULL")
+    # PLACEHOLDER_AUTHORS ("Various", "Unknown Author", ...) are already
+    # excluded from author_similarity/clustering (db.py) but this listing
+    # endpoint never got the same filter -- live data showed "Various" alone
+    # accounts for 1193 books, enough to make it this corpus's single
+    # most-common "author" and dominate the A-Z strip's "V" bucket.
+    filters.append("b.author != ALL(%s)")
+    params.append(list(PLACEHOLDER_AUTHORS))
+    if letter:
+        filters.append("lower(left(b.author, 1)) = %s")
+        params.append(letter.lower())
     if q:
         filters.append("b.author ILIKE %s")
         params.append(f"%{q}%")
@@ -182,9 +234,10 @@ def browse_authors(
         order_by = "random()"
         limit = 1
     else:
-        order_col = "b.author" if sort == "author" else "word_count"
+        order_col = _AUTHOR_SORT_COLUMNS[sort]
         order_dir = "ASC" if dir == "asc" else "DESC"
-        order_by = f"{order_col} {order_dir}, b.author ASC"
+        nulls = " NULLS LAST" if sort in _NULLABLE_SORTS else ""
+        order_by = f"{order_col} {order_dir}{nulls}, author ASC"
         limit = page_size
     offset = 0 if random else (page - 1) * page_size
 
@@ -203,21 +256,103 @@ def browse_authors(
         )
         total = cur.fetchone()[0]
 
+        # Two independent DISTINCT sets, not one: a word appearing in two of
+        # an author's books must count once for word_count/mean_difficulty
+        # (else a word's difficulty is averaged in twice), while book_count
+        # obviously needs one row per book. Folding both into a single
+        # (author, book_id, word_id) DISTINCT and joining word_difficulty
+        # onto it would silently reintroduce that double-count for any word
+        # shared across an author's own books.
+        #
+        # density is the MEAN OF PER-BOOK densities, not
+        # (deduped word_count) / (summed distinct_nonstop_word_count) --
+        # the latter's denominator grows with book_count while the numerator
+        # saturates (an author's vocabulary overlaps across their own
+        # books), which would crush prolific authors' density purely as a
+        # function of how many books they wrote.
+        #
+        # overall_difficulty: see BookRow's docstring comment on the same
+        # field in browse_books below -- identical percent_rank-blend
+        # reasoning, computed here over authors instead of books.
         cur.execute(
-            f"""SELECT b.author, count(DISTINCT b.id) AS book_count, count(DISTINCT w.id) AS word_count
+            f"""
+            WITH book_word_counts AS (
+                SELECT b.author, b.id AS book_id, b.distinct_nonstop_word_count,
+                       count(DISTINCT w.id) AS book_word_count
                 FROM {_main.SCHEMA}.book b
                 JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
                 JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id
                 LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
                 WHERE {where}
-                GROUP BY b.author
-                ORDER BY {order_by}
-                LIMIT %s OFFSET %s""",
-            (*params, limit, offset),
+                GROUP BY b.author, b.id, b.distinct_nonstop_word_count
+            ),
+            author_density AS (
+                SELECT author, avg(density) AS density
+                FROM (
+                    SELECT author,
+                           CASE WHEN distinct_nonstop_word_count > 0
+                                THEN book_word_count::float / distinct_nonstop_word_count END AS density
+                    FROM book_word_counts
+                ) bd
+                WHERE density IS NOT NULL
+                GROUP BY author
+            ),
+            author_books AS (
+                SELECT author, count(DISTINCT book_id) AS book_count
+                FROM book_word_counts
+                GROUP BY author
+            ),
+            author_word_ids AS (
+                SELECT DISTINCT b.author, w.id AS word_id
+                FROM {_main.SCHEMA}.book b
+                JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
+                JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id
+                LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
+                WHERE {where}
+            ),
+            author_word_stats AS (
+                SELECT awi.author, count(DISTINCT awi.word_id) AS word_count,
+                       count(wd.difficulty) AS scored_word_count,
+                       avg(wd.difficulty) AS mean_difficulty,
+                       stddev_samp(wd.difficulty) AS stddev_difficulty
+                FROM author_word_ids awi
+                LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = awi.word_id
+                GROUP BY awi.author
+            ),
+            author_base AS (
+                SELECT aws.author, ab.book_count, aws.word_count, aws.scored_word_count,
+                       aws.mean_difficulty, aws.stddev_difficulty, ad.density
+                FROM author_word_stats aws
+                JOIN author_books ab ON ab.author = aws.author
+                LEFT JOIN author_density ad ON ad.author = aws.author
+            ),
+            diff_rank AS (
+                SELECT author, percent_rank() OVER (ORDER BY mean_difficulty) AS diff_pct
+                FROM author_base WHERE mean_difficulty IS NOT NULL
+            ),
+            dens_rank AS (
+                SELECT author, percent_rank() OVER (ORDER BY density) AS dens_pct
+                FROM author_base WHERE density IS NOT NULL
+            )
+            SELECT ab2.author, ab2.book_count, ab2.word_count, ab2.scored_word_count,
+                   ab2.mean_difficulty, ab2.stddev_difficulty, ab2.density,
+                   CASE WHEN dr.diff_pct IS NOT NULL AND de.dens_pct IS NOT NULL
+                        THEN round((((dr.diff_pct + de.dens_pct) / 2) * 100)::numeric, 1)
+                   END AS overall_difficulty
+            FROM author_base ab2
+            LEFT JOIN diff_rank dr ON dr.author = ab2.author
+            LEFT JOIN dens_rank de ON de.author = ab2.author
+            ORDER BY {order_by}
+            LIMIT %s OFFSET %s""",
+            (*params, *params, limit, offset),
         )
         rows = cur.fetchall()
 
-    items = [AuthorRow(author=r[0], book_count=r[1], word_count=r[2]) for r in rows]
+    items = [
+        AuthorRow(author=r[0], book_count=r[1], word_count=r[2], scored_word_count=r[3],
+                  mean_difficulty=r[4], stddev_difficulty=r[5], density=r[6], overall_difficulty=r[7])
+        for r in rows
+    ]
     return AuthorPage(items=items, total=total, page=page, page_size=page_size)
 
 
@@ -234,7 +369,25 @@ class BookRow(BaseModel):
     scored_word_count: int
     mean_difficulty: float | None
     stddev_difficulty: float | None
+    density: float | None  # word_count / archive_metadata.py's distinct_nonstop_word_count
+                            # -- this book's extracted vocabulary as a fraction of its own
+                            # distinct non-stopword count. A live scan found only 2/11356
+                            # books above 0.5 (one just above 1.0, a very short poetry
+                            # collection), so no corpus-wide outlier handling beyond what
+                            # overall_difficulty's percent_rank already gives for free.
     archive_path: str | None  # set -> /api/browse/books/{id}/text can serve it
+    overall_difficulty: float | None
+    # percent_rank(mean_difficulty) averaged with percent_rank(density), *100,
+    # rounded to 1dp -- e.g. 74.3 reads as "harder than 74.3% of the corpus."
+    # NOT a z-score blend: a live scan found density's distribution stddev
+    # 0.0175 against a max of 1.18 (z up to ~66) while difficulty's z never
+    # exceeds ~1.3, so summing raw z-scores would just be a density ranking
+    # with a difficulty-shaped rounding error attached. percent_rank is
+    # scale-free and immune to that skew. Each percentile is computed only
+    # over books that HAVE the underlying metric, so a book missing one
+    # doesn't get pushed to an arbitrary end by NULL-ordering -- it's simply
+    # excluded from that one ranking, and overall_difficulty itself is only
+    # populated when both are available.
 
 
 class BookPage(BaseModel):
@@ -255,10 +408,11 @@ def browse_books(
     archaic: list[str] = Query([]),
     pos: list[str] = Query([]),
     quizzable_only: bool = False,
+    letter: str | None = Query(None, min_length=1, max_length=1),
     random: bool = False,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
-    sort: Literal["title", "word_count"] = "title",
+    sort: Literal["title", "word_count", "difficulty", "density", "overall_difficulty"] = "title",
     dir: Literal["asc", "desc"] = "asc",
     _: dict = Depends(_main.require_viewer),
 ) -> BookPage:
@@ -282,14 +436,18 @@ def browse_books(
     if q:
         filters.append("b.title ILIKE %s")
         params.append(f"%{q}%")
+    if letter:
+        filters.append(f"left({_SORT_TITLE_EXPR}, 1) = %s")
+        params.append(letter.lower())
     where = " AND ".join(filters)
     if random:
         order_by = "random()"
         limit = 1
     else:
-        order_col = "b.title" if sort == "title" else "word_count"
+        order_col = _BOOK_SORT_COLUMNS[sort]
         order_dir = "ASC" if dir == "asc" else "DESC"
-        order_by = f"{order_col} {order_dir}, b.title ASC"
+        nulls = " NULLS LAST" if sort in _NULLABLE_SORTS else ""
+        order_by = f"{order_col} {order_dir}{nulls}, sort_title ASC"
         limit = page_size
     offset = 0 if random else (page - 1) * page_size
 
@@ -308,27 +466,52 @@ def browse_books(
         )
         total = cur.fetchone()[0]
 
+        # See BookRow's field comments above for why density/overall_difficulty
+        # are computed the way they are (percent_rank blend, not z-scores).
         cur.execute(
-            f"""SELECT b.id, b.title, b.author, count(DISTINCT w.id) AS word_count,
+            f"""
+            WITH book_base AS (
+                SELECT b.id, b.title, b.author, b.archive_path, b.distinct_nonstop_word_count,
+                       count(DISTINCT w.id) AS word_count,
                        count(wd.difficulty) AS scored_word_count,
                        avg(wd.difficulty) AS mean_difficulty,
                        stddev_samp(wd.difficulty) AS stddev_difficulty,
-                       b.archive_path
+                       CASE WHEN b.distinct_nonstop_word_count > 0
+                            THEN count(DISTINCT w.id)::float / b.distinct_nonstop_word_count END AS density,
+                       {_SORT_TITLE_EXPR} AS sort_title
                 FROM {_main.SCHEMA}.book b
                 JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
                 JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id
                 LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
                 WHERE {where}
-                GROUP BY b.id, b.title, b.author, b.archive_path
-                ORDER BY {order_by}
-                LIMIT %s OFFSET %s""",
+                GROUP BY b.id, b.title, b.author, b.archive_path, b.distinct_nonstop_word_count
+            ),
+            diff_rank AS (
+                SELECT id, percent_rank() OVER (ORDER BY mean_difficulty) AS diff_pct
+                FROM book_base WHERE mean_difficulty IS NOT NULL
+            ),
+            dens_rank AS (
+                SELECT id, percent_rank() OVER (ORDER BY density) AS dens_pct
+                FROM book_base WHERE density IS NOT NULL
+            )
+            SELECT bb.id, bb.title, bb.author, bb.word_count, bb.scored_word_count,
+                   bb.mean_difficulty, bb.stddev_difficulty, bb.density, bb.archive_path,
+                   CASE WHEN dr.diff_pct IS NOT NULL AND de.dens_pct IS NOT NULL
+                        THEN round((((dr.diff_pct + de.dens_pct) / 2) * 100)::numeric, 1)
+                   END AS overall_difficulty
+            FROM book_base bb
+            LEFT JOIN diff_rank dr ON dr.id = bb.id
+            LEFT JOIN dens_rank de ON de.id = bb.id
+            ORDER BY {order_by}
+            LIMIT %s OFFSET %s""",
             (*params, limit, offset),
         )
         rows = cur.fetchall()
 
     items = [
         BookRow(id=r[0], title=r[1], author=r[2], word_count=r[3],
-                scored_word_count=r[4], mean_difficulty=r[5], stddev_difficulty=r[6], archive_path=r[7])
+                scored_word_count=r[4], mean_difficulty=r[5], stddev_difficulty=r[6],
+                density=r[7], archive_path=r[8], overall_difficulty=r[9])
         for r in rows
     ]
     return BookPage(items=items, total=total, page=page, page_size=page_size)

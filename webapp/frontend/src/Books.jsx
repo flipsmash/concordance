@@ -1,11 +1,21 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { difficultySummary } from './bookDifficulty'
+import AlphabetStrip from './AlphabetStrip'
+import { densityLabel, difficultySummary, overallDifficultyLabel } from './bookDifficulty'
+import SortControl from './SortControl'
 import { usePagedTable } from './usePagedTable'
 import './Authors.css'
 
 const API_BASE = ''
 const PAGE_SIZE = 30
+
+const SORT_FIELDS = [
+  { key: 'title', label: 'Title (A–Z)' },
+  { key: 'word_count', label: 'Word count' },
+  { key: 'difficulty', label: 'Avg. difficulty' },
+  { key: 'density', label: 'Vocabulary density' },
+  { key: 'overall_difficulty', label: 'Overall difficulty' },
+]
 
 // Level 1 of the book drilldown: every book, browsable/searchable by title --
 // the flat counterpart to Authors (which groups the same books by writer).
@@ -15,19 +25,25 @@ function Books() {
   const navigate = useNavigate()
   const [query, setQuery] = useState('')
   const [debounced, setDebounced] = useState('')
+  const [letter, setLetter] = useState(null)
 
   useEffect(() => {
     const handle = setTimeout(() => setDebounced(query.trim()), 200)
     return () => clearTimeout(handle)
   }, [query])
 
-  const { items, total, page, setPage, loading, error, totalPages } = usePagedTable({
+  const { items, total, page, setPage, sort, dir, handleSort, loading, error, totalPages } = usePagedTable({
     endpoint: '/api/browse/books',
     pageSize: PAGE_SIZE,
     defaultSort: 'title',
     defaultDir: 'asc',
-    extraParams: { q: debounced },
+    extraParams: { q: debounced, letter },
   })
+
+  function changeLetter(l) {
+    setLetter(l)
+    setPage(1)
+  }
 
   function surpriseMe() {
     fetch(`${API_BASE}/api/browse/books?random=true`)
@@ -58,11 +74,18 @@ function Books() {
         autoFocus
       />
 
+      <div className="authors-toolbar">
+        <AlphabetStrip letter={letter} onChange={changeLetter} />
+        <SortControl fields={SORT_FIELDS} sort={sort} dir={dir} onSort={handleSort} />
+      </div>
+
       {error && <div className="error-banner">{error}</div>}
 
       <ul className="authors-list">
         {items.map((b) => {
           const { stat, qualifier } = difficultySummary(b)
+          const density = densityLabel(b.density)
+          const overall = overallDifficultyLabel(b.overall_difficulty)
           return (
             <li
               key={b.id}
@@ -79,6 +102,8 @@ function Books() {
                   {stat}
                   {qualifier && <span className="work-qualifier"> ({qualifier})</span>}
                 </span>
+                {density && <span className="work-density">{density}</span>}
+                {overall && <span className="work-overall">{overall}</span>}
               </span>
             </li>
           )

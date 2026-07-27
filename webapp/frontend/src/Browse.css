@@ -331,34 +331,6 @@
   color: white;
 }
 
-.browse-az-strip {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px;
-}
-
-.browse-az-letter {
-  border: none;
-  background: transparent;
-  color: var(--text);
-  text-transform: uppercase;
-  font-family: var(--mono);
-  font-size: 12px;
-  width: 22px;
-  height: 22px;
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-.browse-az-letter:hover {
-  background: var(--border);
-}
-
-.browse-az-letter.active {
-  background: var(--accent);
-  color: white;
-}
-
 .browse-shelf {
   display: flex;
   flex-wrap: wrap;

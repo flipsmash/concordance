@@ -64,6 +64,14 @@
   background: var(--bg);
 }
 
+.authors-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 .authors-list {
   list-style: none;
   margin: 0;
@@ -128,7 +136,9 @@
   color: var(--text);
 }
 
-.work-count {
+.work-count,
+.work-density,
+.work-overall {
   font-variant-numeric: tabular-nums;
 }
 

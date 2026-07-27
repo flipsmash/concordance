@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import AddToSetMenu from './AddToSetMenu'
+import AlphabetStrip from './AlphabetStrip'
 import AuthorSelect from './AuthorSelect'
 import MultiSelect from './MultiSelect'
 import { colorForBucket } from './domainColors'
@@ -10,7 +11,6 @@ import './Browse.css'
 
 const API_BASE = ''
 const ARCHAIC_VALUES = ['current', 'dated', 'archaic', 'obsolete']
-const ALPHABET = 'abcdefghijklmnopqrstuvwxyz'.split('')
 const PAGE_SIZE = 30
 
 // Every facet lives in the URL (useSearchParams), not local state -- a
@@ -352,18 +352,7 @@ function Browse() {
           ))}
         </div>
 
-        <div className="browse-az-strip">
-          {ALPHABET.map((l) => (
-            <button
-              type="button"
-              key={l}
-              className={letter === l ? 'browse-az-letter active' : 'browse-az-letter'}
-              onClick={() => setLetter(letter === l ? null : l)}
-            >
-              {l}
-            </button>
-          ))}
-        </div>
+        <AlphabetStrip letter={letter} onChange={setLetter} />
 
         {activeFacetCount > 0 && (
           <div className="browse-shelf">
