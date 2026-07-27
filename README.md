@@ -105,8 +105,8 @@ commands to remember and re-order by hand:
 ```bash
 concordance maintain   # fill-definitions -> classify -> normalize-pos -> ngram
                         # -> archaic -> difficulty -> quizdef -> quizzable
-                        # -> calibrate-difficulty -> book-similarity -> author-similarity
-                        # -> author-clustering -> wordnik-pron -> ipa -> embed
+                        # -> calibrate-difficulty -> book-similarity -> book-clustering
+                        # -> author-similarity -> author-clustering -> wordnik-pron -> ipa -> embed
 ```
 
 Every step runs incrementally (only-missing / blank-only / not-yet-embedded),
@@ -443,7 +443,7 @@ optional POS/quizzable/difficulty-band/USAS-domain filters and synonym
 exclusion) — query infrastructure for a future visualization UI and future
 distractor generation, not those features themselves.
 
-## Vocabulary relatedness (`book-similarity`, `author-similarity`, `author-clustering`)
+## Vocabulary relatedness (`book-similarity`, `book-clustering`, `author-similarity`, `author-clustering`)
 
 Which books and authors are related to each other by **literal shared
 vocabulary** — a different axis from the definition/FastText embeddings
@@ -455,6 +455,7 @@ record in `browse.py`'s own comments: an earlier unweighted join made
 
 ```bash
 concordance book-similarity      # each book's top-k most vocabulary-related books
+concordance book-clustering      # hierarchical clustering + 2D map over the top-N books
 concordance author-similarity    # same, one level up, for authors
 concordance author-clustering    # hierarchical clustering + 2D map over the top-N authors
 ```
@@ -497,10 +498,20 @@ concordance author-clustering    # hierarchical clustering + 2D map over the top
   `author_cluster_run` (the full pairwise grid + the dendrogram tree, as
   one blob) together in a single transaction — never partially, since the
   map, matrix, and dendrogram views must always agree with each other.
+- **`book-clustering`** — the same technique one level down: top `--top-n`
+  (default 200) books by (extracted-vocabulary) word count, same
+  corpus-wide IDF weighting `book-similarity` uses, writing `book_cluster`/
+  `book_cluster_run` in the identical shape to the author tables above.
+  The one real difference: an author's name alone is both display label
+  and navigation key, but a book needs id + title + author together (a
+  title alone isn't a stable identity — two books can share one, and it's
+  not enough to build a link), so `book_cluster`/`book_cluster_run.leaf_order`
+  and every dendrogram leaf carry all three rather than a single string.
 
-All three are wired into `maintain` (`--skip-book-similarity`,
-`--skip-author-similarity`, `--skip-author-clustering`) and reachable from
-the review webapp's **Visualizations** page — see below.
+All four are wired into `maintain` (`--skip-book-similarity`,
+`--skip-book-clustering`, `--skip-author-similarity`,
+`--skip-author-clustering`) and reachable from the review webapp's
+**Visualizations** page — see below.
 
 ## Running the local model (RTX 3060, 12 GB)
 
@@ -678,19 +689,43 @@ Every relatedness view in one place, linked from the main Browse page:
   exactly the pair being compared. The precomputed top-k tables above only
   ever answer *how* related two things are; this is the only view that
   answers *in what words*.
-- **All authors at once** (`/app/authors/relatedness`) — four tabs over one
-  shared `author-clustering` run: a **cluster map** (default — position and
-  color are principled, derived from real MDS/clustering over the
-  similarity structure, not a physics simulation's arbitrary compromise
-  layout), a **seriated similarity matrix** (a canvas heatmap, authors
-  ordered so related ones form visible blocks along the diagonal; click a
-  cell to open the shared-vocabulary panel for that pair), a **dendrogram**
-  (hand-rolled SVG tree, leaf dots colored to match the map's clusters so
-  the two views agree), and the original **force-directed graph** (kept as
-  a fourth, lower-priority option, not deleted). Map/matrix/dendrogram
-  cover only the top-N authors from `author-clustering` — deliberately not
-  a books equivalent: book count is unbounded and growing, so books stay
-  ego-anchored only, never a global all-books view.
+- **All authors/books at once** (`/app/authors/relatedness`,
+  `/app/books/relatedness`) — four tabs over one shared clustering run
+  (`author-clustering` / `book-clustering` respectively): a **cluster map**
+  (default — position and color are principled, derived from real
+  MDS/clustering over the similarity structure, not a physics simulation's
+  arbitrary compromise layout), a **seriated similarity matrix** (a canvas
+  heatmap, entities ordered so related ones form visible blocks along the
+  diagonal; click a cell to open the shared-vocabulary panel for that
+  pair), a **dendrogram** (hand-rolled SVG tree, leaf dots colored to match
+  the map's clusters so the two views agree), and the original
+  **force-directed graph** (kept as a fourth, lower-priority option, not
+  deleted — its global response has no real "center," just peers, so it's
+  its own response type rather than the ego-graph's shape reused with a
+  fake one). Each covers only the top-N entities from its own clustering
+  run (200 by default, ranked by book count for authors / word count for
+  books) — an unbounded 11k-book or 3.5k-author force-directed layout would
+  be an unreadable hairball regardless of compute cost, so a bounded,
+  principled subset stands in for "everything," same reasoning either way.
+- **Discipline-category relationship map** (`/app/visualizations/domain-map`)
+  — a different axis entirely from every view above: instead of
+  shared-vocabulary overlap, this positions books (≥50 words) and authors
+  (≥100 words) by how their vocabulary *distributes* across the 21 USAS
+  discourse fields (science, law, arts, ...), so two works can sit close
+  together with zero words in common. Position is PCA over each entity's
+  L1-then-L2-normalized category-distribution vector — the same embedding
+  classical MDS produces, computed directly over the 21 dense category
+  columns instead of an O(n²) distance matrix, so it runs live per request
+  with no precomputed table. Dot color is the category an entity leans on
+  **more than the corpus typically does** (lift: its share ÷ the corpus's
+  own average share for that category), not its single largest share — a
+  raw-share "dominant" color came back "GENERAL & ABSTRACT TERMS" for 82%
+  of books in a live check, since that field is corpus-wide dominant
+  everywhere and a color that uniform tells you nothing. A spread slider
+  (real uniform zoom around the layout's own center, not a per-point
+  radial power transform — an earlier attempt at the latter distorted a
+  dense cluster into a ring instead of separating it) and click-to-toggle
+  legend filtering by domain bucket round it out.
 
 ### Public access — `vocab.brfinnegan.org`
 
@@ -777,9 +812,11 @@ for future visualization and quiz-distractor generation, not those features
 themselves yet) are all in place. Vocabulary-relatedness visualization is
 also live: book/author lexical-overlap similarity, real (cross-linked, not
 star-shaped) ego-graphs, a shared-vocabulary comparison view, and — for
-authors — hierarchical clustering surfaced as a cluster map, a seriated
-similarity matrix, and a dendrogram (see "Vocabulary relatedness" and
-"Visualizations" above). Deferred by choice: other languages, Anki
+both books and authors — hierarchical clustering surfaced as a cluster
+map, a seriated similarity matrix, and a dendrogram, plus a discipline-
+category relationship map positioning books/authors by USAS-field
+vocabulary distribution rather than shared words (see "Vocabulary
+relatedness" and "Visualizations" above). Deferred by choice: other languages, Anki
 export, scanned-PDF OCR, a curated names/gazetteer list to close the one
 known gap in proper-noun filtering (every validity authority is itself
 somewhat name-polluted; deliberately not started — see
