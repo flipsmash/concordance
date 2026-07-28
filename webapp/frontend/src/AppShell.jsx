@@ -8,11 +8,11 @@ import { GuideWordProvider, useGuideHeader } from './GuideWordContext'
 // entirely (not just hidden) for a non-admin user, so the "curation chrome
 // visible to anyone" gap this shell replaces doesn't reappear here. Letter
 // is normally the label's own first letter (the thumb-index conceit); where
-// that collides with an earlier tab (Books vs. Browse) or isn't a letter at
-// all (Admin), a distinct glyph is used instead -- never a wrong letter.
+// that isn't a letter at all (Admin), a distinct glyph is used instead --
+// never a wrong letter.
 const SECTIONS = [
-  { key: 'browse', letter: 'B', label: 'Browse', to: '/app', end: true },
-  { key: 'books', letter: '❦', label: 'Books', to: '/app/books' },
+  { key: 'words', letter: 'W', label: 'Words', to: '/app', end: true },
+  { key: 'books', letter: 'B', label: 'Books', to: '/app/books' },
   { key: 'authors', letter: 'A', label: 'Authors', to: '/app/authors' },
   { key: 'categories', letter: 'C', label: 'Categories', to: '/app/categories' },
   { key: 'visualizations', letter: 'V', label: 'Visuals', to: '/app/visualizations' },
