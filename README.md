@@ -244,6 +244,47 @@ the Phase 5 commits for the full false-positive analysis if extending this.
 
 Both commands accept `--schema`, `--limit`, `--database-url`.
 
+## Merriam-Webster word lookup (`scripts/lookup_mw.py`)
+
+A stand-alone, network-only CLI — like `lookup_word.py`, but a single source
+(Merriam-Webster) instead of the shared cascade, and prints full entries
+(POS, pronunciation + audio, definitions, etymology, first known use) to
+stdout rather than feeding the ingest pipeline:
+
+```bash
+python scripts/lookup_mw.py concordance
+python scripts/lookup_mw.py concordance run --headless
+python scripts/lookup_mw.py cangue --no-fallback
+```
+
+Two tiers, in order:
+
+1. **The official Collegiate Dictionary API** (`concordance/mw.py`) — needs a
+   free `MW_DICTIONARY_API_KEY` in `.env`. The free tier caps out at 1000
+   queries/day, so every response (a real hit **and** a confirmed "no exact
+   match") is cached on disk keyed by word — looking up the same word again,
+   even in a later run, never costs another call. A daily usage counter
+   refuses new API calls once the count reaches the cap rather than erroring
+   partway through a batch. Only a genuine 200-with-parseable-JSON response
+   gets cached; a bad key, a 5xx, or a dead network is never cached, so a
+   transient problem can't permanently mark a word "unresolvable."
+2. **A Playwright scrape of the live site** (`concordance/mw_scrape.py`) —
+   tried only when the API comes back empty (a real miss, or the daily cap),
+   for words the site has that the Collegiate API doesn't. The site sits
+   behind Cloudflare's managed bot challenge (confirmed: a plain
+   `requests`/curl GET gets a 403 regardless of headers — active bot
+   mitigation, not a `robots.txt` restriction, which does allow
+   `/dictionary/*`). A real browser clears the challenge on its own after a
+   few seconds; this uses a **persistent** browser profile
+   (`.cache/mw_browser_profile/`) so the cleared cookie survives across runs
+   — the challenge only ever needs solving again if it expires or the site
+   re-flags the profile. Defaults to headed (`--headless` to force
+   headless, which is more likely to get challenged); on a brand-new profile
+   you may need to solve an interactive checkbox once, by hand, the first
+   time. One browser is opened lazily and reused across an entire word list
+   rather than relaunched per word. Requires `pip install concordance[scrape]`
+   + `playwright install chromium`.
+
 ## Definition-quality cleanup (`dedupe-plurals`, `expand-synonyms`)
 
 A dictionary source sometimes resolves a word to a bare cross-reference —

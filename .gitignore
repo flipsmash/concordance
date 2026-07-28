@@ -31,6 +31,9 @@ missed_shadow.txt
 .env
 *.env
 
+# MW API response cache/quota tracking + Playwright browser profile (local, regenerable)
+.cache/
+
 # Database dumps (data, not code)
 *.dump
 *.sql
