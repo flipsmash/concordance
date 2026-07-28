@@ -4,6 +4,7 @@ import AddToSetMenu from './AddToSetMenu'
 import AlphabetStrip from './AlphabetStrip'
 import AuthorSelect from './AuthorSelect'
 import MultiSelect from './MultiSelect'
+import { useAuth } from './AuthContext'
 import { colorForBucket } from './domainColors'
 import { useGuideWords } from './GuideWordContext'
 import { usePagedTable } from './usePagedTable'
@@ -23,6 +24,7 @@ const PAGE_SIZE = 30
 function Browse() {
   const [searchParams, setSearchParams] = useSearchParams()
   const navigate = useNavigate()
+  const { user } = useAuth()
 
   // Existing quick-jump search box -- untouched. Different intent ("I know
   // the word, take me there") from the faceted browse below ("let me explore").
@@ -248,8 +250,21 @@ function Browse() {
       .catch(() => {})
   }
 
+  // Admin-only. Soft-delete (the existing DELETE /api/words/{id}, already
+  // used by the admin curation view's AcceptedView.jsx) -- same optimistic-
+  // remove-then-resync-on-failure pattern as that page's own handleDelete.
+  function handleDeleteWord(e, id) {
+    e.stopPropagation()
+    if (!window.confirm('Delete this word? This removes it from the active vocabulary.')) return
+    setItems((prev) => prev.filter((w) => w.id !== id))
+    setTotal((t) => t - 1)
+    fetch(`${API_BASE}/api/words/${id}`, { method: 'DELETE' }).catch(() => {
+      setError(`failed to delete word ${id} — reload to resync`)
+    })
+  }
+
   // --- results -----------------------------------------------------------------
-  const { items, total, page, setPage, loading, error, totalPages } = usePagedTable({
+  const { items, setItems, total, setTotal, page, setPage, loading, error, setError, totalPages } = usePagedTable({
     endpoint: '/api/browse/words',
     pageSize: PAGE_SIZE,
     defaultSort: 'lemma',
@@ -462,6 +477,16 @@ function Browse() {
               {w.difficulty != null && <span className="browse-difficulty-pill">{Math.round(w.difficulty)}</span>}
               {w.archaic && w.archaic !== 'current' && <span className="browse-archaic-tag">{w.archaic}</span>}
             </span>
+            {user?.is_admin && (
+              <button
+                type="button"
+                className="browse-result-delete"
+                onClick={(e) => handleDeleteWord(e, w.id)}
+                title="Delete word"
+              >
+                🗑
+              </button>
+            )}
           </li>
         ))}
         {!loading && items.length === 0 && <li className="browse-empty">No words match these filters.</li>}

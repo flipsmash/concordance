@@ -77,6 +77,27 @@
   cursor: default;
 }
 
+.word-detail-delete {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: #c0392b;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.word-detail-delete:hover {
+  border-color: #c0392b;
+  background: rgba(192, 57, 43, 0.08);
+}
+
+.word-detail-delete:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .word-detail-section {
   border-bottom: 1px solid var(--border);
   padding-bottom: 16px;

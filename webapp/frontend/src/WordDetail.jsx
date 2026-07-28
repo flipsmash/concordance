@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import AddToSetMenu from './AddToSetMenu'
+import { useAuth } from './AuthContext'
 import GraphView from './GraphView'
 import { colorForBucket } from './domainColors'
 import './WordDetail.css'
@@ -24,10 +25,12 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
   const { id } = useParams()
   const navigate = useNavigate()
   const location = useLocation()
+  const { user } = useAuth()
   const [word, setWord] = useState(null)
   const [notFound, setNotFound] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const [deleting, setDeleting] = useState(false)
   const [neighbors, setNeighbors] = useState(null) // null = not loaded yet, [] = loaded, none found
   const [surpriseLoading, setSurpriseLoading] = useState(false)
   const [booksExpanded, setBooksExpanded] = useState(false)
@@ -48,6 +51,25 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
       })
       .catch(() => {})
       .finally(() => setSurpriseLoading(false))
+  }
+
+  // Admin-only. Same soft-delete endpoint (DELETE /api/words/{id}) the admin
+  // curation view's AcceptedView.jsx already uses -- word.active becomes
+  // false, so it drops out of every downstream view rather than being
+  // hard-deleted. Navigates back on success since there's nothing left here
+  // to show.
+  function deleteWord() {
+    if (!window.confirm(`Delete "${word.lemma}"? This removes it from the active vocabulary.`)) return
+    setDeleting(true)
+    fetch(`${API_BASE}/api/words/${id}`, { method: 'DELETE' })
+      .then((res) => {
+        if (!res.ok) throw new Error(`failed to delete (${res.status})`)
+        navigate(backTo)
+      })
+      .catch((err) => {
+        setError(err.message || 'failed to delete word')
+        setDeleting(false)
+      })
   }
 
   useEffect(() => {
@@ -134,6 +156,16 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
         >
           {surpriseLoading ? '…' : '🎲 Surprise me'}
         </button>
+        {user?.is_admin && (
+          <button
+            type="button"
+            className="word-detail-delete"
+            onClick={deleteWord}
+            disabled={deleting}
+          >
+            {deleting ? '…' : '🗑 Delete'}
+          </button>
+        )}
       </div>
 
       <section className="word-detail-section">
