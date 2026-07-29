@@ -743,6 +743,108 @@ def book_merge_cmd(
                        "(their precomputed rows were cleared for every book touched).[/dim]")
 
 
+@app.command("incoming-merge")
+def incoming_merge_cmd(
+    incoming_dir: Path = typer.Option(INCOMING_DIR, "--incoming-dir", help="Directory of not-yet-ingested files."),
+    archive_dir: Path = typer.Option(ARCHIVE_DIR, "--archive-dir", help="Checked only to avoid a future filename collision once these are ingested."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report eligible + excluded groups; no writes, no deletes."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of eligible groups processed this run (0 = all)."),
+    force_recompile: bool = typer.Option(False, "--force-recompile", help="Overwrite a compiled file on disk that isn't one of this run's own outputs."),
+) -> None:
+    """Same idea as book-merge, for files not yet ingested (incoming/) --
+    same detection (concordance/book_merge.py: same title once the part
+    label is stripped, same author, never PLACEHOLDER_AUTHORS) and the same
+    compiled "{title} (Complete) -- {author}.txt" output. Simpler than
+    book-merge in one respect and different in another:
+
+    - No DB work at all -- nothing here has a `book` row yet, so there's
+      nothing to fold together. This never touches Postgres.
+    - Once a group is compiled, the ORIGINAL per-part files ARE DELETED
+      (book-merge's archive/ keeps them; these don't need keeping, since
+      the compiled file is what will actually get ingested). This is
+      destructive -- run --dry-run first.
+
+    Idempotent and resumable the same way as book-merge, just via the
+    filesystem directly instead of a DB manifest: once a group's parts are
+    deleted and the compiled file exists, rescanning incoming/ can't
+    reconstruct that group (the parts are gone, and the compiled file's own
+    title has no volume marker to match), so a rerun naturally only ever
+    finds what's left. Skips any file whose name doesn't parse to a
+    (title, author) pair via the ` -- ` convention (see
+    _parse_incoming_name) -- an author-less file can't be safely grouped or
+    named. Only .txt files are considered (confirmed: 17,426 of 17,427
+    files here are .txt; compile_group's Gutenberg-marker splitting is a
+    .txt-specific format anyway)."""
+    from . import book_merge
+
+    files = sorted(p for p in incoming_dir.iterdir() if p.suffix.lower() == ".txt")
+    rows = []
+    for i, path in enumerate(files):
+        title, author = _parse_incoming_name(path)
+        if not author:
+            continue
+        rows.append((i, title, author, path.as_posix()))
+
+    groups = book_merge.group_and_classify(rows)
+    eligible = [g for g in groups if g.eligible]
+    excluded = [g for g in groups if not g.eligible]
+
+    console.print(f"Detected [bold]{len(eligible)}[/bold] eligible group(s) "
+                  f"([bold]{sum(len(g.parts) for g in eligible)}[/bold] files).")
+    if excluded:
+        from collections import Counter
+        reasons = Counter(g.skip_reason for g in excluded)
+        console.print(f"Excluded {len(excluded)} group(s): " +
+                      ", ".join(f"{n} {reason}" for reason, n in sorted(reasons.items())))
+        for g in excluded:
+            if g.skip_reason == "gap":
+                console.print(f"  [yellow]gap[/yellow]: {g.title_base!r} by {g.author} -- missing {g.gap_detail}")
+            elif g.skip_reason in ("unlabeled_sibling_conflict", "compiled_title_conflict", "duplicate_number"):
+                console.print(f"  [yellow]{g.skip_reason}[/yellow]: {g.title_base!r} by {g.author}")
+
+    unmatched = book_merge.unmatched_keyword_titles(rows)
+    if unmatched:
+        console.print(f"[dim]{len(unmatched)} title(s) mention vol/part/chapter but didn't match "
+                      f"the merge pattern -- not touched, needs a human look if relevant.[/dim]")
+
+    if dry_run:
+        return
+
+    if limit:
+        eligible = eligible[:limit]
+
+    stats = {"compiled": 0, "deleted": 0, "errors": 0}
+    for group in eligible:
+        try:
+            compiled_path = incoming_dir / f"{group.title_base} (Complete) -- {group.author}.txt"
+            archive_collision = archive_dir / compiled_path.name
+            if archive_collision.exists():
+                console.print(f"[yellow]![/yellow] {group.title_base!r} by {group.author}: "
+                              f"a file already exists at {archive_collision} -- skipped")
+                continue
+            if compiled_path.exists() and not force_recompile:
+                console.print(f"[yellow]![/yellow] {group.title_base!r} by {group.author}: "
+                              f"{compiled_path.name} already exists -- skipped (--force-recompile to overwrite)")
+                continue
+
+            dest = book_merge.compile_group(group, incoming_dir)
+            stats["compiled"] += 1
+            for part in group.parts:
+                part_path = incoming_dir / Path(part.archive_path).name
+                if part_path.resolve() != dest.resolve() and part_path.exists():
+                    part_path.unlink()
+                    stats["deleted"] += 1
+        except Exception as exc:  # noqa: BLE001 -- one bad group must not kill the whole run
+            stats["errors"] += 1
+            console.print(f"[yellow]![/yellow] {group.title_base!r} by {group.author}: {exc!r} -- skipped")
+            continue
+
+    msg = f"[green]✓[/green] incoming-merge: [bold]{stats['compiled']}[/bold] compiled, [bold]{stats['deleted']}[/bold] original file(s) deleted"
+    if stats["errors"]:
+        msg += f", [yellow]{stats['errors']} error(s)[/yellow]"
+    console.print(msg)
+
+
 @app.command("book-similarity")
 def book_similarity(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
