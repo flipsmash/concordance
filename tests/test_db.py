@@ -937,6 +937,178 @@ def test_author_fame_stops_early_on_evidence_degradation(monkeypatch):
 
 
 @pg
+def test_merge_book_group_repoints_dedupes_and_deletes():
+    from concordance.model import Candidate, RejectReason
+
+    schema = "cc_test_book_merge"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    # Part 1: keeps "alpha" (shared with part 2) and "solo1"; rejects "junk" (shared with part 3).
+    part1_kept = [Candidate(lemma="alpha", pos="NOUN"), Candidate(lemma="solo1", pos="NOUN")]
+    for c in part1_kept:
+        c.definition = f"a definition of {c.lemma}"
+    junk1 = Candidate(lemma="junk", pos="NOUN")
+    junk1.reject_reason = RejectReason.NOT_INTERESTING
+    db.sync_book_results(conn, "Some Book, Volume 1", kept=part1_kept, rejected=[junk1],
+                        schema=schema, author="Some Author")
+
+    # Part 2: keeps "alpha" (again -- must not violate word_book's PK on repoint) and "solo2".
+    part2_kept = [Candidate(lemma="alpha", pos="NOUN"), Candidate(lemma="solo2", pos="NOUN")]
+    for c in part2_kept:
+        c.definition = f"a definition of {c.lemma}"
+    db.sync_book_results(conn, "Some Book, Volume 2", kept=part2_kept, rejected=[],
+                        schema=schema, author="Some Author")
+
+    # Part 3: rejects "junk" again (must not violate rejected_word's UNIQUE(book_id,lemma_lc) on repoint).
+    junk3 = Candidate(lemma="junk", pos="NOUN")
+    junk3.reject_reason = RejectReason.NOT_INTERESTING
+    db.sync_book_results(conn, "Some Book, Volume 3", kept=[], rejected=[junk3],
+                        schema=schema, author="Some Author")
+
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT id FROM {schema}.book WHERE title LIKE 'Some Book, Volume%' ORDER BY title")
+        ids = [r[0] for r in cur.fetchall()]
+    survivor, others = ids[0], ids[1:]
+
+    # Seed precomputed/derived rows for every id in the group, both
+    # book_similarity directions, to confirm they're ALL cleared, not just
+    # the non-survivor ones.
+    with conn.cursor() as cur:
+        for a, b in [(ids[0], ids[1]), (ids[1], ids[0]), (ids[0], ids[2])]:
+            cur.execute(f"""INSERT INTO {schema}.book_similarity (book_a_id, book_b_id, score, shared_word_count)
+                            VALUES (%s,%s,0.5,3)""", (a, b))
+        for bid in ids:
+            cur.execute(f"""INSERT INTO {schema}.book_cluster (book_id, title, author, cluster_id, mds_x, mds_y, word_count)
+                            VALUES (%s,'x','Some Author',1,0.0,0.0,1)""", (bid,))
+            cur.execute(f"""INSERT INTO {schema}.book_fame (book_id, fame_score, checked_at)
+                            VALUES (%s, 5, now())""", (bid,))
+    conn.commit()
+
+    stats = db.merge_book_group(
+        conn, schema, survivor, others,
+        title="Some Book (Complete)", author="Some Author", archive_path="archive/Some Book (Complete) -- Some Author.txt",
+        word_count=1000, distinct_nonstop_word_count=400)
+    assert stats == {"survivor_book_id": survivor, "merged_count": 2}
+
+    with conn.cursor() as cur:
+        # word_book: survivor has alpha, solo1, solo2 -- no PK violation, no duplicate row for alpha.
+        cur.execute(f"""SELECT w.lemma FROM {schema}.word_book wb JOIN {schema}.word w ON w.id=wb.word_id
+                        WHERE wb.book_id=%s ORDER BY w.lemma""", (survivor,))
+        assert [r[0] for r in cur.fetchall()] == ["alpha", "solo1", "solo2"]
+
+        # rejected_word: exactly one row for "junk" on the survivor, not two.
+        cur.execute(f"SELECT lemma FROM {schema}.rejected_word WHERE book_id=%s", (survivor,))
+        assert [r[0] for r in cur.fetchall()] == ["junk"]
+
+        # precomputed/derived tables cleared for the WHOLE group, survivor included.
+        cur.execute(f"SELECT count(*) FROM {schema}.book_similarity WHERE book_a_id = ANY(%s) OR book_b_id = ANY(%s)",
+                    (ids, ids))
+        assert cur.fetchone() == (0,)
+        cur.execute(f"SELECT count(*) FROM {schema}.book_cluster WHERE book_id = ANY(%s)", (ids,))
+        assert cur.fetchone() == (0,)
+        cur.execute(f"SELECT count(*) FROM {schema}.book_fame WHERE book_id = ANY(%s)", (ids,))
+        assert cur.fetchone() == (0,)
+
+        # non-survivor book rows are gone; survivor reflects the compiled values.
+        cur.execute(f"SELECT count(*) FROM {schema}.book WHERE id = ANY(%s)", (others,))
+        assert cur.fetchone() == (0,)
+        cur.execute(f"""SELECT title, author, archive_path, word_count, distinct_nonstop_word_count
+                        FROM {schema}.book WHERE id=%s""", (survivor,))
+        assert cur.fetchone() == ("Some Book (Complete)", "Some Author",
+                                    "archive/Some Book (Complete) -- Some Author.txt", 1000, 400)
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_merge_book_group_is_idempotent_on_rerun():
+    schema = "cc_test_book_merge_idempotent"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    from concordance.model import Candidate
+    cand = Candidate(lemma="solo", pos="NOUN")
+    cand.definition = "a definition"
+    db.sync_book_results(conn, "Solo Book", kept=[cand], rejected=[], schema=schema, author="Some Author")
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT id FROM {schema}.book WHERE title='Solo Book'")
+        survivor = cur.fetchone()[0]
+
+    # other_book_ids that never existed at all -- a rerun after a successful
+    # merge (or a merge whose "other" side was already cleaned up some other
+    # way) must be a no-op, not an error.
+    stats = db.merge_book_group(
+        conn, schema, survivor, [999999, 999998],
+        title="Solo Book (Complete)", author="Some Author",
+        archive_path="archive/Solo Book (Complete) -- Some Author.txt",
+        word_count=10, distinct_nonstop_word_count=5)
+    assert stats == {"survivor_book_id": survivor, "merged_count": 2}
+
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT title FROM {schema}.book WHERE id=%s", (survivor,))
+        assert cur.fetchone() == ("Solo Book (Complete)",)
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_book_merge_manifest_upsert_preserves_terminal_timestamps():
+    # The book_merge_group manifest's core resumability contract:
+    # compiled_at/merged_at are the ONLY terminal markers -- everything
+    # else (part_book_ids, skip_reason, checked_at) is meant to be
+    # overwritten on every re-detection, since eligibility can change as
+    # the corpus changes (e.g. a gap closing once a volume is ingested).
+    schema = "cc_test_book_merge_manifest"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    group_id = db.upsert_book_merge_group(
+        conn, schema, title_base="Some Book", author="Some Author",
+        part_book_ids=[1, 2], part_labels=[{"book_id": 1, "num1": 1, "num2": 1},
+                                            {"book_id": 2, "num1": 2, "num2": 2}],
+        survivor_book_id=1, skip_reason=None, gap_detail=None)
+    conn.commit()
+    db.mark_book_merge_compiled(conn, schema, group_id, "archive/Some Book (Complete) -- Some Author.txt")
+
+    # Re-detection runs again (e.g. the CLI's next invocation) and re-upserts
+    # the SAME group -- compiled_at must survive this, not be wiped back to NULL.
+    group_id_2 = db.upsert_book_merge_group(
+        conn, schema, title_base="Some Book", author="Some Author",
+        part_book_ids=[1, 2], part_labels=[{"book_id": 1, "num1": 1, "num2": 1},
+                                            {"book_id": 2, "num1": 2, "num2": 2}],
+        survivor_book_id=1, skip_reason=None, gap_detail=None)
+    assert group_id_2 == group_id   # same (title_base, author) -- same manifest row
+
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT compiled_at IS NOT NULL, merged_at IS NOT NULL, compiled_path "
+                    f"FROM {schema}.book_merge_group WHERE id=%s", (group_id,))
+        assert cur.fetchone() == (True, False, "archive/Some Book (Complete) -- Some Author.txt")
+
+    db.mark_book_merge_merged(conn, schema, group_id)
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT merged_at IS NOT NULL FROM {schema}.book_merge_group WHERE id=%s", (group_id,))
+        assert cur.fetchone() == (True,)
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
 def test_dedupe_plural_definitions_all_three_outcomes(monkeypatch):
     from concordance import resolve
     from concordance.model import Candidate

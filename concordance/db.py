@@ -245,6 +245,32 @@ CREATE TABLE IF NOT EXISTS {s}.book_fame (
 );
 CREATE INDEX IF NOT EXISTS book_fame_score_idx ON {s}.book_fame (fame_score DESC NULLS LAST);
 
+-- concordance book-merge's manifest of detected multi-part-book groups (see
+-- concordance/book_merge.py). Unlike checked_at elsewhere in this schema,
+-- checked_at here is NOT a skip gate -- a group excluded today for a gap
+-- becomes eligible the moment the missing volume is ingested, so every run
+-- re-detects fresh from `book` and overwrites part_book_ids/part_labels/
+-- skip_reason/gap_detail/checked_at unconditionally. Only compiled_at/
+-- merged_at are terminal: they gate the actual expensive/destructive steps
+-- (writing the combined file, folding the DB records together) so a killed
+-- run resumes exactly where it left off instead of redoing either.
+CREATE TABLE IF NOT EXISTS {s}.book_merge_group (
+    id                serial PRIMARY KEY,
+    title_base        text NOT NULL,
+    author            text NOT NULL,
+    part_count        integer NOT NULL,
+    part_book_ids     integer[] NOT NULL,
+    part_labels       jsonb NOT NULL,
+    survivor_book_id  integer,
+    compiled_path     text,
+    skip_reason       text,
+    gap_detail        jsonb,
+    compiled_at       timestamptz,
+    merged_at         timestamptz,
+    checked_at        timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (title_base, author)
+);
+
 CREATE TABLE IF NOT EXISTS {s}.word_audio (
     word_id      integer PRIMARY KEY REFERENCES {s}.word(id) ON DELETE CASCADE,
     source       text,          -- 'commons' | 'azure' | 'none' (looked up, nothing found)
@@ -2813,6 +2839,112 @@ def compute_book_fame(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
                 stats["remaining"] = len(rows) - i
                 break
     return stats
+
+
+# --- book-merge: multi-part-book detection manifest + DB fold-together ------
+
+def upsert_book_merge_group(conn, schema: str, *, title_base: str, author: str,
+                            part_book_ids: list[int], part_labels: list[dict],
+                            survivor_book_id: int | None, skip_reason: str | None,
+                            gap_detail: list[int] | None) -> int:
+    """Record (or refresh) one detected group -- see book_merge_group's own
+    schema comment for why checked_at/skip_reason/part_book_ids are
+    unconditionally overwritten on every call (re-detection is cheap and a
+    group's eligibility can change as the corpus changes) while
+    compiled_at/merged_at are preserved via COALESCE (they're the only
+    terminal, "don't redo this" markers)."""
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""INSERT INTO {s}.book_merge_group
+                    (title_base, author, part_count, part_book_ids, part_labels,
+                     survivor_book_id, skip_reason, gap_detail, checked_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s, now())
+                ON CONFLICT (title_base, author) DO UPDATE SET
+                    part_count=EXCLUDED.part_count, part_book_ids=EXCLUDED.part_book_ids,
+                    part_labels=EXCLUDED.part_labels, survivor_book_id=EXCLUDED.survivor_book_id,
+                    skip_reason=EXCLUDED.skip_reason, gap_detail=EXCLUDED.gap_detail,
+                    checked_at=now()
+                RETURNING id""",
+            (title_base, author, len(part_book_ids), part_book_ids, json.dumps(part_labels),
+             survivor_book_id, skip_reason,
+             json.dumps(gap_detail) if gap_detail else None))
+        return cur.fetchone()[0]
+
+
+def mark_book_merge_compiled(conn, schema: str, group_id: int, compiled_path: str) -> None:
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(f"UPDATE {s}.book_merge_group SET compiled_path=%s, compiled_at=now() WHERE id=%s",
+                    (compiled_path, group_id))
+    conn.commit()
+
+
+def mark_book_merge_merged(conn, schema: str, group_id: int) -> None:
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(f"UPDATE {s}.book_merge_group SET merged_at=now() WHERE id=%s", (group_id,))
+    conn.commit()
+
+
+def merge_book_group(conn, schema: str, survivor_book_id: int, other_book_ids: list[int], *,
+                     title: str, author: str, archive_path: str,
+                     word_count: int, distinct_nonstop_word_count: int) -> dict:
+    """Folds other_book_ids into survivor_book_id -- one transaction (unlike
+    mw_backfill/compute_book_fame's per-item commit: a group can't safely
+    be left half-merged). Tolerates other_book_ids that no longer exist at
+    all (a rerun after a successful merge is a no-op, not an error -- every
+    statement below is already a no-op on an empty match).
+
+    word_book/rejected_word are REPOINTED (with dedup against their own
+    unique constraints, never violating them), not deleted -- the point of
+    a merge is that this vocabulary still belongs to the compiled book.
+    book_similarity/book_cluster/book_fame are DELETED for the whole group
+    (survivor included): these are precomputed, periodically-wholesale-
+    regenerated derived data with no meaning for a differently-sized
+    compiled work, so the right move is deleting and letting the next
+    book-similarity/book-clustering/book-fame run rescope the compiled
+    whole from scratch rather than hand-merging stale per-volume numbers.
+
+    Explicitly accepted scope boundary: word_book keeps reflecting whatever
+    each part's own extraction pipeline already found -- this does NOT
+    re-run extraction over the newly compiled text. publication_year/
+    publication_era are left untouched on the survivor: they're a
+    Gutenberg-catalog lookup keyed on ONE volume's own eBook id, with no
+    principled single answer for which volume's info the compiled work
+    should inherit."""
+    s = _safe_schema(schema)
+    all_ids = [survivor_book_id, *other_book_ids]
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""INSERT INTO {s}.word_book (word_id, book_id)
+                SELECT word_id, %s FROM {s}.word_book WHERE book_id = ANY(%s)
+                ON CONFLICT DO NOTHING""",
+            (survivor_book_id, other_book_ids))
+
+        cur.execute(
+            f"""INSERT INTO {s}.rejected_word
+                    (book_id, lemma, reason, detail, count, zipf, pos, as_seen, sentence, chapter)
+                SELECT DISTINCT ON (lemma_lc) %s, lemma, reason, detail, count, zipf, pos, as_seen, sentence, chapter
+                FROM {s}.rejected_word WHERE book_id = ANY(%s)
+                ORDER BY lemma_lc, book_id
+                ON CONFLICT (book_id, lemma_lc) DO NOTHING""",
+            (survivor_book_id, other_book_ids))
+
+        cur.execute(f"DELETE FROM {s}.book_similarity WHERE book_a_id = ANY(%s) OR book_b_id = ANY(%s)",
+                    (all_ids, all_ids))
+        cur.execute(f"DELETE FROM {s}.book_cluster WHERE book_id = ANY(%s)", (all_ids,))
+        cur.execute(f"DELETE FROM {s}.book_fame WHERE book_id = ANY(%s)", (all_ids,))
+
+        cur.execute(f"DELETE FROM {s}.book WHERE id = ANY(%s)", (other_book_ids,))
+
+        cur.execute(
+            f"""UPDATE {s}.book SET title=%s, author=%s, archive_path=%s,
+                    word_count=%s, distinct_nonstop_word_count=%s
+                WHERE id=%s""",
+            (title, author, archive_path, word_count, distinct_nonstop_word_count, survivor_book_id))
+    conn.commit()
+    return {"survivor_book_id": survivor_book_id, "merged_count": len(other_book_ids)}
 
 
 def _linkage_to_tree(Z, leaf_data: list[dict]) -> dict:

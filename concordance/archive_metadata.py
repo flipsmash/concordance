@@ -88,6 +88,23 @@ def strip_gutenberg_boilerplate(text: str) -> str:
     return text
 
 
+def split_gutenberg_parts(text: str) -> tuple[str, str, str]:
+    """(header, body, footer) around the START/END markers -- same markers
+    strip_gutenberg_boilerplate already uses, split out separately here so
+    a multi-part compile (concordance/book_merge.py) can keep one part's
+    header and another's footer when assembling a single combined file
+    instead of concatenating every part's own full license boilerplate.
+    Falls back to ("", text, "") if markers are missing, same "still
+    usable, less clean" philosophy as strip_gutenberg_boilerplate."""
+    start = _START_RE.search(text)
+    end = _END_RE.search(text)
+    if start and end and end.start() > start.end():
+        return text[: start.end()], text[start.end(): end.start()], text[end.start():]
+    if start:
+        return text[: start.end()], text[start.end():], ""
+    return "", text, ""
+
+
 def extract_gutenberg_id(text: str) -> int | None:
     """The [eBook #NNNN] id from the Release date header -- confirmed
     present in ~every file in this corpus (11519/11519 in a full scan)."""

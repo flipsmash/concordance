@@ -622,6 +622,127 @@ def archive_metadata_cmd(
                   + (f", {stats['errors']} skipped on error" if stats["errors"] else ""))
 
 
+@app.command("book-merge")
+def book_merge_cmd(
+    archive_dir: Path = typer.Option(ARCHIVE_DIR, "--archive-dir", help="Directory of full-text files."),
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report eligible + excluded groups; no files written, no DB writes."),
+    compile_only: bool = typer.Option(False, "--compile-only", help="Write compiled files and record compiled_at; stop before the DB merge."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of eligible groups processed this run (0 = all)."),
+    force_recompile: bool = typer.Option(False, "--force-recompile", help="Overwrite a compiled file on disk that has no matching manifest row."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Detect books Project Gutenberg split into multiple parts ("Vol.",
+    "Volume", "Part", "Chapters" + a number/range) that share the exact
+    same title (once the part label is stripped) and author -- never an
+    author in PLACEHOLDER_AUTHORS -- compile their text into one new
+    "{title} (Complete) -- {author}.txt" file in archive/, and fold the
+    corresponding Postgres records together (see concordance/book_merge.py
+    and db.merge_book_group's own docstrings for the exact rules and the
+    real corpus counts this was validated against).
+
+    Idempotent and resumable: re-detects fresh from `book` on every run
+    (cheap, local -- a group's eligibility can change as the corpus
+    changes, e.g. a gap closing once a missing volume is ingested), but
+    `compiled_at`/`merged_at` in the book_merge_group manifest are terminal
+    -- a killed run resumes exactly where it left off rather than
+    recompiling or re-merging. Original per-volume files in archive/ are
+    NEVER deleted or modified, only the new compiled file is added and the
+    non-surviving `book` rows disappear.
+
+    --dry-run reports every eligible group and every exclusion reason
+    (lone match / duplicate number / gap / a pre-existing sibling with the
+    bare or compiled title already) with zero writes -- use this first,
+    this is a corpus-altering operation. --compile-only stops after
+    writing the combined files, before touching any DB record."""
+    from . import book_merge
+
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+
+    groups = book_merge.detect_merge_groups(conn, schema)
+    eligible = [g for g in groups if g.eligible]
+    excluded = [g for g in groups if not g.eligible]
+
+    console.print(f"Detected [bold]{len(eligible)}[/bold] eligible group(s) "
+                  f"([bold]{sum(len(g.parts) for g in eligible)}[/bold] files).")
+    if excluded:
+        from collections import Counter
+        reasons = Counter(g.skip_reason for g in excluded)
+        console.print(f"Excluded {len(excluded)} group(s): " +
+                      ", ".join(f"{n} {reason}" for reason, n in sorted(reasons.items())))
+        for g in excluded:
+            if g.skip_reason == "gap":
+                console.print(f"  [yellow]gap[/yellow]: {g.title_base!r} by {g.author} -- missing {g.gap_detail}")
+            elif g.skip_reason in ("unlabeled_sibling_conflict", "compiled_title_conflict", "duplicate_number"):
+                console.print(f"  [yellow]{g.skip_reason}[/yellow]: {g.title_base!r} by {g.author}")
+
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT id, title, author, archive_path FROM {schema}.book "
+                    f"WHERE author IS NOT NULL AND author <> ''")
+        all_rows = cur.fetchall()
+    unmatched = book_merge.unmatched_keyword_titles(all_rows)
+    if unmatched:
+        console.print(f"[dim]{len(unmatched)} title(s) mention vol/part/chapter but didn't match "
+                      f"the merge pattern -- not touched, needs a human look if relevant.[/dim]")
+
+    if dry_run:
+        conn.close()
+        return
+
+    if limit:
+        eligible = eligible[:limit]
+
+    stats = {"compiled": 0, "merged": 0, "errors": 0}
+    for group in eligible:
+        try:
+            group_id = db.upsert_book_merge_group(
+                conn, schema, title_base=group.title_base, author=group.author,
+                part_book_ids=group.ordered_book_ids,
+                part_labels=[{"book_id": p.book_id, "title": p.title, "num1": p.num1, "num2": p.num2}
+                             for p in group.parts],
+                survivor_book_id=group.survivor_book_id, skip_reason=None, gap_detail=None)
+
+            compiled_path = archive_dir / f"{group.title_base} (Complete) -- {group.author}.txt"
+            if not compiled_path.exists() or force_recompile:
+                dest = book_merge.compile_group(group, archive_dir)
+                db.mark_book_merge_compiled(conn, schema, group_id, dest.as_posix())
+                stats["compiled"] += 1
+            elif compiled_path.exists():
+                db.mark_book_merge_compiled(conn, schema, group_id, compiled_path.as_posix())
+
+            if compile_only:
+                continue
+
+            from . import archive_metadata as am
+            meta = am.compute_book_metadata(compiled_path, skip_network=True)
+            other_ids = [bid for bid in group.ordered_book_ids if bid != group.survivor_book_id]
+            db.merge_book_group(
+                conn, schema, group.survivor_book_id, other_ids,
+                title=f"{group.title_base} (Complete)", author=group.author,
+                archive_path=compiled_path.as_posix(),
+                word_count=meta["word_count"], distinct_nonstop_word_count=meta["distinct_nonstop_word_count"])
+            db.mark_book_merge_merged(conn, schema, group_id)
+            stats["merged"] += 1
+        except Exception as exc:  # noqa: BLE001 -- one bad group must not kill the whole run
+            conn.rollback()
+            stats["errors"] += 1
+            console.print(f"[yellow]![/yellow] {group.title_base!r} by {group.author}: {exc!r} -- skipped")
+            continue
+
+    conn.close()
+    msg = f"[green]✓[/green] book-merge: [bold]{stats['compiled']}[/bold] compiled, [bold]{stats['merged']}[/bold] merged"
+    if stats["errors"]:
+        msg += f", [yellow]{stats['errors']} error(s)[/yellow]"
+    console.print(msg)
+    if stats["merged"]:
+        console.print("[dim]Re-run book-similarity/book-clustering/book-fame to rescope the compiled works "
+                       "(their precomputed rows were cleared for every book touched).[/dim]")
+
+
 @app.command("book-similarity")
 def book_similarity(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
