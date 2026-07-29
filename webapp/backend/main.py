@@ -37,6 +37,7 @@ SORT_COLUMNS = {
     "part_of_speech": "w.part_of_speech",
     "definition": "w.definition",
     "difficulty": "d.difficulty",
+    "validity_score": "w.validity_score",
 }
 
 
@@ -228,6 +229,9 @@ class WordRow(BaseModel):
     definition: str | None
     difficulty: float | None
     rescued_from_reject: bool
+    validity_score: float | None
+    validity_label: str | None
+    validity_notes: str | None
 
 
 class WordPage(BaseModel):
@@ -241,9 +245,10 @@ class WordPage(BaseModel):
 def list_words(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=500),
-    sort: Literal["lemma", "part_of_speech", "definition", "difficulty"] = "difficulty",
+    sort: Literal["lemma", "part_of_speech", "definition", "difficulty", "validity_score"] = "difficulty",
     dir: Literal["asc", "desc"] = "asc",
     pos: str | None = None,
+    validity_label: Literal["likely-valid", "uncertain", "likely-artifact"] | None = None,
     q: str | None = None,
     letter: str | None = Query(None, min_length=1, max_length=1),
     _: dict = Depends(require_admin),
@@ -256,6 +261,9 @@ def list_words(
     if pos:
         filters.append("w.part_of_speech = %s")
         params.append(pos)
+    if validity_label:
+        filters.append("w.validity_label = %s")
+        params.append(validity_label)
     if letter:
         filters.append("w.lemma_lc LIKE %s")
         params.append(f"{letter.lower()}%")
@@ -278,7 +286,8 @@ def list_words(
         total = cur.fetchone()[0]
 
         cur.execute(
-            f"""SELECT w.id, w.lemma, w.part_of_speech, w.definition, d.difficulty, w.rescued_from_reject
+            f"""SELECT w.id, w.lemma, w.part_of_speech, w.definition, d.difficulty, w.rescued_from_reject,
+                       w.validity_score, w.validity_label, w.validity_notes
                 FROM {SCHEMA}.word w
                 LEFT JOIN {SCHEMA}.word_difficulty d ON d.word_id = w.id
                 WHERE w.active{where_extra}
@@ -290,7 +299,7 @@ def list_words(
 
     items = [
         WordRow(id=r[0], lemma=r[1], part_of_speech=r[2], definition=r[3], difficulty=r[4],
-                 rescued_from_reject=r[5])
+                 rescued_from_reject=r[5], validity_score=r[6], validity_label=r[7], validity_notes=r[8])
         for r in rows
     ]
     return WordPage(items=items, total=total, page=page, page_size=page_size)

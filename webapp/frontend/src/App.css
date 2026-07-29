@@ -1,5 +1,11 @@
 .review-app {
-  max-width: 820px;
+  /* Wide enough for the Accepted/Rejected tables (8+ columns apiece) to lay
+     out without forcing a horizontal scrollbar on typical screens -- was
+     820px, sized for the original 4-5 column tables long before validity
+     score/label/notes were added here. Settings/Graph (the other two tabs
+     sharing this shell) just get extra breathing room, which doesn't hurt
+     either. */
+  max-width: 1400px;
   margin: 0 auto;
   padding: 24px 20px 40px;
   display: flex;
@@ -337,6 +343,21 @@ td.difficulty {
   text-align: right;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+td.validity-score {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+td.validity-label {
+  white-space: nowrap;
+}
+
+td.validity-notes {
+  color: var(--text);
+  font-size: 13px;
 }
 
 td.actions {

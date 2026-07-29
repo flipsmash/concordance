@@ -8,16 +8,22 @@ const API_BASE = ''
 const PAGE_SIZE = 50
 const ALPHABET = 'abcdefghijklmnopqrstuvwxyz'.split('')
 
+const VALIDITY_LABELS = ['likely-valid', 'uncertain', 'likely-artifact']
+
 const COLUMNS = [
-  { key: 'lemma', label: 'Term' },
-  { key: 'part_of_speech', label: 'POS' },
-  { key: 'definition', label: 'Definition' },
-  { key: 'difficulty', label: 'Difficulty' },
+  { key: 'lemma', label: 'Term', sortable: true },
+  { key: 'part_of_speech', label: 'POS', sortable: true },
+  { key: 'definition', label: 'Definition', sortable: true },
+  { key: 'difficulty', label: 'Difficulty', sortable: true },
+  { key: 'validity_score', label: 'Validity Score', sortable: true },
+  { key: 'validity_label', label: 'Validity Label', sortable: false },
+  { key: 'validity_notes', label: 'Validity Notes', sortable: false },
 ]
 
 function AcceptedView() {
   const [pos, setPos] = useState('')
   const [posOptions, setPosOptions] = useState([])
+  const [validityLabel, setValidityLabel] = useState('')
   const [qInput, setQInput] = useState('')
   const [q, setQ] = useState('')
   const [letter, setLetter] = useState('')
@@ -44,11 +50,16 @@ function AcceptedView() {
     pageSize: PAGE_SIZE,
     defaultSort: 'difficulty',
     defaultDir: 'asc',
-    extraParams: { pos, q, letter },
+    extraParams: { pos, validity_label: validityLabel, q, letter },
   })
 
   function handlePosChange(value) {
     setPos(value)
+    resetPage()
+  }
+
+  function handleValidityLabelChange(value) {
+    setValidityLabel(value)
     resetPage()
   }
 
@@ -81,6 +92,17 @@ function AcceptedView() {
             {posOptions.map((p) => (
               <option key={p} value={p}>
                 {p}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="pos-filter">
+          Validity:{' '}
+          <select value={validityLabel} onChange={(e) => handleValidityLabelChange(e.target.value)}>
+            <option value="">All</option>
+            {VALIDITY_LABELS.map((v) => (
+              <option key={v} value={v}>
+                {v}
               </option>
             ))}
           </select>
@@ -120,9 +142,15 @@ function AcceptedView() {
           <thead>
             <tr>
               {COLUMNS.map((col) => (
-                <th key={col.key} onClick={() => handleSort(col.key)} className="sortable">
+                <th
+                  key={col.key}
+                  onClick={col.sortable ? () => handleSort(col.key) : undefined}
+                  className={col.sortable ? 'sortable' : undefined}
+                >
                   {col.label}
-                  {sort === col.key && <span className="arrow">{dir === 'asc' ? ' ▲' : ' ▼'}</span>}
+                  {col.sortable && sort === col.key && (
+                    <span className="arrow">{dir === 'asc' ? ' ▲' : ' ▼'}</span>
+                  )}
                 </th>
               ))}
               <th></th>
@@ -142,6 +170,9 @@ function AcceptedView() {
                 <td className="pos">{w.part_of_speech || '—'}</td>
                 <td className="definition">{w.definition || '—'}</td>
                 <td className="difficulty">{w.difficulty != null ? Math.round(w.difficulty) : '—'}</td>
+                <td className="validity-score">{w.validity_score != null ? w.validity_score.toFixed(2) : '—'}</td>
+                <td className="validity-label">{w.validity_label || '—'}</td>
+                <td className="validity-notes">{w.validity_notes || '—'}</td>
                 <td className="actions">
                   <button type="button" className="delete-btn" onClick={() => handleDelete(w.id)}>
                     Delete
@@ -151,7 +182,7 @@ function AcceptedView() {
             ))}
             {!loading && items.length === 0 && (
               <tr>
-                <td colSpan={5} className="empty">
+                <td colSpan={COLUMNS.length + 1} className="empty">
                   Nothing here.
                 </td>
               </tr>
