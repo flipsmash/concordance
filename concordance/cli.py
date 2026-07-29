@@ -1637,17 +1637,23 @@ def backfill_analogies_cmd(
                                           help="Model for relation verification (defaults to the 14B)."),
     limit: int = typer.Option(0, "--limit", "-l", help="Cap terms scanned this run (0 = all)."),
     batch_size: int = typer.Option(20, "--batch-size", help="Verification batch size (mirrors judge_batch)."),
+    chunk_size: int = typer.Option(200, "--chunk-size", help="Terms per extract-verify-write cycle -- "
+                                    "bounds how much already-LLM-verified work a kill mid-run can lose to "
+                                    "one chunk instead of the entire run."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Harvest WordNet + definition-pattern relation candidates for every
     eligible vocab word (and, incrementally, discovered common anchor terms),
     then LLM-verify each against both terms' real definitions before it's
     usable in a quiz — see concordance/analogies.py's module docstring for
-    why verification is mandatory, not optional. Resumable: a later run only
-    touches terms not yet in wn_relation_scan. Safe to run with a small
-    --limit during development; a real full-corpus run should not be started
-    while `concordance maintain` is already in flight (both load a local LLM
-    and compete for the same GPU)."""
+    why verification is mandatory, not optional. Resumable at two grains: a
+    later run only touches terms not yet in wn_relation_scan, and within a
+    single run each chunk of `--chunk-size` terms is extracted, verified, and
+    written as its own committed unit, so a kill mid-run only loses the
+    in-flight chunk. Safe to run with a small --limit during development; a
+    real full-corpus run should not be started while `concordance maintain`
+    is already in flight (both load a local LLM and compete for the same
+    GPU)."""
     from . import analogies
 
     try:
@@ -1659,7 +1665,8 @@ def backfill_analogies_cmd(
     if model:
         cfg.model_path = str(model)
     with console.status("[bold]Extracting + verifying analogy relations…"):
-        stats = analogies.backfill_analogies(conn, schema, cfg, limit=limit, batch_size=batch_size)
+        stats = analogies.backfill_analogies(conn, schema, cfg, limit=limit, batch_size=batch_size,
+                                              chunk_size=chunk_size)
     conn.close()
     console.print(f"[green]✓[/green] backfill-analogies: [bold]{stats['terms_scanned']}[/bold] terms scanned "
                   f"-> [bold]{stats['edges_found']}[/bold] candidate edges "

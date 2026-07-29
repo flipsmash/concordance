@@ -527,9 +527,18 @@ CREATE TABLE IF NOT EXISTS {s}.word_relation_edge (
                                            -- 'definition_pattern_kind_of' |
                                            -- 'definition_pattern_agent' |
                                            -- 'definition_pattern_part_of' |
-                                           -- 'definition_pattern_purpose'
+                                           -- 'definition_pattern_purpose' |
+                                           -- 'definition_pattern_relates_to' |
+                                           -- 'definition_pattern_resembling' |
+                                           -- 'definition_pattern_characterized_by' --
+                                           -- the last three are definition-text-mined
+                                           -- (concordance/analogies.py's _build_matchers),
+                                           -- added because WordNet's own hypernym/holonym/
+                                           -- purpose/agentive relations are almost entirely
+                                           -- absent for adjective synsets
     relation_family      text NOT NULL,   -- 'is_a' | 'part_of' | 'opposite' | 'similar' |
-                                           -- 'derived' | 'agentive' | 'purpose' | 'attribute' --
+                                           -- 'derived' | 'agentive' | 'purpose' | 'attribute' |
+                                           -- 'relates_to' | 'resembling' --
                                            -- the bucket used to pair this edge with a DIFFERENT
                                            -- edge as the item's anchor (A:B) leg
     pos_a                text NOT NULL,   -- canonical POS (model.normalize_pos) of term_a

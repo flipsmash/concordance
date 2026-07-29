@@ -43,8 +43,14 @@ existing wn_relation_fanout already carries the full hyponym-equivalent set
 for exclusion purposes -- see extract_wordnet_edges).
 
 relation_family (is_a / part_of / opposite / similar / derived / agentive /
-purpose / attribute) is the bucket analogy_select.py pairs an edge against a
-DIFFERENT edge of the same family to build the anchor (A:B) leg of an item.
+purpose / attribute / relates_to / resembling) is the bucket analogy_select.py
+pairs an edge against a DIFFERENT edge of the same family to build the anchor
+(A:B) leg of an item. relates_to/resembling (plus attribute's definition-
+pattern-sourced "characterized_by" contributions) are definition-text-mined,
+not WordNet-native -- added specifically because WordNet's own hypernym/
+holonym/purpose/agentive relations are almost entirely absent for adjective
+synsets, so a definition-pattern source is the only way to give that POS any
+relation variety at all (see _build_matchers).
 """
 
 from __future__ import annotations
@@ -72,6 +78,9 @@ _RELATION_FAMILY = {
     "definition_pattern_agent": "agentive",
     "definition_pattern_purpose": "purpose",
     "attribute": "attribute",
+    "definition_pattern_characterized_by": "attribute",  # folded in, not a new family -- see _build_matchers
+    "definition_pattern_relates_to": "relates_to",
+    "definition_pattern_resembling": "resembling",
 }
 
 # Relation families whose full target set is traversed via synset.closure()
@@ -292,13 +301,15 @@ def extract_wordnet_edges(conn, schema: str, wn, term_row: dict) -> tuple[list[R
     with conn.cursor() as cur:
         for rel_type, rel_fn in _DIRECT_RELATIONS.items():
             family = _RELATION_FAMILY[rel_type]
+            all_synsets = wn.synsets(lemma_lc, pos=term_row["wn_pos"])
+
             # Fanout: transitive closure (unioned over ALL this lemma's synsets)
             # for the families where a distractor N hops away is still a valid
-            # completion of the relation; direct targets only otherwise.
+            # completion of the relation; direct targets only (still over
+            # every synset, not just the canonical one -- see the candidates
+            # comment below) otherwise.
             fanout_targets: set[tuple[str, str]] = set()
-            synsets_to_walk = wn.synsets(lemma_lc, pos=term_row["wn_pos"]) if rel_type in _TRANSITIVE_FAMILIES \
-                else [synset]
-            for s in synsets_to_walk:
+            for s in all_synsets:
                 targets = s.closure(rel_fn) if rel_type in _TRANSITIVE_FAMILIES else rel_fn(s)
                 for other in targets:
                     for lw in _lemma_words(other):
@@ -312,21 +323,36 @@ def extract_wordnet_edges(conn, schema: str, wn, term_row: dict) -> tuple[list[R
                 )
                 fanout_count += 1
 
-            # Candidates: direct hop only, from the canonical synset.
-            for other in rel_fn(synset):
-                for lw in _lemma_words(other):
-                    if lw == lemma_lc:
-                        continue
-                    other_term = _get_or_create_ordinary_term(cur, schema, wn, lw, other.pos())
-                    if other_term is None:
-                        continue
-                    candidates.append(RelationCandidate(
-                        term_a_lemma=term_row["lemma"], term_a_pos=term_row["pos"],
-                        term_a_gloss=term_row["gloss"],
-                        term_b_lemma=other_term["lemma"], term_b_pos=_WN_POS_TO_CANONICAL.get(other.pos(), other.pos()),
-                        term_b_gloss=other_term["gloss"] or "",
-                        relation_type=rel_type, relation_family=family, source=f"wordnet_{rel_type}",
-                    ))
+            # Candidates: direct hop only -- never the transitive closure,
+            # even for the transitive families, a candidate must be a real
+            # testable pair, not a distant ancestor several hops removed --
+            # but now over every one of the lemma's synsets, not just the
+            # single sense-disambiguated canonical one. A word can carry a
+            # genuine relation (an attribute, a similar_to, a hypernym) on a
+            # DIFFERENT sense's synset that its own canonical sense doesn't
+            # have; verify_candidates' LLM pass is the safety net against any
+            # wrong-sense noise this adds, so widening only adds candidates
+            # to try, it never weakens an existing guarantee. Folded into the
+            # SAME set fanout_targets already computed above (not a second,
+            # separately-scoped walk) so wn_relation_fanout -- which
+            # analogy_select.py's exclusion-lemma set is built from -- can
+            # never end up narrower than what candidates admit; that gap
+            # would let a valid alternate answer slip through a quiz as an
+            # unexcluded wrong option.
+            candidate_targets: set[tuple[str, str]] = fanout_targets if rel_type not in _TRANSITIVE_FAMILIES \
+                else {(lw, other.pos()) for s in all_synsets for other in rel_fn(s)
+                      for lw in _lemma_words(other) if lw != lemma_lc}
+            for lw, other_pos in candidate_targets:
+                other_term = _get_or_create_ordinary_term(cur, schema, wn, lw, other_pos)
+                if other_term is None:
+                    continue
+                candidates.append(RelationCandidate(
+                    term_a_lemma=term_row["lemma"], term_a_pos=term_row["pos"],
+                    term_a_gloss=term_row["gloss"],
+                    term_b_lemma=other_term["lemma"], term_b_pos=_WN_POS_TO_CANONICAL.get(other_pos, other_pos),
+                    term_b_gloss=other_term["gloss"] or "",
+                    relation_type=rel_type, relation_family=family, source=f"wordnet_{rel_type}",
+                ))
 
         # Antonym (lemma-level, symmetric) and derivationally_related (lemma-level).
         for lem in synset.lemmas():
@@ -395,6 +421,39 @@ def _build_matchers(nlp):
     matcher.add("purpose", [[
         {"LOWER": "used"}, {"LOWER": {"IN": ["for", "to"]}}, {"POS": "VERB", "OP": "+"},
     ]])
+    # The three patterns below exist specifically to give adjectives (and any
+    # other POS WordNet's native ontology under-serves) analogy relations
+    # that don't depend on WordNet's hypernym/holonym/purpose/agentive graph
+    # -- that graph structurally has almost nothing for adjective synsets
+    # (confirmed empirically: 8 raw is_a candidates across 9,152 adjective
+    # vocab terms), so no amount of WordNet-side extraction tuning closes
+    # that gap. These read straight off the vocab word's own definition text
+    # instead, the same technique kind_of/agent/part_of/purpose already use.
+    matcher.add("relates_to", [[
+        {"LOWER": "of", "OP": "?"}, {"LOWER": "or", "OP": "?"},
+        {"LEMMA": {"IN": ["relate", "pertain"]}}, {"LOWER": "to"},
+        {"LOWER": {"IN": ["a", "an", "the"]}, "OP": "?"}, {"POS": "ADJ", "OP": "*"},
+        {"POS": {"IN": ["NOUN", "PROPN"]}, "OP": "+"},
+    ]])
+    matcher.add("resembling", [
+        [{"LEMMA": "resemble"}, {"LOWER": {"IN": ["a", "an", "the"]}, "OP": "?"},
+         {"POS": "ADJ", "OP": "*"}, {"POS": {"IN": ["NOUN", "PROPN"]}, "OP": "+"}],
+        [{"LOWER": "like"}, {"LOWER": {"IN": ["a", "an"]}},
+         {"POS": "ADJ", "OP": "*"}, {"POS": {"IN": ["NOUN", "PROPN"]}, "OP": "+"}],
+    ])
+    # Deliberately folded into the existing "attribute" family (not a new
+    # one) at the _PATTERN_LABEL_TO_RELATION/_RELATION_FAMILY layer below --
+    # "having X"/"characterized by X" is the same "which dimension/quality
+    # does this word vary along" relationship WordNet's own .attributes()
+    # link already represents (heavy -> weight), just mined from definition
+    # text where WordNet itself is thin (only 22 verified attribute edges
+    # existed for the whole adjective vocab before this pattern).
+    matcher.add("characterized_by", [
+        [{"LEMMA": "have"}, {"LOWER": {"IN": ["a", "an", "the"]}, "OP": "?"},
+         {"POS": "ADJ", "OP": "*"}, {"POS": {"IN": ["NOUN", "PROPN"]}, "OP": "+"}],
+        [{"LEMMA": "characterize"}, {"LOWER": "by"}, {"LOWER": {"IN": ["a", "an", "the"]}, "OP": "?"},
+         {"POS": "ADJ", "OP": "*"}, {"POS": {"IN": ["NOUN", "PROPN"]}, "OP": "+"}],
+    ])
     return matcher
 
 
@@ -403,6 +462,9 @@ _PATTERN_LABEL_TO_RELATION = {
     "agent": "definition_pattern_agent",
     "part_of": "definition_pattern_part_of",
     "purpose": "definition_pattern_purpose",
+    "relates_to": "definition_pattern_relates_to",
+    "resembling": "definition_pattern_resembling",
+    "characterized_by": "definition_pattern_characterized_by",
 }
 
 _matcher_singleton = None
@@ -416,11 +478,15 @@ def _get_matcher(nlp):
 
 
 def extract_definition_pattern_edges(conn, schema: str, wn, nlp, term_row: dict) -> list[RelationCandidate]:
-    """spaCy Matcher over the vocab word's own definition text -- recovers
-    relations WordNet doesn't have for exactly the words WordNet is thinnest
-    on. Only emits a candidate when the parsed head term resolves to a
-    WordNet synset (needed for the exclusion-set fallback in
-    analogy_select.py when term_a itself has no synset)."""
+    """spaCy Matcher over term_row's own gloss text -- a vocab word's own
+    definition, or an ordinary/anchor term's WordNet synset definition (see
+    _get_or_create_ordinary_term); this function doesn't care which. Recovers
+    relations WordNet's relation graph doesn't have for exactly the words/
+    POS classes WordNet is thinnest on (see relates_to/resembling/
+    characterized_by's docstring in _build_matchers). Only emits a candidate
+    when the parsed head term resolves to a WordNet synset (needed for the
+    exclusion-set fallback in analogy_select.py when term_a itself has no
+    synset)."""
     if wn is None or not term_row.get("gloss"):
         return []
     doc = nlp(term_row["gloss"])
@@ -462,15 +528,45 @@ def _load_llm(cfg):
     return Llama(model_path=cfg.model_path, n_gpu_layers=cfg.n_gpu_layers, n_ctx=cfg.n_ctx, verbose=False)
 
 
+# Precise, per-relation_type descriptions handed to the verifier ALONGSIDE
+# the bare type string -- an opaque identifier like "definition_pattern_
+# relates_to" gives a judge model nothing to hold the near-synonym rejection
+# clause against, and relates_to/resembling/characterized_by are exactly the
+# families likely to get reflexively rejected as "just associated" or "just a
+# paraphrase" without one (arboreal/tree is a real relates_to pair, not a
+# near-synonym one, but the model has no way to know that from the bare name
+# alone). similar_to is deliberately exempted from the near-synonym rule
+# below since it IS WordNet's own similar-meaning link, not a paraphrase bug.
+_RELATION_TYPE_DESCRIPTIONS = {
+    "hypernym": "b is a broader, more general category that a is a specific kind of (a IS-A b)",
+    "holonym_part": "a is literally a physical part of the whole b",
+    "holonym_member": "a is a member of the group/organization b",
+    "holonym_substance": "a is made of the substance/material b",
+    "antonym": "a and b are opposites in meaning",
+    "similar_to": "a and b are near-synonymous / very similar in meaning -- this IS the intended relation for this type, not a paraphrase error",
+    "derivationally_related": "a and b are different grammatical forms sharing the same root (e.g. noun/verb/adjective forms of one concept), not necessarily synonyms",
+    "attribute": "b is the underlying dimension/quality that a describes a value or degree of (e.g. heavy is a value of weight)",
+    "definition_pattern_kind_of": "a's own definition literally states it is a kind, type, or sort of b",
+    "definition_pattern_agent": "a's own definition describes a person or agent who does b",
+    "definition_pattern_part_of": "a's own definition literally states it is part of b",
+    "definition_pattern_purpose": "a's own definition states it is used for or to do b",
+    "definition_pattern_relates_to": "a's own definition literally states it relates or pertains to the field, subject, or domain b -- reject if a and b are merely topically associated without the definition actually saying this",
+    "definition_pattern_resembling": "a's own definition literally states it resembles or is like b in appearance or quality -- a real resemblance claim, not mere topical association",
+    "definition_pattern_characterized_by": "b is the quality, feature, or characteristic that a's own definition states it has (e.g. 'having b' / 'characterized by b') -- b is the DIMENSION a varies along, not a synonym of a",
+}
+
+
 _VERIFY_SYSTEM = (
     "You are checking candidate word-analogy relation pairs for a vocabulary quiz. "
-    "For each pair, word 'b' is claimed to stand in the relationship named by 'relation' "
-    "to word 'a', judged strictly from the two definitions given -- not from general "
-    "knowledge of the words. Judge ok=true ONLY if the relation genuinely and specifically "
-    "holds. Reject (ok=false) if the relation doesn't actually hold, OR if 'a' and 'b' are "
-    "just near-synonyms / restatements of each other (a valid analogy relation must be a "
-    "specific, nameable, non-synonymous relationship, not a paraphrase). When genuinely "
-    "unsure, reject. "
+    "For each pair, word 'b' is claimed to stand in the relationship described by "
+    "'relation_description' to word 'a', judged strictly from the two definitions "
+    "given -- not from general knowledge of the words. Judge ok=true ONLY if the "
+    "described relation genuinely and specifically holds. Reject (ok=false) if the "
+    "relation doesn't actually hold, OR if 'a' and 'b' are just near-synonyms / "
+    "restatements of each other UNLESS the relation_description itself says that's the "
+    "intended relation (a valid analogy relation must be a specific, nameable "
+    "relationship matching its own description, not an unrelated paraphrase). When "
+    "genuinely unsure, reject. "
     'Output ONLY a JSON array, one object per input, in the same order: '
     '[{"i": <int>, "ok": <true|false>}]. Include every input exactly once.'
 )
@@ -478,7 +574,8 @@ _VERIFY_SYSTEM = (
 
 def _verify_query(llm, batch: list[RelationCandidate]) -> str:
     items = [
-        {"i": i, "relation": c.relation_type, "a": c.term_a_lemma, "a_def": c.term_a_gloss[:200],
+        {"i": i, "relation_description": _RELATION_TYPE_DESCRIPTIONS.get(c.relation_type, c.relation_type),
+         "a": c.term_a_lemma, "a_def": c.term_a_gloss[:200],
          "b": c.term_b_lemma, "b_def": c.term_b_gloss[:200]}
         for i, c in enumerate(batch)
     ]
@@ -605,81 +702,61 @@ def compute_sibling_fanout(conn, schema: str, wn, d_term: dict) -> int:
 
 # --- orchestrator --------------------------------------------------------------
 
-def backfill_analogies(conn, schema: str, cfg, limit: int = 0, batch_size: int = 20) -> dict:
-    """CLI entry point (concordance backfill-analogies / maintain). Resumable:
-    a term already in wn_relation_scan is skipped on later runs. Newly
-    discovered anchor (ordinary) terms have no wn_relation_scan row yet, so
-    they're picked up automatically by the NEXT invocation of this same
-    command -- no special first-run/later-run handling needed, the frontier
-    just saturates after a couple of runs since a common term's own relation
-    targets are overwhelmingly common too."""
-    wn = _load_wordnet()
-    nlp = _get_nlp()
+_DEFAULT_CHUNK_SIZE = 200  # terms per extract -> verify -> write cycle, see backfill_analogies docstring
 
-    resolve_vocab_terms(conn, schema, wn, limit=limit)
 
-    with conn.cursor() as cur:
-        cur.execute(f"""SELECT t.id, t.word_id, t.lemma, t.wn_pos, t.synset_name, t.gloss
-                        FROM {schema}.wn_relation_term t
-                        LEFT JOIN {schema}.wn_relation_scan s ON s.term_id = t.id
-                        WHERE s.term_id IS NULL AND (t.word_id IS NOT NULL OR t.is_common)
-                        ORDER BY t.id"""
-                    + (" LIMIT %s" if limit else ""),
-                    (limit,) if limit else ())
-        to_scan = cur.fetchall()
-
-    all_candidates: list[RelationCandidate] = []
+def _extract_chunk(conn, schema: str, wn, nlp, chunk: list[tuple]) -> tuple[list["RelationCandidate"], dict, dict]:
+    """Extraction only (no LLM), for one chunk of `to_scan` rows -- the first
+    third of backfill_analogies's per-chunk cycle. Returns (candidates,
+    edges_found_by_term, method_by_term), scoped to just this chunk."""
+    candidates: list[RelationCandidate] = []
     edges_found_by_term: dict[int, int] = {}
     method_by_term: dict[int, str] = {}
-
-    print(f"[backfill-analogies] extracting relations for {len(to_scan)} terms...")
-    for i, (term_id, word_id, lemma, wn_pos, synset_name, gloss) in enumerate(to_scan, 1):
+    for term_id, word_id, lemma, wn_pos, synset_name, gloss in chunk:
         term_row = {"id": term_id, "word_id": word_id, "lemma": lemma, "wn_pos": wn_pos,
                     "pos": _WN_POS_TO_CANONICAL.get(wn_pos, wn_pos), "synset_name": synset_name, "gloss": gloss}
-        candidates: list[RelationCandidate] = []
+        term_candidates: list[RelationCandidate] = []
         method = ""
         if synset_name:
             wn_candidates, _fanout_count = extract_wordnet_edges(conn, schema, wn, term_row)
-            candidates.extend(wn_candidates)
+            term_candidates.extend(wn_candidates)
             method = "wordnet"
-        if word_id is not None:   # definition-pattern extraction only makes sense for a real vocab definition
+        # Gloss-driven, not vocab-word-specific -- an ordinary/anchor term's
+        # `gloss` is WordNet's own synset definition (see _get_or_create_
+        # ordinary_term), and it fires the same lead-in phrasings ("of or
+        # relating to X", "resembling X") a vocab word's own definition does
+        # (confirmed empirically: ~11%/9%/2% match rates on a sample of
+        # ordinary adjective glosses for relates_to/characterized_by/
+        # resembling). Running this for ordinary terms too, not just vocab
+        # ones, is what makes an ordinary<->ordinary anchor edge possible for
+        # every definition-pattern family at all -- previously gated to
+        # word_id is not None, which meant style B (one_hard_term) was
+        # structurally dead for every definition-pattern-sourced family
+        # (kind_of/agent/part_of/purpose, and now relates_to/resembling/
+        # characterized_by too), since an anchor needs BOTH sides ordinary.
+        if gloss:
             def_candidates = extract_definition_pattern_edges(conn, schema, wn, nlp, term_row)
             if def_candidates:
-                candidates.extend(def_candidates)
+                term_candidates.extend(def_candidates)
                 method = "both" if method else "definition_pattern"
-        edges_found_by_term[term_id] = len(candidates)
+        edges_found_by_term[term_id] = len(term_candidates)
         method_by_term[term_id] = method or "wordnet"
-        all_candidates.extend(candidates)
-        # Periodic commit: extraction inserts wn_relation_term/wn_relation_fanout
-        # rows as it discovers ordinary (anchor-bank) terms, and without this the
-        # entire extraction phase (which can run over thousands of terms) stays
-        # in one uncommitted transaction until backfill_analogies's own final
-        # commit -- a crash or kill partway through would lose all of it, the
-        # same failure mode classify_and_store's own docstring describes fixing.
-        if i % 100 == 0:
-            conn.commit()
-            print(f"[backfill-analogies]   ...{i}/{len(to_scan)} terms scanned "
-                  f"({len(all_candidates)} candidate edges found so far)")
-    conn.commit()
+        candidates.extend(term_candidates)
+    return candidates, edges_found_by_term, method_by_term
 
-    print(f"[backfill-analogies] verifying {len(all_candidates)} candidate edges "
-          f"(batches of {batch_size})...")
-    verify_candidates(cfg, all_candidates, batch_size=batch_size)
 
-    verified_count = 0
-    rejected_count = 0
-    sibling_rows = 0
-
+def _write_chunk(conn, schema: str, wn, cfg, chunk: list[tuple], candidates: list["RelationCandidate"],
+                  edges_found_by_term: dict, method_by_term: dict) -> tuple[int, int, int]:
+    """Write one chunk's already-LLM-verified candidates (word_relation_edge)
+    plus its wn_relation_scan resumability markers, in one committed
+    transaction -- the last third of backfill_analogies's per-chunk cycle.
+    Returns (verified_count, rejected_count, sibling_rows) for this chunk."""
+    verified_count = rejected_count = sibling_rows = 0
     # Re-resolve term ids for insertion (candidates carry lemmas, not ids, to
-    # stay decoupled from extraction's cursor-scoped lookups above); _find_term_id
+    # stay decoupled from extraction's cursor-scoped lookups); _find_term_id
     # prefers a vocab-word row over an ordinary one for the same lemma+POS.
-    print(f"[backfill-analogies] writing {len(all_candidates)} verified/rejected edges...")
     with conn.cursor() as cur:
-        for i, c in enumerate(all_candidates, 1):
-            if i % 200 == 0:
-                conn.commit()
-                print(f"[backfill-analogies]   ...{i}/{len(all_candidates)} edges written "
-                      f"({verified_count} verified, {rejected_count} rejected so far)")
+        for c in candidates:
             a_wn_pos = wordnet_pos(c.term_a_pos)
             b_wn_pos = wordnet_pos(c.term_b_pos)
             if not a_wn_pos or not b_wn_pos:
@@ -713,19 +790,95 @@ def backfill_analogies(conn, schema: str, cfg, limit: int = 0, batch_size: int =
                             sibling_rows += compute_sibling_fanout(conn, schema, wn, d_term)
                 else:
                     rejected_count += 1
-        for term_id, word_id, lemma, wn_pos, synset_name, gloss in to_scan:
+        for term_id, word_id, lemma, wn_pos, synset_name, gloss in chunk:
             cur.execute(
                 f"""INSERT INTO {schema}.wn_relation_scan (term_id, edges_found, method)
                     VALUES (%s, %s, %s) ON CONFLICT (term_id) DO NOTHING""",
                 (term_id, edges_found_by_term.get(term_id, 0), method_by_term.get(term_id, "wordnet")),
             )
         conn.commit()
+    return verified_count, rejected_count, sibling_rows
+
+
+def backfill_analogies(conn, schema: str, cfg, limit: int = 0, batch_size: int = 20,
+                        chunk_size: int = _DEFAULT_CHUNK_SIZE) -> dict:
+    """CLI entry point (concordance backfill-analogies / maintain). Resumable
+    at two grains: a term already in wn_relation_scan is skipped on a later
+    run (as before), AND within a single run, terms are processed in chunks
+    of `chunk_size` -- extract, LLM-verify, and WRITE (word_relation_edge +
+    wn_relation_scan) each fully committed before the next chunk's extraction
+    starts, rather than one extract-everything/verify-everything/write-
+    everything pass across the WHOLE term list. Verification is the
+    expensive, GPU-bound step; the previous single-pass design held every
+    LLM-verified candidate in memory until the entire term list had been
+    verified, so killing the process mid-run (as happened switching judge
+    models mid-backfill) discarded however many thousands of already-
+    verified edges hadn't reached the final write loop yet -- pure wasted
+    GPU time. Chunking bounds that loss to one chunk's candidates, not the
+    whole run. Newly discovered anchor (ordinary) terms have no wn_relation_
+    scan row yet, so they're picked up automatically by the NEXT invocation
+    of this same command -- no special first-run/later-run handling needed,
+    the frontier just saturates after a couple of runs since a common term's
+    own relation targets are overwhelmingly common too."""
+    wn = _load_wordnet()
+    nlp = _get_nlp()
+
+    resolve_vocab_terms(conn, schema, wn, limit=limit)
+
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT t.id, t.word_id, t.lemma, t.wn_pos, t.synset_name, t.gloss
+                        FROM {schema}.wn_relation_term t
+                        LEFT JOIN {schema}.wn_relation_scan s ON s.term_id = t.id
+                        WHERE s.term_id IS NULL AND (t.word_id IS NOT NULL OR t.is_common)
+                        ORDER BY t.id"""
+                    + (" LIMIT %s" if limit else ""),
+                    (limit,) if limit else ())
+        to_scan = cur.fetchall()
+
+    chunks = [to_scan[i:i + chunk_size] for i in range(0, len(to_scan), chunk_size)]
+    print(f"[backfill-analogies] {len(to_scan)} terms to scan, in {len(chunks)} chunk(s) of up to {chunk_size}...")
+
+    total_edges_found = 0
+    total_fanout = 0
+    verified_count = 0
+    rejected_count = 0
+    sibling_rows = 0
+    # Loaded once, lazily, on the first chunk that actually has candidates --
+    # NOT per chunk. verify_candidates accepts an injectable `llm` for
+    # exactly this reason (its own docstring: "injectable for testing"), but
+    # its default (llm=None) reloads the model from scratch on every call if
+    # you don't pass one -- fine for the old single-pass-over-everything
+    # design (one call, one load), but chunking without this would reload a
+    # multi-GB model from disk on every single chunk.
+    llm = None
+
+    for chunk_num, chunk in enumerate(chunks, 1):
+        candidates, edges_found_by_term, method_by_term = _extract_chunk(conn, schema, wn, nlp, chunk)
+        conn.commit()  # fanout/term rows discovered during this chunk's extraction
+        total_edges_found += len(candidates)
+        total_fanout += sum(edges_found_by_term.values())
+
+        if candidates:
+            if llm is None:
+                llm = _load_llm(cfg)
+            print(f"[backfill-analogies] chunk {chunk_num}/{len(chunks)}: {len(chunk)} terms, "
+                  f"{len(candidates)} candidate edges -- verifying (batches of {batch_size})...")
+            verify_candidates(cfg, candidates, batch_size=batch_size, llm=llm)
+
+        chunk_verified, chunk_rejected, chunk_siblings = _write_chunk(
+            conn, schema, wn, cfg, chunk, candidates, edges_found_by_term, method_by_term)
+        verified_count += chunk_verified
+        rejected_count += chunk_rejected
+        sibling_rows += chunk_siblings
+
+        print(f"[backfill-analogies] chunk {chunk_num}/{len(chunks)} written "
+              f"({verified_count} verified, {rejected_count} rejected so far)")
 
     return {
         "terms_scanned": len(to_scan),
-        "edges_found": len(all_candidates),
+        "edges_found": total_edges_found,
         "edges_verified": verified_count,
         "edges_rejected": rejected_count,
-        "fanout_rows": sum(edges_found_by_term.values()),
+        "fanout_rows": total_fanout,
         "sibling_rows": sibling_rows,
     }
