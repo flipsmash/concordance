@@ -770,6 +770,173 @@ def test_mw_backfill_never_overwrites_existing_metadata_with_blank(monkeypatch):
 
 
 @pg
+def test_author_fame_excludes_placeholders_and_is_resumable(monkeypatch):
+    from concordance import fame
+
+    monkeypatch.setattr(fame, "gather_author_evidence", lambda author, session: {"ngram": {}, "wikidata": {}})
+    monkeypatch.setattr(fame, "score_author", lambda llm, author, factors: (7.0, "well known"))
+
+    schema = "cc_test_author_fame"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    db.sync_book_results(conn, "A Real Book", kept=[], rejected=[], schema=schema, author="A Real Author")
+    db.sync_book_results(conn, "An Anthology", kept=[], rejected=[], schema=schema, author="Various")
+
+    stats = db.compute_author_fame(conn, schema, llm=object())
+
+    # "Various" (a PLACEHOLDER_AUTHORS aggregation label, not a person) must
+    # never be scored -- it has no individual fame to speak of, and scoring
+    # it would burn a real LLM call + network round-trips on nothing.
+    assert stats["attempted"] == 1
+    with conn.cursor() as cur:
+        cur.execute(f"select fame_score, fame_reasoning, computed_at is not null, checked_at is not null "
+                    f"from {schema}.author_fame where author='A Real Author'")
+        assert cur.fetchone() == (7.0, "well known", True, True)
+        cur.execute(f"select count(*) from {schema}.author_fame where author='Various'")
+        assert cur.fetchone() == (0,)
+
+    # Resumability: a second run with the default stale_days=0 must touch
+    # nothing already-scored -- checked_at is sticky, same convention as
+    # word.mw_checked_at.
+    monkeypatch.setattr(fame, "score_author", lambda llm, author, factors: (1.0, "should not be written"))
+    stats2 = db.compute_author_fame(conn, schema, llm=object())
+    assert stats2["attempted"] == 0
+    with conn.cursor() as cur:
+        cur.execute(f"select fame_score from {schema}.author_fame where author='A Real Author'")
+        assert cur.fetchone() == (7.0,)   # untouched, not overwritten with 1.0
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_book_fame_uses_author_context_and_tolerates_its_absence(monkeypatch):
+    from concordance import fame
+
+    captured_author_fame = {}
+
+    def fake_gather_book_evidence(title, author, author_fame, session):
+        captured_author_fame[title] = author_fame
+        return {"ngram": {"skipped": True}, "author_fame_seen": author_fame}
+
+    monkeypatch.setattr(fame, "gather_book_evidence", fake_gather_book_evidence)
+    monkeypatch.setattr(fame, "score_book", lambda llm, title, author, factors: (4.0, "unremarkable"))
+
+    schema = "cc_test_book_fame"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    db.sync_book_results(conn, "A Famous Author's Book", kept=[], rejected=[], schema=schema, author="Famous Author")
+    db.sync_book_results(conn, "An Unscored Author's Book", kept=[], rejected=[], schema=schema, author="Unscored Author")
+    with conn.cursor() as cur:
+        cur.execute(f"""INSERT INTO {schema}.author_fame (author, fame_score, fame_reasoning, computed_at, checked_at)
+                        VALUES ('Famous Author', 9.0, 'major figure', now(), now())""")
+    conn.commit()
+
+    stats = db.compute_book_fame(conn, schema, llm=object())
+    assert stats["attempted"] == 2
+    assert stats["scored"] == 2
+
+    # The famous author's book got their real score+reasoning as context...
+    assert captured_author_fame["A Famous Author's Book"]["fame_score"] == 9.0
+    assert captured_author_fame["A Famous Author's Book"]["fame_reasoning"] == "major figure"
+    # ...while the not-yet-scored author's book saw None, not a crash or a
+    # missing key -- book-fame must tolerate no prior existing at all.
+    assert captured_author_fame["An Unscored Author's Book"] is None
+
+    with conn.cursor() as cur:
+        cur.execute(f"""select bf.fame_factors->'author_fame_seen'->>'fame_score'
+                        from {schema}.book_fame bf join {schema}.book b on b.id=bf.book_id
+                        where b.title='A Famous Author''s Book'""")
+        assert cur.fetchone() == ("9.0",)
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_author_fame_one_failure_does_not_abort_the_run(monkeypatch):
+    from concordance import fame
+
+    def flaky_gather(author, session):
+        if author == "Poison Author":
+            raise RuntimeError("simulated evidence-gathering crash")
+        return {"ngram": {}, "wikidata": {}}
+
+    monkeypatch.setattr(fame, "gather_author_evidence", flaky_gather)
+    monkeypatch.setattr(fame, "score_author", lambda llm, author, factors: (5.0, "fine"))
+
+    schema = "cc_test_author_fame_flaky"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    for author in ("Author Alpha", "Poison Author", "Author Beta"):
+        db.sync_book_results(conn, f"{author}'s Book", kept=[], rejected=[], schema=schema, author=author)
+
+    stats = db.compute_author_fame(conn, schema, llm=object())
+
+    # The poisoned author is skipped (not scored), but its neighbors in the
+    # same run still get processed -- one bad item must not take the whole
+    # run down.
+    with conn.cursor() as cur:
+        cur.execute(f"select author, fame_score from {schema}.author_fame order by author")
+        rows = dict(cur.fetchall())
+    assert rows.get("Author Alpha") == 5.0
+    assert rows.get("Author Beta") == 5.0
+    assert "Poison Author" not in rows
+    assert stats["attempted"] == 2   # only the two that didn't raise
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_author_fame_stops_early_on_evidence_degradation(monkeypatch):
+    from concordance import db as dbmod
+    from concordance import fame
+
+    monkeypatch.setattr(dbmod, "_FAME_EVIDENCE_FAILURE_MIN_SAMPLE", 3)
+    monkeypatch.setattr(fame, "gather_author_evidence",
+                        lambda author, session: {"ngram": {"failed": True}, "wikidata": {"failed": True}, "snippets_failed": True})
+    monkeypatch.setattr(fame, "score_author", lambda llm, author, factors: (1.0, "blind guess"))
+
+    schema = "cc_test_author_fame_degraded"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    for i in range(10):
+        db.sync_book_results(conn, f"Book {i}", kept=[], rejected=[], schema=schema, author=f"Author {i}")
+
+    stats = db.compute_author_fame(conn, schema, llm=object())
+
+    assert stats["stopped_early"] is True
+    assert stats["remaining"] > 0
+    assert stats["attempted"] < 10   # the run genuinely stopped, not just labeled
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
 def test_dedupe_plural_definitions_all_three_outcomes(monkeypatch):
     from concordance import resolve
     from concordance.model import Candidate

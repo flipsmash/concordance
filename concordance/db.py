@@ -16,6 +16,7 @@ Connection comes from ``DATABASE_URL`` (env or a git-ignored .env), e.g.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -212,6 +213,37 @@ CREATE TABLE IF NOT EXISTS {s}.book_cluster_run (
     tree_json    jsonb NOT NULL,    -- nested linkage tree, for the dendrogram
     computed_at  timestamptz NOT NULL DEFAULT now()
 );
+
+-- Absolute (NOT corpus-relative) fame/historical-importance score, 1-10,
+-- LLM-judged against a fixed external rubric anchored on real reference
+-- figures (Shakespeare=10) -- see fame.py. author is plain text, same
+-- keying as author_similarity/author_cluster above: there is no author
+-- table to reference. checked_at is bumped on every attempt (hit or miss,
+-- same sticky-resumability convention as word.mw_checked_at) so a rerun
+-- never re-spends a real LLM call + several network round-trips on a row
+-- already attempted; computed_at is set only when a real score landed.
+CREATE TABLE IF NOT EXISTS {s}.author_fame (
+    author         text PRIMARY KEY,
+    fame_score     double precision,
+    fame_reasoning text,
+    fame_factors   jsonb,
+    computed_at    timestamptz,
+    checked_at     timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS author_fame_score_idx ON {s}.author_fame (fame_score DESC NULLS LAST);
+
+-- Same shape one level down. book_id is a real FK (book.id exists, unlike
+-- author) so ON DELETE CASCADE is correct here even though author_fame
+-- can't have an equivalent.
+CREATE TABLE IF NOT EXISTS {s}.book_fame (
+    book_id        integer PRIMARY KEY REFERENCES {s}.book(id) ON DELETE CASCADE,
+    fame_score     double precision,
+    fame_reasoning text,
+    fame_factors   jsonb,
+    computed_at    timestamptz,
+    checked_at     timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS book_fame_score_idx ON {s}.book_fame (fame_score DESC NULLS LAST);
 
 CREATE TABLE IF NOT EXISTS {s}.word_audio (
     word_id      integer PRIMARY KEY REFERENCES {s}.word(id) ON DELETE CASCADE,
@@ -2539,6 +2571,248 @@ def compute_author_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int 
                 conn.commit()
     conn.commit()
     return {"authors": len(author_names), "pairs_stored": stored}
+
+
+# --- fame scoring -------------------------------------------------------------
+
+# If at least this many items have been attempted AND the running
+# no-usable-evidence rate crosses this fraction, stop the whole run rather
+# than grind through the rest effectively blind -- same "stop, don't
+# silently degrade" instinct as mw_backfill's quota-stop, gated on evidence
+# quality instead of an API cap. The minimum-sample guard keeps a handful of
+# unlucky early misses from tripping this by chance.
+_FAME_EVIDENCE_FAILURE_MIN_SAMPLE = 20
+_FAME_EVIDENCE_FAILURE_THRESHOLD = 0.30
+
+
+def _no_usable_author_evidence(factors: dict) -> bool:
+    ngram = factors.get("ngram") or {}
+    wikidata = factors.get("wikidata") or {}
+    ngram_ok = not ngram.get("failed") and not ngram.get("skipped")
+    wikidata_ok = bool(wikidata.get("sitelinks")) and wikidata.get("corroborated")
+    snippets_ok = not factors.get("snippets_failed")
+    return not (ngram_ok or wikidata_ok or snippets_ok)
+
+
+def _no_usable_book_evidence(factors: dict) -> bool:
+    ngram = factors.get("ngram") or {}
+    ngram_ok = not ngram.get("failed") and not ngram.get("skipped")
+    snippets_ok = not factors.get("snippets_failed")
+    return not (ngram_ok or snippets_ok)
+
+
+def _load_fame_llm():
+    from pathlib import Path
+
+    from .config import Config
+    cfg = Config()
+    if not (cfg.model_path and Path(cfg.model_path).exists()):
+        raise RuntimeError(
+            f"no local model available (model_path {cfg.model_path!r} missing) -- "
+            "fame scoring needs a real LLM; pass dry_run=True to only gather evidence")
+    from llama_cpp import Llama
+    return Llama(model_path=cfg.model_path, n_gpu_layers=cfg.n_gpu_layers, n_ctx=cfg.n_ctx, verbose=False)
+
+
+def compute_author_fame(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
+                        stale_days: int = 0, llm=None, dry_run: bool = False) -> dict:
+    """`concordance author-fame`: an ABSOLUTE (not corpus-relative) 1-10
+    historical/cultural importance score per author, LLM-judged against a
+    fixed external rubric (see concordance/fame.py's module docstring for
+    why absolute over corpus-relative percentile, and for the evidence
+    sources). Excludes PLACEHOLDER_AUTHORS -- same reasoning as
+    compute_author_similarity: an aggregation label has no individual fame
+    to score.
+
+    `checked_at` is a STICKY marker (bumped on every attempt, hit or miss)
+    so a rerun with stale_days=0 only touches never-scored authors -- this
+    is a genuinely expensive job (several network round-trips + one real
+    LLM generation per author, realistically 5-15s each), not a quick
+    backfill, so resumability is load-bearing. `dry_run=True` only gathers
+    and prints evidence (no LLM call, no DB write, checked_at untouched) --
+    for sanity-checking evidence quality before committing to a real run.
+
+    Commits after EVERY author, never batched -- a long-held transaction
+    here would block a webapp restart's schema-check ALTER TABLE (this
+    already happened once in production). Stops the whole run early if the
+    running no-usable-evidence rate crosses
+    _FAME_EVIDENCE_FAILURE_THRESHOLD, rather than grinding through
+    thousands of effectively-blind LLM guesses."""
+    from . import fame
+    from .dictionary import make_session
+
+    s = _safe_schema(schema)
+    placeholders = list(PLACEHOLDER_AUTHORS)
+    stale_clause = (
+        "(af.checked_at IS NULL OR af.checked_at < now() - (%s * interval '1 day'))"
+        if stale_days else "af.checked_at IS NULL"
+    )
+    extra_params = [stale_days] if stale_days else []
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT DISTINCT b.author FROM {s}.book b
+                LEFT JOIN {s}.author_fame af ON af.author = b.author
+                WHERE b.author IS NOT NULL AND b.author <> ''
+                  AND NOT (b.author = ANY(%s))
+                  AND {stale_clause}
+                ORDER BY b.author""" + (f" LIMIT {int(limit)}" if limit else ""),
+            (placeholders, *extra_params))
+        authors = [r[0] for r in cur.fetchall()]
+
+    stats = {"attempted": 0, "scored": 0, "failed_evidence": 0, "failed_parse": 0, "errors": 0,
+             "stopped_early": False, "remaining": 0}
+    if not authors:
+        return stats
+
+    if not dry_run and llm is None:
+        llm = _load_fame_llm()
+
+    session = make_session()
+    no_evidence_count = 0
+
+    with conn.cursor() as cur:
+        for i, author in enumerate(authors, 1):
+            try:
+                factors = fame.gather_author_evidence(author, session)
+                stats["attempted"] += 1
+                if _no_usable_author_evidence(factors):
+                    no_evidence_count += 1
+                    stats["failed_evidence"] += 1
+
+                if dry_run:
+                    print(f"[dry-run] {author}: {json.dumps(factors, default=str)[:300]}")
+                else:
+                    score, why = fame.score_author(llm, author, factors)
+                    if score is None:
+                        stats["failed_parse"] += 1
+                    else:
+                        stats["scored"] += 1
+                    cur.execute(
+                        f"""INSERT INTO {s}.author_fame
+                                (author, fame_score, fame_reasoning, fame_factors, computed_at, checked_at)
+                            VALUES (%s,%s,%s,%s, CASE WHEN %s THEN now() ELSE NULL END, now())
+                            ON CONFLICT (author) DO UPDATE SET
+                                fame_score=EXCLUDED.fame_score, fame_reasoning=EXCLUDED.fame_reasoning,
+                                fame_factors=EXCLUDED.fame_factors, computed_at=EXCLUDED.computed_at,
+                                checked_at=now()""",
+                        (author, score, why, json.dumps(factors, default=str), score is not None))
+                    conn.commit()
+            except Exception as exc:  # noqa: BLE001 -- one poisoned item must not kill a multi-hour run
+                conn.rollback()
+                stats["errors"] += 1
+                print(f"  [author-fame] {author!r} raised {exc!r} -- skipped, left unattempted for a future run")
+                continue
+
+            if i % 25 == 0:
+                print(f"  ...{i}/{len(authors)} authors attempted "
+                      f"({stats['scored']} scored, {stats['failed_evidence']} no usable evidence)")
+
+            if (stats["attempted"] >= _FAME_EVIDENCE_FAILURE_MIN_SAMPLE
+                    and no_evidence_count / stats["attempted"] > _FAME_EVIDENCE_FAILURE_THRESHOLD):
+                stats["stopped_early"] = True
+                stats["remaining"] = len(authors) - i
+                break
+    return stats
+
+
+def compute_book_fame(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
+                      stale_days: int = 0, llm=None, dry_run: bool = False) -> dict:
+    """`concordance book-fame`: same shape one level down from
+    compute_author_fame, scoring the SPECIFIC WORK rather than its author.
+    LEFT JOINs author_fame on book.author (NULL-tolerant by design -- a
+    first run, or a book by a not-yet-scored or placeholder author, simply
+    has no prior; concordance/fame.py's BOOK_RUBRIC already tells the model
+    to treat that as "no prior available", not as evidence of obscurity).
+    The exact author-fame snapshot shown (score + computed_at, or None) is
+    recorded in fame_factors.author_fame_seen so a later author-fame rerun
+    never makes an existing book's reasoning unverifiable against what it
+    actually saw.
+
+    Run author-fame first for the best results, but this does not require
+    it. Ordered by word_count DESC so an interrupted multi-day run banks
+    the highest-traffic books first (see book.word_count; NULLS LAST for
+    any book that hasn't been through classify.py's counting pass)."""
+    from . import fame
+    from .dictionary import make_session
+
+    s = _safe_schema(schema)
+    placeholders = list(PLACEHOLDER_AUTHORS)
+    stale_clause = (
+        "(bf.checked_at IS NULL OR bf.checked_at < now() - (%s * interval '1 day'))"
+        if stale_days else "bf.checked_at IS NULL"
+    )
+    extra_params = [stale_days] if stale_days else []
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT b.id, b.title, b.author, af.fame_score, af.fame_reasoning, af.computed_at
+                FROM {s}.book b
+                LEFT JOIN {s}.book_fame bf ON bf.book_id = b.id
+                LEFT JOIN {s}.author_fame af
+                    ON af.author = b.author AND NOT (b.author = ANY(%s))
+                WHERE {stale_clause}
+                ORDER BY b.word_count DESC NULLS LAST, b.title""" +
+            (f" LIMIT {int(limit)}" if limit else ""),
+            (placeholders, *extra_params))
+        rows = cur.fetchall()
+
+    stats = {"attempted": 0, "scored": 0, "failed_evidence": 0, "failed_parse": 0, "errors": 0,
+             "stopped_early": False, "remaining": 0}
+    if not rows:
+        return stats
+
+    if not dry_run and llm is None:
+        llm = _load_fame_llm()
+
+    session = make_session()
+    no_evidence_count = 0
+
+    with conn.cursor() as cur:
+        for i, (book_id, title, author, a_score, a_reasoning, a_computed_at) in enumerate(rows, 1):
+            try:
+                author_fame = (
+                    {"fame_score": a_score, "fame_reasoning": a_reasoning, "computed_at": a_computed_at}
+                    if a_score is not None else None
+                )
+                factors = fame.gather_book_evidence(title, author or "", author_fame, session)
+                stats["attempted"] += 1
+                if _no_usable_book_evidence(factors):
+                    no_evidence_count += 1
+                    stats["failed_evidence"] += 1
+
+                if dry_run:
+                    print(f"[dry-run] {title!r}: {json.dumps(factors, default=str)[:300]}")
+                else:
+                    score, why = fame.score_book(llm, title, author or "", factors)
+                    if score is None:
+                        stats["failed_parse"] += 1
+                    else:
+                        stats["scored"] += 1
+                    cur.execute(
+                        f"""INSERT INTO {s}.book_fame
+                                (book_id, fame_score, fame_reasoning, fame_factors, computed_at, checked_at)
+                            VALUES (%s,%s,%s,%s, CASE WHEN %s THEN now() ELSE NULL END, now())
+                            ON CONFLICT (book_id) DO UPDATE SET
+                                fame_score=EXCLUDED.fame_score, fame_reasoning=EXCLUDED.fame_reasoning,
+                                fame_factors=EXCLUDED.fame_factors, computed_at=EXCLUDED.computed_at,
+                                checked_at=now()""",
+                        (book_id, score, why, json.dumps(factors, default=str), score is not None))
+                    conn.commit()
+            except Exception as exc:  # noqa: BLE001 -- one poisoned item must not kill a multi-day run
+                conn.rollback()
+                stats["errors"] += 1
+                print(f"  [book-fame] {title!r} raised {exc!r} -- skipped, left unattempted for a future run")
+                continue
+
+            if i % 25 == 0:
+                print(f"  ...{i}/{len(rows)} books attempted "
+                      f"({stats['scored']} scored, {stats['failed_evidence']} no usable evidence)")
+
+            if (stats["attempted"] >= _FAME_EVIDENCE_FAILURE_MIN_SAMPLE
+                    and no_evidence_count / stats["attempted"] > _FAME_EVIDENCE_FAILURE_THRESHOLD):
+                stats["stopped_early"] = True
+                stats["remaining"] = len(rows) - i
+                break
+    return stats
 
 
 def _linkage_to_tree(Z, leaf_data: list[dict]) -> dict:

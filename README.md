@@ -655,7 +655,10 @@ doesn't hard-delete it — it flips `word.active` to false, so every downstream
 feature (quizzing, stats) just needs to filter on `active = true`, and history
 (audio, ngram data, etc.) stays intact.
 
-- **Accepted tab** — term/POS/definition/difficulty table, filterable by POS,
+- **Accepted tab** — term/POS/definition/difficulty/validity-score/
+  validity-label/validity-notes table, filterable by POS and by validity
+  label, sortable by validity score (score/label/notes are `validity_score.py`'s
+  own real-word-vs-artifact estimate — see "Backfilling definitions" above),
   one-click delete (no confirm) that sets `active = false`; whole-row hover
   highlight so a delete click can't land on the wrong term.
 - **Rejected tab** — browse `rejected_word`, filterable by book and by reason
@@ -902,7 +905,10 @@ web-search + grounded local-LLM extraction as the default last resort — real-
 scale testing found it's where nearly all of a `deepen` run's actual yield
 comes from) plus a human-review flag (not an auto-reject — see "Backfilling
 definitions" above) for words that look foreign or like an archaic spelling
-of a common word, and semantic-distance vectors (definition-embedding +
+of a common word, a separate Merriam-Webster lookup source (`lookup_mw.py`
+for one-off checks, `mw-backfill` as a batch pass over whatever `deepen`'s
+cascade still couldn't resolve — see "Merriam-Webster word lookup" above)
+for the words nothing else in the cascade catches, and semantic-distance vectors (definition-embedding +
 corpus-trained FastText, queried via a pgvector HNSW index — infrastructure
 for future visualization and quiz-distractor generation, not those features
 themselves yet) are all in place. Vocabulary-relatedness visualization is

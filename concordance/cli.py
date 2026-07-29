@@ -678,6 +678,80 @@ def author_similarity(
                   f"-> [bold]{stats['pairs_stored']}[/bold] related-author pairs stored")
 
 
+@app.command("author-fame")
+def author_fame_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of authors (re)scored this run."),
+    stale_days: int = typer.Option(0, "--stale-days",
+                                    help="Rescore authors checked more than N days ago (0 = never-scored only)."),
+    stub: bool = typer.Option(False, "--stub",
+                               help="Dry run: only gather + print evidence, no LLM call, no DB write."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Score every real author's historical/cultural fame, 1-10, an
+    ABSOLUTE (not corpus-relative) scale judged by the local LLM against a
+    fixed external rubric anchored on real reference figures (Shakespeare
+    =10) plus gathered evidence (Wikidata sitelinks, Google Ngram frequency,
+    web search) -- see concordance/fame.py's module docstring for why
+    absolute over corpus-relative percentile normalization. Excludes
+    PLACEHOLDER_AUTHORS. A genuinely expensive job (several network round-
+    trips + one real LLM generation per author, realistically 5-15s each,
+    so a full ~4,000-author corpus is on the order of a day) --
+    deliberately NOT part of `maintain`; run author-fame before book-fame
+    so book scoring has the author's context available."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    with console.status("[bold]Scoring author fame…"):
+        stats = db.compute_author_fame(conn, schema, limit=limit, stale_days=stale_days, dry_run=stub)
+    conn.close()
+    if stub:
+        console.print(f"[green]✓[/green] author-fame (dry run): [bold]{stats['attempted']}[/bold] authors' "
+                      f"evidence gathered, {stats['failed_evidence']} with no usable evidence")
+        return
+    msg = (f"[green]✓[/green] author-fame: [bold]{stats['scored']}[/bold]/{stats['attempted']} scored "
+           f"({stats['failed_evidence']} no usable evidence, {stats['failed_parse']} parse failures)")
+    if stats["stopped_early"]:
+        msg += f" -- [yellow]evidence quality too low, stopped early, {stats['remaining']} authors left[/yellow]"
+    console.print(msg)
+
+
+@app.command("book-fame")
+def book_fame_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of books (re)scored this run."),
+    stale_days: int = typer.Option(0, "--stale-days",
+                                    help="Rescore books checked more than N days ago (0 = never-scored only)."),
+    stub: bool = typer.Option(False, "--stub",
+                               help="Dry run: only gather + print evidence, no LLM call, no DB write."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Same as author-fame, one level down -- scores the SPECIFIC WORK, not
+    its author. Uses the author's already-computed fame score (if any) as
+    weak context only, never a floor or cap -- a famous author's forgotten
+    minor book still scores low on its own. Run author-fame first for the
+    best results; this tolerates a book whose author has no fame row yet."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    with console.status("[bold]Scoring book fame…"):
+        stats = db.compute_book_fame(conn, schema, limit=limit, stale_days=stale_days, dry_run=stub)
+    conn.close()
+    if stub:
+        console.print(f"[green]✓[/green] book-fame (dry run): [bold]{stats['attempted']}[/bold] books' "
+                      f"evidence gathered, {stats['failed_evidence']} with no usable evidence")
+        return
+    msg = (f"[green]✓[/green] book-fame: [bold]{stats['scored']}[/bold]/{stats['attempted']} scored "
+           f"({stats['failed_evidence']} no usable evidence, {stats['failed_parse']} parse failures)")
+    if stats["stopped_early"]:
+        msg += f" -- [yellow]evidence quality too low, stopped early, {stats['remaining']} books left[/yellow]"
+    console.print(msg)
+
+
 @app.command("author-clustering")
 def author_clustering(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
