@@ -126,9 +126,20 @@ def normalize_pos(pos: str | None) -> str:
 # POS (initial ingest, the refill/deepen backfills, and the webapp's rescue
 # endpoint) should call `junk_pos_reason`/`is_junk_pos` rather than
 # reimplementing the category list.
+#
+# "biographical name"/"geographical name"/"trademark" were added after
+# db.mw_backfill (Merriam-Webster's own Collegiate categories, not
+# Free Dictionary/Wiktionary's) surfaced live examples this dict didn't yet
+# recognize -- "bowell" -> Sir Mackenzie Bowell (a real biographical-name
+# hit), "cochinchina" -> a geographical-name hit, "dilantin" -> a trademark
+# -- all real MW entries, all leaked proper nouns by this project's own
+# standard, none caught until this dict knew MW's category names for them.
 JUNK_POS_REASON: dict[str, RejectReason] = {
     "symbol": RejectReason.NUMERIC_OR_SYMBOL,
     "proper noun": RejectReason.PROPER_NOUN,
+    "biographical name": RejectReason.PROPER_NOUN,
+    "geographical name": RejectReason.PROPER_NOUN,
+    "trademark": RejectReason.PROPER_NOUN,
 }
 
 

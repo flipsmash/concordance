@@ -285,6 +285,57 @@ Two tiers, in order:
    rather than relaunched per word. Requires `pip install concordance[scrape]`
    + `playwright install chromium`.
 
+### Bulk MW backfill (`mw-backfill`)
+
+A DB-writing batch job built on the same two-tier lookup above, for exactly
+the words the *existing* definition cascade (Free Dictionary/Wiktionary/
+Wordnik/yourdictionary/web-search — see "Backfilling definitions" above)
+couldn't resolve, where MW's own Collegiate coverage sometimes succeeds
+anyway:
+
+```bash
+concordance mw-backfill                    # API + scrape fallback, 1000/day cap
+concordance mw-backfill --no-scrape        # API tier only
+concordance mw-backfill --limit 50
+```
+
+- **Candidates**: active, still undefined, and not already scored
+  `likely-artifact` (null/`uncertain`/`likely-valid` only — a word already
+  written off as an artifact isn't worth spending API quota to double-check).
+- **`word.mw_checked_at`** is a permanent "already attempted" marker (hit OR
+  miss, same sticky convention as `flagged_undefined`) — a repeated daily run
+  just keeps working through whatever's left, never re-spending quota on a
+  word already tried. `word.first_known_use` is new alongside it (MW's own
+  field; nothing else here has a use for it).
+- Only fills `definition`/`part_of_speech`/`etymology`/`definition_source`/
+  `first_known_use`, never overwriting a non-blank existing value — and
+  **never `word.ipa`**: MW's pronunciation is its own proprietary respelling,
+  not true IPA (no `ahd.py`-style converter exists for it), and `word.ipa` is
+  trusted elsewhere (Azure TTS synthesis) to actually contain IPA.
+- **Exact-match guard**: MW's API does fuzzy full-text search and will
+  happily return a same-ballpark idiom for a query that isn't a real headword
+  at all — confirmed on live data, querying "atune" matched the idiom "sing a
+  different tune", "aglance" matched "at a glance". `mw.exact_matches` only
+  accepts an entry whose own headword literally is the queried word before
+  anything gets written — fine for a human browsing `lookup_mw.py`'s fuller
+  results, but this automated writer needs it so it never records an
+  unrelated idiom's definition as if it were the word's own.
+- **Extends the proper-noun/foreign-language cast-out gate** for MW's own
+  category vocabulary: `model.JUNK_POS_REASON` now also recognizes MW's
+  "biographical name"/"geographical name"/"trademark" labels (real leaked
+  proper nouns caught live — a former Canadian PM, a French colonial
+  territory, a drug trademark, none of which the existing symbol/proper-noun
+  check knew about), and `mw.is_foreign_pos` catches MW's capitalized
+  "`<Language>` noun/verb/adjective/adverb" loanword tag (e.g. "Swahili
+  noun") — checked against the raw string before `normalize_pos` lowercases
+  away the exact signal that makes it recognizable.
+- Stops the **whole run** (not just the API tier) once the 1000/day cap is
+  hit, leaving the remainder for tomorrow rather than falling through to an
+  unbounded scrape-only tail. `--scrape-timeout-ms` (default 10s, half
+  `lookup_mw.py`'s own 20s) trims the fallback's per-word wait, since a
+  genuine miss on the live site always costs the full page-load timeout and
+  most candidates reaching this tier already failed every other source too.
+
 ## Definition-quality cleanup (`dedupe-plurals`, `expand-synonyms`)
 
 A dictionary source sometimes resolves a word to a bare cross-reference —

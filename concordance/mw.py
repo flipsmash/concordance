@@ -110,6 +110,15 @@ def _record_usage() -> int:
     return count
 
 
+def quota_exhausted() -> bool:
+    """Whether today's usage has already hit the daily cap. `lookup_api` already
+    checks this internally before spending a fresh (uncached) call, but a batch
+    caller (e.g. db.mw_backfill) wants to check this BEFORE even picking its next
+    candidate, so it can stop the whole run cleanly rather than silently getting
+    an empty result back for every remaining word."""
+    return _usage_count() >= _DAILY_QUOTA
+
+
 # --- API tier ----------------------------------------------------------------
 
 def lookup_api(word: str, api_key: str, session: requests.Session | None = None,
@@ -210,3 +219,60 @@ def _parse_api_entry(raw: dict) -> MWEntry | None:
         pronunciations=pronunciations, etymology=etymology,
         first_known_use=first_known_use, source="Merriam-Webster API",
     )
+
+
+# Coarse tagger tag -> the lowercase prefix MW's own `fl`/part_of_speech text
+# would start with -- same mapping dictionary.py's _pick_sense uses for the
+# identical tie-break, against a different source's response shape.
+_COARSE_POS = {"NOUN": "noun", "VERB": "verb", "ADJ": "adjective", "ADV": "adverb"}
+
+
+def pick_entry(entries: list[MWEntry], tagger_pos: str = "") -> MWEntry:
+    """Choose the homograph entry (MW splits "run" into separate verb/noun/
+    adjective entries, each its own dict) matching the word's own
+    tagger-derived POS, else the first entry MW itself returned -- MW's own
+    ordering is most-common-sense-first, the same fallback dictionary.py's
+    _pick_sense uses when no POS hint is available or matches."""
+    if len(entries) == 1 or not tagger_pos:
+        return entries[0]
+    target = _COARSE_POS.get(tagger_pos)
+    if not target:
+        return entries[0]
+    for e in entries:
+        if e.part_of_speech.lower().startswith(target):
+            return e
+    return entries[0]
+
+
+# MW tags a not-yet-naturalized loanword's POS as "<Language> noun/verb/..."
+# -- e.g. "Swahili noun" for "hatari" ("danger") -- capitalized, distinct from
+# its lowercase grammatical modifiers ("plural noun", "combining form").
+# Checked against the RAW `fl` string, before model.normalize_pos lowercases
+# everything and destroys this exact signal. Confirmed live: "hatari" ->
+# "Swahili noun" -- a real foreign word this project's other sources would
+# never have surfaced, caught only because MW's own category name for it
+# says so.
+_FOREIGN_POS_RE = re.compile(r"^[A-Z][a-z]+ (noun|verb|adjective|adverb|combining form)s?$")
+
+
+def is_foreign_pos(raw_pos: str) -> bool:
+    return bool(_FOREIGN_POS_RE.match(raw_pos.strip()))
+
+
+def _normalize_headword(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def exact_matches(entries: list[MWEntry], word: str) -> list[MWEntry]:
+    """Entries whose own headword literally IS `word`, ignoring case/spaces/
+    hyphens/asterisked-syllable-marks. MW's API does fuzzy full-text search
+    and will happily return a same-ballpark idiom for a query that isn't a
+    real headword at all -- confirmed on live data: querying "atune" matched
+    the idiom "sing a different tune", "atrail" matched "blaze a trail",
+    "aglance" matched "at a glance". Fine for a human browsing
+    lookup_mw.py's fuller interactive results (that's genuinely useful
+    context there), but an automated writer (db.mw_backfill) needs this
+    filter first so it never records an unrelated idiom's definition as if
+    it were the literal queried word's own."""
+    target = _normalize_headword(word)
+    return [e for e in entries if _normalize_headword(e.headword) == target]

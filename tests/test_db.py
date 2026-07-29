@@ -650,6 +650,126 @@ def test_fill_definitions_flags_but_does_not_cast_out_a_variant_hit(monkeypatch)
 
 
 @pg
+def test_mw_backfill_defines_skips_and_casts_out(monkeypatch):
+    # One candidate per outcome: a real MW hit (defined), a genuine miss (no
+    # MW entry), and an MW hit that resolves to a leaked proper noun (cast
+    # out) -- confirmed live during development that MW's own category names
+    # ("biographical name", "geographical name", "trademark") weren't yet
+    # recognized by the shared junk_pos_reason check, silently letting real
+    # proper nouns (a former Canadian PM, a French colonial territory) land
+    # in the accepted list with a genuine, correctly-sourced definition.
+    from concordance import mw as mw_module
+    from concordance.model import Candidate
+
+    def fake_lookup_api(word, api_key, session=None, console=None):
+        if word == "realword":
+            return [mw_module.MWEntry(headword="realword", part_of_speech="noun",
+                                       definitions=["a genuine definition"],
+                                       etymology="from Old English", first_known_use="14th century")]
+        if word == "bioword":
+            return [mw_module.MWEntry(headword="bioword", part_of_speech="biographical name",
+                                       definitions=["Someone 1900-1980, a person"])]
+        return []  # "missingword" -- MW has no exact entry at all
+
+    monkeypatch.setattr(mw_module, "lookup_api", fake_lookup_api)
+    monkeypatch.setattr(mw_module, "mw_api_key", lambda: "fake-key")
+
+    schema = "cc_test_mw_backfill"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    words = [Candidate(lemma=l, pos="NOUN") for l in ("realword", "missingword", "bioword")]
+    db.sync_book_results(conn, "Book One", kept=words, rejected=[], schema=schema)
+    # A fourth word already scored likely-artifact must never be a candidate
+    # at all -- mw_backfill only targets null/uncertain/likely-valid.
+    artifact = Candidate(lemma="artifactword", pos="NOUN")
+    db.sync_book_results(conn, "Book One", kept=[artifact], rejected=[], schema=schema)
+    with conn.cursor() as cur:
+        cur.execute(f"UPDATE {schema}.word SET validity_label='likely-artifact' WHERE lemma='artifactword'")
+    conn.commit()
+
+    stats = db.mw_backfill(conn, schema, use_scrape=False)
+
+    assert stats["attempted"] == 3   # NOT artifactword
+    assert stats["defined"] == 1
+    assert stats["no_entry"] == 1
+    assert stats["cast_out"] == 1
+
+    with conn.cursor() as cur:
+        cur.execute(f"""select definition, definition_source, etymology, first_known_use,
+                                active, mw_checked_at is not null
+                        from {schema}.word where lemma='realword'""")
+        assert cur.fetchone() == ("a genuine definition", "Merriam-Webster API",
+                                   "from Old English", "14th century", True, True)
+
+        cur.execute(f"select definition, active, mw_checked_at is not null "
+                    f"from {schema}.word where lemma='missingword'")
+        assert cur.fetchone() == ("", True, True)
+
+        cur.execute(f"select active, mw_checked_at is not null from {schema}.word where lemma='bioword'")
+        assert cur.fetchone() == (False, True)
+
+        cur.execute(f"select mw_checked_at from {schema}.word where lemma='artifactword'")
+        assert cur.fetchone() == (None,)
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_mw_backfill_never_overwrites_existing_metadata_with_blank(monkeypatch):
+    # Regression: an early version's COALESCE was backwards (kept the OLD
+    # column value whenever it was non-blank, rather than preferring the NEW
+    # one) -- caught live when a word's stale, unrelated definition_source
+    # ('dictionary', legacy data with no matching definition) silently
+    # survived a real MW-sourced definition instead of being replaced with
+    # 'Merriam-Webster API'. This confirms the fixed direction: MW's new,
+    # non-blank value wins; an existing value is kept ONLY where MW's own is
+    # blank (etymology here).
+    from concordance import mw as mw_module
+    from concordance.model import Candidate
+
+    monkeypatch.setattr(mw_module, "lookup_api", lambda word, api_key, session=None, console=None: [
+        mw_module.MWEntry(headword="staleword", part_of_speech="noun",
+                           definitions=["a fresh MW definition"], etymology=""),
+    ])
+    monkeypatch.setattr(mw_module, "mw_api_key", lambda: "fake-key")
+
+    schema = "cc_test_mw_backfill_coalesce"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    words = [Candidate(lemma="staleword", pos="NOUN")]
+    db.sync_book_results(conn, "Book One", kept=words, rejected=[], schema=schema)
+    with conn.cursor() as cur:
+        # Simulates real observed legacy data: a non-blank definition_source/
+        # etymology with no matching definition (definition stays blank, so
+        # this row is still a valid mw_backfill candidate).
+        cur.execute(f"""UPDATE {schema}.word SET definition_source='dictionary',
+                        etymology='a pre-existing etymology' WHERE lemma='staleword'""")
+    conn.commit()
+
+    db.mw_backfill(conn, schema, use_scrape=False)
+
+    with conn.cursor() as cur:
+        cur.execute(f"select definition, definition_source, etymology from {schema}.word where lemma='staleword'")
+        # definition_source: MW's new value overwrites the stale 'dictionary' tag.
+        # etymology: MW supplied none, so the pre-existing value survives.
+        assert cur.fetchone() == ("a fresh MW definition", "Merriam-Webster API", "a pre-existing etymology")
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
 def test_dedupe_plural_definitions_all_three_outcomes(monkeypatch):
     from concordance import resolve
     from concordance.model import Candidate

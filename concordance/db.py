@@ -692,6 +692,14 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS validity_notes text")
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS suggested_correction text")
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS validity_checked_at timestamptz")
+        # mw_backfill's own sticky "already attempted" marker -- set the moment a
+        # word is checked against Merriam-Webster (hit OR miss), so a daily cron
+        # never re-spends API quota / re-scrapes the same word twice. Never
+        # cleared, same permanent-marker convention as flagged_undefined/
+        # validity_checked_at above. first_known_use has no other home in this
+        # schema (MW's own field; not attempted by any other source here).
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS mw_checked_at timestamptz")
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS first_known_use text")
         # A human-review queue, not an auto-reject: validity_score.variant_reject_reason
         # (foreign-language / archaic-spelling-variant detection) was tried as a
         # hard cast-out gate and found to flag ~21% of the live vocabulary with
@@ -1246,6 +1254,170 @@ def deepen_definitions(conn, schema: str = DEFAULT_SCHEMA, use_web: bool = False
     re-grinding, not to gate a deliberate one-off command."""
     return fill_definitions(conn, schema, limit=limit, use_web=use_web,
                             model_path=model_path, recheck_after_days=0)
+
+
+def mw_backfill(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
+                use_scrape: bool = True, headless: bool = False,
+                scrape_timeout_ms: int = 10000) -> dict:
+    """Standalone `concordance mw-backfill`: check Merriam-Webster (the
+    scripts/lookup_mw.py cascade -- API first, then a Playwright site-scrape
+    fallback for words the API misses) for every accepted word that's still
+    undefined AND not already written off as likely-artifact -- exactly the
+    words fill_definitions'/deepen's own cascade (Free Dictionary/Wiktionary/
+    Wordnik/yourdictionary/web-search) couldn't resolve, where MW's own
+    Collegiate coverage sometimes succeeds anyway.
+
+    `scrape_timeout_ms` (default 10s, half lookup_mw.py's own 20s default):
+    a genuine miss on the live site still costs the full page-load wait --
+    confirmed empirically (MW's "isn't in the dictionary" suggestions page
+    never satisfies the entry-container selector, so it always times out
+    rather than returning fast) -- and most candidates reaching this scrape
+    tier already failed Wordnik/yourdictionary/web-search too, so misses here
+    are the common case, not the exception. A warmed-up profile with a
+    valid cleared cookie loads in well under a second; 20s was sized for
+    lookup_mw.py's interactive one-or-few-word use, where patience costs
+    nothing, not a batch scan that may hit this tier hundreds of times.
+
+    `mw_checked_at` is a STICKY marker (never cleared) set the moment a word
+    is attempted here, hit or miss -- re-querying MW for the same word
+    tomorrow is very unlikely to produce a different answer, so this is a
+    permanent "already tried" flag, same convention as flagged_undefined,
+    not a recheck-after-N-days cooldown. A repeated daily run just keeps
+    working through whatever's left.
+
+    Only definition/part_of_speech/etymology/definition_source/
+    first_known_use are ever written -- NOT ipa. MW's pronunciation field is
+    its own proprietary respelling, not true IPA (no ahd.py-style converter
+    exists for it yet), and word.ipa is trusted elsewhere (audio.py's Azure
+    TTS synthesis) to actually contain IPA; writing MW's respelling there
+    would silently corrupt that pipeline. Never overwrites an existing
+    non-blank value in any of the columns it does write (COALESCE(NULLIF(...))
+    guard), same as fill_definitions.
+
+    The API's free tier caps out at 1000 queries/day (tracked in
+    concordance/mw.py's own on-disk cache, shared with lookup_mw.py -- a word
+    either tool already looked up today never costs a second query). Once
+    that cap is hit, THE WHOLE RUN STOPS (not just the API tier) -- remaining
+    candidates are left untouched (mw_checked_at not set) for tomorrow's run,
+    rather than falling through to an unbounded scrape-only tail that would
+    hammer the live site far harder than the polite, quota-capped API path.
+
+    Commits every word (not batched), same lock-safety rationale as
+    fill_definitions: a long-running batch holding one open transaction can
+    block a webapp restart's schema-check ALTER TABLE, which needs an ACCESS
+    EXCLUSIVE lock on this same table."""
+    from contextlib import ExitStack
+
+    from . import mw as mw_module
+    from .dictionary import make_session
+    from .model import junk_pos_reason
+
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT id, lemma, part_of_speech
+                FROM {s}.word
+                WHERE active
+                  AND coalesce(definition,'') = ''
+                  AND (validity_label IS NULL OR validity_label IN ('uncertain','likely-valid'))
+                  AND mw_checked_at IS NULL
+                ORDER BY lemma""" +
+            (f" LIMIT {int(limit)}" if limit else ""))
+        rows = cur.fetchall()
+
+    stats = {"attempted": 0, "defined": 0, "cast_out": 0, "no_entry": 0,
+             "quota_stopped": False, "remaining": 0}
+    if not rows:
+        return stats
+
+    api_key = mw_module.mw_api_key()
+    session = make_session()
+    scraper = None
+
+    with conn.cursor() as cur, ExitStack() as stack:
+        for i, (wid, lemma, pos) in enumerate(rows, 1):
+            if api_key and mw_module.quota_exhausted():
+                stats["quota_stopped"] = True
+                stats["remaining"] = len(rows) - i + 1
+                break
+            stats["attempted"] += 1
+
+            # exact_matches: MW's search is fuzzy and will return a same-
+            # ballpark idiom for a query that isn't a real headword at all
+            # (confirmed on live data -- see exact_matches' own docstring),
+            # so a returned entry only counts here if its own headword
+            # literally is this word. If the API's fuzzy hit doesn't survive
+            # that filter, still give the scrape tier its own chance (the
+            # site's ranking isn't guaranteed identical) before calling it a
+            # genuine miss.
+            entries = mw_module.exact_matches(
+                mw_module.lookup_api(lemma, api_key, session) if api_key else [], lemma)
+            if not entries and use_scrape:
+                if scraper is None:
+                    from . import mw_scrape
+                    scraper = stack.enter_context(mw_scrape.MWScraper(headless=headless))
+                entries = mw_module.exact_matches(
+                    scraper.lookup(lemma, timeout_ms=scrape_timeout_ms), lemma)
+
+            if not entries:
+                cur.execute(f"UPDATE {s}.word SET mw_checked_at=now() WHERE id=%s", (wid,))
+                stats["no_entry"] += 1
+                conn.commit()
+                if i % 25 == 0:
+                    print(f"  ...{i}/{len(rows)} words attempted ({stats['defined']} defined, "
+                          f"{stats['no_entry']} no MW entry)")
+                continue
+
+            tagger_pos = _POS_TO_TAGGER.get((pos or "").lower(), "")
+            entry = mw_module.pick_entry(entries, tagger_pos)
+            definition = "; ".join(entry.definitions)
+            resolved_pos = normalize_pos(entry.part_of_speech)
+            # is_foreign_pos checks the RAW (pre-normalize_pos) string --
+            # MW's "<Language> noun" foreign-loanword tag is a capitalized
+            # demonym, a signal normalize_pos's lowercasing would destroy.
+            reason = junk_pos_reason(resolved_pos) or (
+                RejectReason.FOREIGN_LANGUAGE if mw_module.is_foreign_pos(entry.part_of_speech) else None)
+
+            if reason:
+                # Same safety net as fill_definitions: an ACCEPTED word whose
+                # only resolvable sense turns out to be a symbol/proper-noun/
+                # foreign-language entry gets cast out now that there's real
+                # evidence of what it is, rather than sitting active with a
+                # junk definition.
+                cur.execute(
+                    f"""UPDATE {s}.word SET
+                            definition=%s, definition_source=%s, part_of_speech=%s,
+                            active=false, mw_checked_at=now(), updated_at=now()
+                        WHERE id=%s""",
+                    (definition, entry.source, resolved_pos, wid))
+                stats["cast_out"] += 1
+            else:
+                # COALESCE(NULLIF(%s,''), column) -- new value preferred, existing
+                # kept only if the new one is blank -- same direction as
+                # fill_definitions' own UPDATE. Not the reverse: definition_source
+                # (and, in principle, the others) can carry a stale non-blank
+                # value from history even while definition itself is blank (the
+                # candidate filter only guarantees the latter), so getting this
+                # backwards silently keeps old metadata under a brand-new
+                # definition instead of recording MW as its real source --
+                # caught empirically on a live word ("aglance") during testing.
+                cur.execute(
+                    f"""UPDATE {s}.word SET
+                            definition=COALESCE(NULLIF(%s,''), definition),
+                            definition_source=COALESCE(NULLIF(%s,''), definition_source),
+                            part_of_speech=COALESCE(NULLIF(%s,''), part_of_speech),
+                            etymology=COALESCE(NULLIF(%s,''), etymology),
+                            first_known_use=COALESCE(NULLIF(%s,''), first_known_use),
+                            mw_checked_at=now(), updated_at=now()
+                        WHERE id=%s""",
+                    (definition, entry.source, resolved_pos, entry.etymology,
+                     entry.first_known_use, wid))
+                stats["defined"] += 1
+            conn.commit()
+            if i % 25 == 0:
+                print(f"  ...{i}/{len(rows)} words attempted ({stats['defined']} defined, "
+                      f"{stats['no_entry']} no MW entry, {stats['cast_out']} cast out)")
+    return stats
 
 
 def import_defined_words(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,

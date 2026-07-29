@@ -111,3 +111,57 @@ def test_lookup_api_does_not_cache_unreachable_network(monkeypatch, tmp_path):
 
     assert mw.lookup_api("concordance", "key") == []
     assert mw._load_json(mw._CACHE_FILE) == {}
+
+
+# --- pick_entry / exact_matches / is_foreign_pos (db.mw_backfill support) ---
+
+def _entry(headword: str, pos: str, defs=("a definition",)) -> mw.MWEntry:
+    return mw.MWEntry(headword=headword, part_of_speech=pos, definitions=list(defs))
+
+
+def test_pick_entry_single_entry_short_circuits():
+    only = _entry("run", "noun")
+    assert mw.pick_entry([only], tagger_pos="VERB") is only
+
+
+def test_pick_entry_matches_tagger_pos_over_first_listed():
+    noun, verb = _entry("run", "noun"), _entry("run", "verb")
+    assert mw.pick_entry([noun, verb], tagger_pos="VERB") is verb
+
+
+def test_pick_entry_falls_back_to_first_when_no_pos_hint():
+    first, second = _entry("run", "noun"), _entry("run", "verb")
+    assert mw.pick_entry([first, second], tagger_pos="") is first
+
+
+def test_pick_entry_falls_back_to_first_when_no_pos_matches():
+    first, second = _entry("run", "noun"), _entry("run", "verb")
+    assert mw.pick_entry([first, second], tagger_pos="ADJ") is first
+
+
+def test_exact_matches_rejects_fuzzy_idiom_hit():
+    # Regression: MW's API fuzzy-matched the literal query "atune" to the
+    # unrelated idiom "sing a different tune" -- confirmed on live data.
+    # Writing that idiom's definition under "atune" would be wrong.
+    idiom = _entry("sing a different tune", "phrase")
+    assert mw.exact_matches([idiom], "atune") == []
+
+
+def test_exact_matches_ignores_case_and_punctuation():
+    # "con*cord*ance" is how MW's API literally returns headword syllable
+    # marks; a real match must still be recognized despite them.
+    entry = _entry("con*cord*ance", "noun")
+    assert mw.exact_matches([entry], "Concordance") == [entry]
+
+
+def test_is_foreign_pos_recognizes_capitalized_language_tag():
+    # Confirmed on live data: querying "hatari" returned fl="Swahili noun" --
+    # a real foreign loanword this project's other sources never surface.
+    assert mw.is_foreign_pos("Swahili noun") is True
+    assert mw.is_foreign_pos("French adjective") is True
+
+
+def test_is_foreign_pos_does_not_flag_ordinary_lowercase_modifiers():
+    assert mw.is_foreign_pos("plural noun") is False
+    assert mw.is_foreign_pos("combining form") is False
+    assert mw.is_foreign_pos("noun") is False

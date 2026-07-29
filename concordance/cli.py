@@ -871,6 +871,44 @@ def deepen(
                   f"{stats.get('cast_out', 0)} cast out as symbol/proper-noun-only)")
 
 
+@app.command("mw-backfill")
+def mw_backfill_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap words processed (0 = all)."),
+    no_scrape: bool = typer.Option(False, "--no-scrape", help="API tier only; skip the Playwright site-scrape fallback."),
+    headless: bool = typer.Option(False, "--headless", help="Run the scrape fallback's browser headless (more likely to hit a Cloudflare challenge)."),
+    scrape_timeout_ms: int = typer.Option(10000, "--scrape-timeout-ms", help="Per-word page-load timeout for the scrape fallback; a miss always costs the full wait (see db.mw_backfill's docstring)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Check Merriam-Webster (scripts/lookup_mw.py's own API + Playwright-
+    scrape cascade) for every accepted word that's still undefined and not
+    already scored likely-artifact -- exactly the words deepen's cascade
+    (Free Dictionary/Wiktionary/Wordnik/yourdictionary/web-search) couldn't
+    resolve. Every attempted word (hit or miss) gets a permanent
+    mw_checked_at stamp, so re-running this daily just works through
+    whatever's left rather than re-spending quota on words already tried.
+    Only definition/part_of_speech/etymology/definition_source/
+    first_known_use are ever filled in (never overwriting a non-blank
+    value) -- never word.ipa, since MW's pronunciation isn't true IPA.
+    Stops the whole run (not just the API tier) once the free API's
+    1000 query/day cap is hit, leaving the rest for tomorrow."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    with console.status("[bold]Checking Merriam-Webster for undefined words…"):
+        stats = db.mw_backfill(conn, schema, limit=limit, use_scrape=not no_scrape, headless=headless,
+                               scrape_timeout_ms=scrape_timeout_ms)
+    conn.close()
+    msg = (f"[green]✓[/green] mw-backfill: [bold]{stats['defined']}[/bold]/{stats['attempted']} "
+           f"defined ({stats['no_entry']} no MW entry, {stats['cast_out']} cast out as "
+           f"symbol/proper-noun-only)")
+    if stats["quota_stopped"]:
+        msg += f" -- [yellow]daily API quota reached, {stats['remaining']} words left for tomorrow[/yellow]"
+    console.print(msg)
+
+
 _FASTTEXT_MODEL_PATH = Path("models/fasttext_corpus.bin")
 
 
