@@ -309,3 +309,38 @@ def categories() -> list[dict]:
             "assignable": code not in _NON_ASSIGNABLE,
         })
     return rows
+
+
+def subtree_match(code: str, other: str) -> bool:
+    """Is `other` `code` itself or a real descendant of it in the tagset?
+
+    Not a naive prefix check: below the bare top-level letter, every code in
+    this tagset is dot-separated with no exceptions, but string-prefix alone
+    is wrong at the letter tier -- e.g. "A10" starts with "A1" while actually
+    being A1's *sibling* (both children of "A"), not its child. Same trap for
+    "Z9"/"Z99". Splitting on the dot boundary avoids both false positives.
+    """
+    if len(code) == 1:
+        return other.startswith(code)
+    return other == code or other.startswith(code + ".")
+
+
+def subtree_sql(code: str) -> tuple[str, str]:
+    """(exact_value, like_pattern) for a `code = %s OR code LIKE %s` filter.
+
+    Mirrors subtree_match's boundary rule in SQL form. The LIKE pattern alone
+    already covers a bare top-level letter, so callers never need to branch
+    on len(code).
+    """
+    like = f"{code}%" if len(code) == 1 else f"{code}.%"
+    return code, like
+
+
+def children_of(code: str) -> list[dict]:
+    """Direct children of `code`, one level down. Empty for a leaf."""
+    return [c for c in categories() if c["parent_code"] == code]
+
+
+def by_code(code: str) -> dict | None:
+    """One category's own row, or None if `code` isn't a real tagset code."""
+    return next((c for c in categories() if c["code"] == code), None)

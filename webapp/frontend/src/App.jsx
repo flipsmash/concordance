@@ -31,6 +31,9 @@ const BooksRelatedness = lazy(() => import('./BooksRelatedness'))
 const CategoriesOverview = lazy(() => import('./CategoriesOverview'))
 const CategoryBucketDetail = lazy(() => import('./CategoryBucketDetail'))
 const CategoryFieldDetail = lazy(() => import('./CategoryFieldDetail'))
+const CategorySubfieldDetail = lazy(() => import('./CategorySubfieldDetail'))
+const CategorySubsubfieldDetail = lazy(() => import('./CategorySubsubfieldDetail'))
+const CategorySubsubsubfieldDetail = lazy(() => import('./CategorySubsubsubfieldDetail'))
 const Visualizations = lazy(() => import('./Visualizations'))
 const DomainMap = lazy(() => import('./DomainMap'))
 const Sets = lazy(() => import('./Sets'))
@@ -281,6 +284,30 @@ function App() {
               element={
                 <Suspense fallback={<div className="page-loading">Loading…</div>}>
                   <CategoryFieldDetail />
+                </Suspense>
+              }
+            />
+            <Route
+              path="categories/:bucket/:code/:subcode"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <CategorySubfieldDetail />
+                </Suspense>
+              }
+            />
+            <Route
+              path="categories/:bucket/:code/:subcode/:subsubcode"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <CategorySubsubfieldDetail />
+                </Suspense>
+              }
+            />
+            <Route
+              path="categories/:bucket/:code/:subcode/:subsubcode/:subsubsubcode"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <CategorySubsubsubfieldDetail />
                 </Suspense>
               }
             />

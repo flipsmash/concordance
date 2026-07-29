@@ -119,14 +119,14 @@ def _link(conn, schema, word_id, book_id):
         )
 
 
-def _category(conn, schema, code, name="Test Category"):
+def _category(conn, schema, code, name="Test Category", level: int = 0):
     with conn.cursor() as cur:
         cur.execute(
             f"""INSERT INTO {schema}.category (taxonomy, code, name, level, assignable)
-                VALUES ('usas', %s, %s, 0, true)
+                VALUES ('usas', %s, %s, %s, true)
                 ON CONFLICT (taxonomy, code) DO UPDATE SET name = EXCLUDED.name
                 RETURNING id""",
-            (code, name),
+            (code, name, level),
         )
         return cur.fetchone()[0]
 
@@ -1002,5 +1002,129 @@ def test_category_leaders_requires_exactly_one_scope_param():
                            params={"bucket": "nature_science", "top_code": "F"})
         assert both.status_code == 400
         assert client.get("/api/browse/category-leaders", params={"bucket": "not_a_real_bucket"}).status_code == 404
+    finally:
+        restore()
+
+
+# --- 4-level USAS drilldown: top_code/category-counts/category-leaders at any depth ----
+
+@pg
+def test_top_code_matches_exact_and_descendant_not_sibling():
+    # Direct regression test for the bug this change fixes: top_code=I2 must
+    # match a word tagged at I2 itself AND one tagged at the real descendant
+    # I2.2, but top_code=A1 must NOT match A10 -- a sibling under "A", not a
+    # child, despite "A10" naively starting with the string "A1".
+    schema = "cc_test_browse_subtree"
+    client, conn, restore = _setup(schema)
+    try:
+        cat_i2 = _category(conn, schema, "I2", "Business", level=1)
+        cat_i22 = _category(conn, schema, "I2.2", "Business: Selling", level=2)
+        cat_a10 = _category(conn, schema, "A10", "Open/closed", level=1)
+
+        exact_word = _insert_word(conn, schema, "exactword")
+        _tag_domain(conn, schema, exact_word, cat_i2)
+        descendant_word = _insert_word(conn, schema, "descendantword")
+        _tag_domain(conn, schema, descendant_word, cat_i22)
+        sibling_word = _insert_word(conn, schema, "siblingword")
+        _tag_domain(conn, schema, sibling_word, cat_a10)
+        conn.commit()
+
+        res = client.get("/api/browse/words", params={"top_code": ["I2"]})
+        assert {w["lemma"] for w in res.json()["items"]} == {"exactword", "descendantword"}
+
+        res2 = client.get("/api/browse/words", params={"top_code": ["A1"]})
+        assert {w["lemma"] for w in res2.json()["items"]} == set()  # A10 must not match A1
+
+        assert client.get("/api/browse/words", params={"top_code": ["not-a-real-code"]}).status_code == 404
+    finally:
+        restore()
+
+
+@pg
+def test_category_counts_parent_scoped_to_children_at_any_depth():
+    schema = "cc_test_browse_catcounts_parent"
+    client, conn, restore = _setup(schema)
+    try:
+        cat_i2 = _category(conn, schema, "I2", "Business", level=1)
+        cat_i22 = _category(conn, schema, "I2.2", "Business: Selling", level=2)
+
+        direct = _insert_word(conn, schema, "i2word")
+        _tag_domain(conn, schema, direct, cat_i2)
+        nested = _insert_word(conn, schema, "i22word")
+        _tag_domain(conn, schema, nested, cat_i22)
+        conn.commit()
+
+        # parent=I -> I1..I4, and I2's own count includes the I2.2-tagged word
+        # too (whole-subtree count, same policy left(c.code,1) already applied).
+        res = client.get("/api/browse/category-counts", params={"parent": "I"})
+        assert res.status_code == 200, res.text
+        by_code = {c["code"]: c for c in res.json()}
+        assert set(by_code) == {"I1", "I2", "I3", "I4"}
+        assert by_code["I2"]["word_count"] == 2
+
+        # parent=I2 -> I2.1/I2.2, with I2.2 itself getting the nested word.
+        res2 = client.get("/api/browse/category-counts", params={"parent": "I2"}).json()
+        by_code2 = {c["code"]: c for c in res2}
+        assert set(by_code2) == {"I2.1", "I2.2"}
+        assert by_code2["I2.2"]["word_count"] == 1
+
+        # A real leaf has no children -> [].
+        assert client.get("/api/browse/category-counts", params={"parent": "I2.2"}).json() == []
+
+        # An unknown code -> 404; bucket+parent together -> 400.
+        assert client.get("/api/browse/category-counts", params={"parent": "not-a-real-code"}).status_code == 404
+        assert client.get("/api/browse/category-counts",
+                           params={"bucket": "time_space_commerce", "parent": "I"}).status_code == 400
+    finally:
+        restore()
+
+
+@pg
+def test_category_counts_parent_level2_to_level3():
+    # The least-exercised branch: one of the only 5 level-2 codes with any
+    # real level-3 children at all.
+    schema = "cc_test_browse_catcounts_level3"
+    client, conn, restore = _setup(schema)
+    try:
+        cat_s111 = _category(conn, schema, "S1.1.1", "General", level=3)
+        word = _insert_word(conn, schema, "s111word")
+        _tag_domain(conn, schema, word, cat_s111)
+        conn.commit()
+
+        res = client.get("/api/browse/category-counts", params={"parent": "S1.1"}).json()
+        by_code = {c["code"]: c for c in res}
+        assert set(by_code) == {"S1.1.1", "S1.1.2", "S1.1.3", "S1.1.4"}
+        assert by_code["S1.1.1"]["word_count"] == 1
+        assert by_code["S1.1.2"]["word_count"] == 0
+    finally:
+        restore()
+
+
+@pg
+def test_category_leaders_top_code_counts_descendant_too():
+    schema = "cc_test_browse_leaders_subtree"
+    client, conn, restore = _setup(schema)
+    try:
+        cat_i2 = _category(conn, schema, "I2", "Business", level=1)
+        cat_i22 = _category(conn, schema, "I2.2", "Business: Selling", level=2)
+
+        book = _insert_book(conn, schema, "Business Book", author="Business, Writer")
+        words = _insert_bulk_words(conn, schema, "bizword", 60)
+        for wid in words:
+            _link(conn, schema, wid, book)
+        # 10 tagged directly at I2, 10 more at the descendant I2.2 -- both
+        # must count toward top_code=I2's category_word_count (20 total).
+        for wid in words[:10]:
+            _tag_domain(conn, schema, wid, cat_i2)
+        for wid in words[10:20]:
+            _tag_domain(conn, schema, wid, cat_i22)
+        conn.commit()
+
+        res = client.get("/api/browse/category-leaders",
+                          params={"entity": "book", "top_code": "I2", "min_words": 50})
+        assert res.status_code == 200, res.text
+        items = res.json()["items"]
+        assert len(items) == 1
+        assert items[0]["category_word_count"] == 20
     finally:
         restore()

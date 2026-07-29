@@ -57,6 +57,12 @@ router = APIRouter()
 _TOP_CODES = [c["code"] for c in usas.categories() if c["level"] == 0]
 _TOP_CODE_NAMES = {c["code"]: c["name"] for c in usas.categories() if c["level"] == 0}
 
+# Every real USAS code at any level -- used to validate a `top_code`/`parent`
+# query param before it reaches a query (404 on an unknown code), which
+# incidentally closes off any %/_-wildcard injection since only this fixed
+# 253-row known set ever reaches a LIKE parameter (see usas.subtree_sql).
+_ALL_CODES = {c["code"] for c in usas.categories()}
+
 # archive_path (concordance/archive_metadata.py) is repo-root-relative
 # (e.g. "archive/1601 -- Twain, Mark.txt") -- resolved against this, the
 # same "root + basename only" defensive pattern main.py's word_audio route
@@ -107,6 +113,21 @@ _SORT_TITLE_EXPR = "regexp_replace(lower(b.title), '^(the|a|an)\\s+', '')"
 
 # --- shared filter builder ----------------------------------------------------
 
+def _subtree_or_sql(codes: list[str]) -> tuple[str, list]:
+    """OR of usas.subtree_sql(code) fragments -- "this word's category is
+    exactly one of `codes`, or a real descendant of one of them." Used both
+    for a bucket's member (level-0) codes and for a single field/sub-field/
+    sub-sub-field code wrapped in a 1-element list; see usas.subtree_match
+    for why this isn't a naive prefix match."""
+    clauses = []
+    params: list = []
+    for code in codes:
+        exact, like = usas.subtree_sql(code)
+        clauses.append("(c.code = %s OR c.code LIKE %s)")
+        params.extend([exact, like])
+    return " OR ".join(clauses), params
+
+
 def _build_word_filters(
     author: str | None,
     book_id: list[int],
@@ -127,9 +148,11 @@ def _build_word_filters(
     `top_code` is a second, independent category filter alongside `domain`:
     `domain` resolves a 6-hue bucket key to its member USAS top-level codes
     (usas_domains.DOMAIN_BUCKETS), while `top_code` matches one or more raw
-    USAS top-level codes (e.g. "S") directly, with no bucket indirection --
-    the level-2 (single discourse field) Categories drill-down needs this,
-    since a field's own code generally isn't a bucket key."""
+    USAS codes AT ANY DEPTH (e.g. "S", "I2", "I2.2") directly, with no bucket
+    indirection -- a word tagged at that code OR a real descendant of it
+    matches (see usas.subtree_match) -- the field/sub-field/sub-sub-field
+    Categories drill-down needs this, since a field's own code generally
+    isn't a bucket key."""
     filters = ["w.active"]
     params: list = []
 
@@ -157,12 +180,13 @@ def _build_word_filters(
             )
             params.append(codes)
     if top_code:
+        subtree_where, subtree_params = _subtree_or_sql(top_code)
         filters.append(
             f"""EXISTS (SELECT 1 FROM {_main.SCHEMA}.word_category wc
                         JOIN {_main.SCHEMA}.category c ON c.id = wc.category_id
-                        WHERE wc.word_id = w.id AND left(c.code, 1) = ANY(%s))"""
+                        WHERE wc.word_id = w.id AND ({subtree_where}))"""
         )
-        params.append(top_code)
+        params.extend(subtree_params)
     if archaic:
         filters.append("wd.archaic = ANY(%s)")
         params.append(archaic)
@@ -1356,6 +1380,9 @@ def browse_words(
     dir: Literal["asc", "desc"] = "asc",
     _: dict = Depends(_main.require_viewer),
 ) -> BrowseWordPage:
+    for code in top_code:
+        if code not in _ALL_CODES:
+            raise HTTPException(404, f"unknown category code {code!r}")
     filters, params = _build_word_filters(
         author, book_id, domain, difficulty_min, difficulty_max, archaic, pos, quizzable_only, top_code
     )
@@ -1610,20 +1637,65 @@ class CategoryCount(BaseModel):
     word_count: int
 
 
+def _child_subtree_counts(cur, children: list[dict]) -> dict[str, int]:
+    """Whole-subtree word count for each of `children` (siblings, one level
+    down from a common parent) -- one query per child, not a single GROUP
+    BY: each child's subtree boundary (usas.subtree_sql) isn't a uniform
+    prefix expression across siblings of different code lengths, unlike the
+    level-0 case where `left(c.code, 1)` alone is that uniform expression.
+    Never more than 15 queries (the max real child count of any code)."""
+    counts = {}
+    for child in children:
+        exact, like = usas.subtree_sql(child["code"])
+        cur.execute(
+            f"""SELECT count(DISTINCT w.id)
+                FROM {_main.SCHEMA}.word w
+                JOIN {_main.SCHEMA}.word_category wc ON wc.word_id = w.id
+                JOIN {_main.SCHEMA}.category c ON c.id = wc.category_id
+                WHERE w.active AND (c.code = %s OR c.code LIKE %s)""",
+            (exact, like),
+        )
+        counts[child["code"]] = cur.fetchone()[0]
+    return counts
+
+
 @router.get("/api/browse/category-counts", response_model=list[CategoryCount])
 def browse_category_counts(
     bucket: str | None = None,
+    parent: str | None = None,
     _: dict = Depends(_main.require_viewer),
 ) -> list[CategoryCount]:
-    """Word count per USAS top-level discourse field (21 total), optionally
-    narrowed to one bucket's member codes -- feeds the Categories section's
-    level-2 (bucket detail) field subgrid. A single GROUP BY left(c.code, 1),
-    not _bucket_counts's sequential-EXISTS-per-bucket loop: that loop exists
+    """Word count per USAS category, one tier below either `bucket` (a 6-hue
+    color bucket's member top-level fields, 21 total unscoped) or `parent`
+    (any real USAS code's direct children, e.g. "I" -> I1..I4, "I2" ->
+    I2.1/I2.2) -- feeds every tile subgrid in the Categories drilldown, at
+    any depth. `bucket` and `parent` are mutually exclusive; neither given
+    keeps the original unscoped-top-21 behavior.
+
+    The `bucket`/unscoped branch uses a single GROUP BY left(c.code, 1), not
+    _bucket_counts's sequential-EXISTS-per-bucket loop: that loop exists
     because the 6 BUCKETS can each match more than one top-level code and a
     word can straddle two different buckets, so summing independent bucket
     counts would double count a word across buckets. Here every row is
     already grouped by its own single top-level code, so one query is both
-    correct and 21x cheaper."""
+    correct and 21x cheaper. The `parent` branch can't reuse that same single
+    GROUP BY shape (see _child_subtree_counts) since a code's children aren't
+    always the same length."""
+    if bucket is not None and parent is not None:
+        raise HTTPException(400, "exactly one of bucket or parent may be given, not both")
+
+    if parent is not None:
+        if parent not in _ALL_CODES:
+            raise HTTPException(404, f"unknown category code {parent!r}")
+        children = usas.children_of(parent)
+        with _main.get_conn() as conn, conn.cursor() as cur:
+            counts = _child_subtree_counts(cur, children)
+        return [
+            CategoryCount(code=c["code"], name=c["name"], bucket=usas_domains.bucket_for(c["code"]),
+                          word_count=counts.get(c["code"], 0))
+            for c in children
+        ]
+
     if bucket is not None and bucket not in usas_domains.DOMAIN_BUCKETS:
         raise HTTPException(404, f"unknown bucket {bucket!r}")
     codes = usas_domains.DOMAIN_BUCKETS[bucket]["codes"] if bucket else _TOP_CODES
@@ -1694,11 +1766,12 @@ def browse_category_leaders(
 
     Exactly one of `bucket`/`top_code` is required -- `bucket` resolves to
     its member USAS top-level codes (usas_domains.DOMAIN_BUCKETS); `top_code`
-    is used directly, for the level-2 single-field drill-down. Same
-    qualification floors as /api/browse/domain-map (50 words/book, 100/
-    author): below that a category share is mostly sampling noise, and
-    without a floor a book with 3 words all in one field would rank #1 on
-    lift alone.
+    is used directly, for the field/sub-field/sub-sub-field drill-down, at
+    any depth -- a word tagged at `top_code` OR a real descendant of it
+    counts (see usas.subtree_match). Same qualification floors as
+    /api/browse/domain-map (50 words/book, 100/author): below that a
+    category share is mostly sampling noise, and without a floor a book
+    with 3 words all in one field would rank #1 on lift alone.
     """
     if bool(bucket) == bool(top_code):
         raise HTTPException(400, "exactly one of bucket or top_code is required")
@@ -1707,7 +1780,11 @@ def browse_category_leaders(
             raise HTTPException(404, f"unknown bucket {bucket!r}")
         codes = usas_domains.DOMAIN_BUCKETS[bucket]["codes"]
     else:
+        if top_code not in _ALL_CODES:
+            raise HTTPException(404, f"unknown category code {top_code!r}")
         codes = [top_code]
+
+    subtree_where, subtree_params = _subtree_or_sql(codes)
 
     default_floor = 50 if entity == "book" else 100
     floor = max(min_words, default_floor)
@@ -1732,13 +1809,13 @@ def browse_category_leaders(
                         FROM book_totals bt
                         JOIN book_words bw ON bw.id = bt.id
                         JOIN {_main.SCHEMA}.word_category wc ON wc.word_id = bw.word_id
-                        JOIN {_main.SCHEMA}.category c ON c.id = wc.category_id AND left(c.code, 1) = ANY(%s)
+                        JOIN {_main.SCHEMA}.category c ON c.id = wc.category_id AND ({subtree_where})
                         GROUP BY bt.id
                     )
                     SELECT bt.id::text, bt.title, bt.author, bt.total, coalesce(bc.cat_count, 0)
                     FROM book_totals bt
                     LEFT JOIN book_cat bc ON bc.id = bt.id""",
-                (floor, codes),
+                (floor, *subtree_params),
             )
         else:
             cur.execute(
@@ -1760,13 +1837,13 @@ def browse_category_leaders(
                         FROM author_totals at
                         JOIN author_words aw ON aw.author = at.author
                         JOIN {_main.SCHEMA}.word_category wc ON wc.word_id = aw.word_id
-                        JOIN {_main.SCHEMA}.category c ON c.id = wc.category_id AND left(c.code, 1) = ANY(%s)
+                        JOIN {_main.SCHEMA}.category c ON c.id = wc.category_id AND ({subtree_where})
                         GROUP BY at.author
                     )
                     SELECT at.author, at.author, NULL::text, at.total, coalesce(ac.cat_count, 0)
                     FROM author_totals at
                     LEFT JOIN author_cat ac ON ac.author = at.author""",
-                (list(PLACEHOLDER_AUTHORS), floor, codes),
+                (list(PLACEHOLDER_AUTHORS), floor, *subtree_params),
             )
         rows = cur.fetchall()
 
@@ -1835,6 +1912,13 @@ def _domain_vectors_to_map(rows: list[tuple], id_is_int: bool) -> list[DomainMap
     (id, label, subtitle, total_words, {code: count}) tuples. Builds each
     entity's distribution over the 21 USAS top-level fields, projects to 2D,
     and picks a dominant category for color.
+
+    Deliberately stays 21-dimensional (level-0 only) even though the
+    Categories drilldown elsewhere now goes 4 levels deep: this function's
+    own empirical finding below (raw-argmax collapsing to one color 82% of
+    the time) already shows 21 dims is near the edge of what a dominant-
+    category color can distinguish; adding 115+100 more dimensions would
+    make node coloring close to meaningless, not more precise.
 
     PCA, not classical MDS-from-a-distance-matrix (compute_author_clustering's
     approach in db.py): that machinery exists because ITS feature space is
