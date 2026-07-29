@@ -17,6 +17,7 @@ function AuthorWorks() {
   const navigate = useNavigate()
   const [related, setRelated] = useState(null) // null = not loaded yet, [] = loaded, none found
   const [compareAuthor, setCompareAuthor] = useState(null) // the related author currently being compared, or null
+  const [authorRow, setAuthorRow] = useState(null) // this author's own aggregate row (book_count, fame, ...)
 
   const { items, total, page, setPage, loading, error, totalPages } = usePagedTable({
     endpoint: '/api/browse/books',
@@ -25,6 +26,13 @@ function AuthorWorks() {
     defaultDir: 'asc',
     extraParams: { author },
   })
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/browse/authors?author=${encodeURIComponent(author)}`)
+      .then((res) => res.json())
+      .then((data) => setAuthorRow(data.items[0] || null))
+      .catch(() => setAuthorRow(null))
+  }, [author])
 
   function surpriseMe() {
     fetch(`${API_BASE}/api/browse/authors?random=true`)
@@ -64,6 +72,16 @@ function AuthorWorks() {
           🎲 Surprise me
         </button>
       </header>
+
+      {authorRow?.fame_score != null && (
+        <section className="work-detail-section">
+          <h2 className="work-detail-heading">Fame &amp; importance</h2>
+          <p>
+            <strong>{authorRow.fame_score.toFixed(1)} / 10</strong>
+            {authorRow.fame_reasoning && <span className="muted"> — {authorRow.fame_reasoning}</span>}
+          </p>
+        </section>
+      )}
 
       <section>
         <h2 className="work-detail-heading">Related authors</h2>

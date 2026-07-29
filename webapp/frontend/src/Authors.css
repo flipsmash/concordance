@@ -1,5 +1,10 @@
 .authors-page {
-  max-width: 720px;
+  /* Was 720px, sized before the toolbar had to fit AlphabetStrip + the Fame
+     min/max filter + SortControl together -- too narrow now, forcing an
+     awkward wrap even with plenty of horizontal room on a real screen.
+     Shared by Books/Authors/AuthorWorks and the three relatedness graph
+     pages, all of which benefit from the extra width. */
+  max-width: 1100px;
   margin: 0 auto;
   padding: 24px 20px 40px;
   display: flex;
@@ -70,6 +75,30 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+.authors-fame-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.authors-fame-filter input[type='number'] {
+  width: 48px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 6px;
+  background: var(--bg);
+  color: var(--text-h);
+  font-size: 13px;
+}
+
+.authors-fame-tag {
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
 }
 
 .authors-list {

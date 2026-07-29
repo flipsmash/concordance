@@ -15,6 +15,7 @@ const SORT_FIELDS = [
   { key: 'difficulty', label: 'Avg. difficulty' },
   { key: 'density', label: 'Vocabulary density' },
   { key: 'overall_difficulty', label: 'Overall difficulty' },
+  { key: 'fame', label: 'Fame' },
 ]
 
 // Level 1 of the book drilldown: every book, browsable/searchable by title --
@@ -26,6 +27,8 @@ function Books() {
   const [query, setQuery] = useState('')
   const [debounced, setDebounced] = useState('')
   const [letter, setLetter] = useState(null)
+  const [fameMin, setFameMin] = useState('')
+  const [fameMax, setFameMax] = useState('')
 
   useEffect(() => {
     const handle = setTimeout(() => setDebounced(query.trim()), 200)
@@ -37,11 +40,21 @@ function Books() {
     pageSize: PAGE_SIZE,
     defaultSort: 'title',
     defaultDir: 'asc',
-    extraParams: { q: debounced, letter },
+    extraParams: { q: debounced, letter, fame_min: fameMin, fame_max: fameMax },
   })
 
   function changeLetter(l) {
     setLetter(l)
+    setPage(1)
+  }
+
+  function changeFameMin(v) {
+    setFameMin(v)
+    setPage(1)
+  }
+
+  function changeFameMax(v) {
+    setFameMax(v)
     setPage(1)
   }
 
@@ -76,6 +89,20 @@ function Books() {
 
       <div className="authors-toolbar">
         <AlphabetStrip letter={letter} onChange={changeLetter} />
+        <label className="authors-fame-filter">
+          Fame:
+          <input
+            type="number" min="1" max="10" placeholder="1"
+            value={fameMin}
+            onChange={(e) => changeFameMin(e.target.value)}
+          />
+          <span>–</span>
+          <input
+            type="number" min="1" max="10" placeholder="10"
+            value={fameMax}
+            onChange={(e) => changeFameMax(e.target.value)}
+          />
+        </label>
         <SortControl fields={SORT_FIELDS} sort={sort} dir={dir} onSort={handleSort} />
       </div>
 
@@ -104,6 +131,11 @@ function Books() {
                 </span>
                 {density && <span className="work-density">{density}</span>}
                 {overall && <span className="work-overall">{overall}</span>}
+                {b.fame_score != null && (
+                  <span className="authors-fame-tag" title={b.fame_reasoning || ''}>
+                    ⭐ {b.fame_score.toFixed(1)}
+                  </span>
+                )}
               </span>
             </li>
           )

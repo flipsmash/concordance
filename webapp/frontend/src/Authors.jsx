@@ -15,6 +15,7 @@ const SORT_FIELDS = [
   { key: 'difficulty', label: 'Avg. difficulty' },
   { key: 'density', label: 'Vocabulary density' },
   { key: 'overall_difficulty', label: 'Overall difficulty' },
+  { key: 'fame', label: 'Fame' },
 ]
 
 // Same shape as bookDifficulty.js's densityLabel/overallDifficultyLabel --
@@ -38,6 +39,8 @@ function Authors() {
   const [query, setQuery] = useState('')
   const [debounced, setDebounced] = useState('')
   const [letter, setLetter] = useState(null)
+  const [fameMin, setFameMin] = useState('')
+  const [fameMax, setFameMax] = useState('')
 
   useEffect(() => {
     const handle = setTimeout(() => setDebounced(query.trim()), 200)
@@ -49,11 +52,21 @@ function Authors() {
     pageSize: PAGE_SIZE,
     defaultSort: 'author',
     defaultDir: 'asc',
-    extraParams: { q: debounced, letter },
+    extraParams: { q: debounced, letter, fame_min: fameMin, fame_max: fameMax },
   })
 
   function changeLetter(l) {
     setLetter(l)
+    setPage(1)
+  }
+
+  function changeFameMin(v) {
+    setFameMin(v)
+    setPage(1)
+  }
+
+  function changeFameMax(v) {
+    setFameMax(v)
     setPage(1)
   }
 
@@ -88,6 +101,20 @@ function Authors() {
 
       <div className="authors-toolbar">
         <AlphabetStrip letter={letter} onChange={changeLetter} />
+        <label className="authors-fame-filter">
+          Fame:
+          <input
+            type="number" min="1" max="10" placeholder="1"
+            value={fameMin}
+            onChange={(e) => changeFameMin(e.target.value)}
+          />
+          <span>–</span>
+          <input
+            type="number" min="1" max="10" placeholder="10"
+            value={fameMax}
+            onChange={(e) => changeFameMax(e.target.value)}
+          />
+        </label>
         <SortControl fields={SORT_FIELDS} sort={sort} dir={dir} onSort={handleSort} />
       </div>
 
@@ -110,6 +137,9 @@ function Authors() {
                 {a.mean_difficulty != null && <span> · {a.mean_difficulty.toFixed(1)} avg. difficulty</span>}
                 {density && <span> · {density}</span>}
                 {overall && <span> · {overall}</span>}
+                {a.fame_score != null && (
+                  <span title={a.fame_reasoning || ''}> · ⭐ {a.fame_score.toFixed(1)}</span>
+                )}
               </span>
             </li>
           )

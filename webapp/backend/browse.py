@@ -76,6 +76,7 @@ _BOOK_SORT_COLUMNS = {
     "difficulty": "mean_difficulty",
     "density": "density",
     "overall_difficulty": "overall_difficulty",
+    "fame": "fame_score",
 }
 _AUTHOR_SORT_COLUMNS = {
     "author": "author",
@@ -84,14 +85,16 @@ _AUTHOR_SORT_COLUMNS = {
     "difficulty": "mean_difficulty",
     "density": "density",
     "overall_difficulty": "overall_difficulty",
+    "fame": "fame_score",
 }
-# difficulty/density/overall_difficulty are all sparse (a book with no scored
-# words, or no distinct_nonstop_word_count from archive_metadata.py, has no
-# value for them) -- NULLS LAST is required explicitly for both directions,
-# since Postgres's implicit default flips between ASC (NULLS LAST already)
-# and DESC (NULLS FIRST by default, which would float unscored books to the
-# top of a "hardest first" sort).
-_NULLABLE_SORTS = {"difficulty", "density", "overall_difficulty"}
+# difficulty/density/overall_difficulty/fame are all sparse (a book with no
+# scored words, or no distinct_nonstop_word_count from archive_metadata.py,
+# has no value for them; fame_score is only populated for books/authors
+# concordance book-fame/author-fame has actually scored) -- NULLS LAST is
+# required explicitly for both directions, since Postgres's implicit default
+# flips between ASC (NULLS LAST already) and DESC (NULLS FIRST by default,
+# which would float unscored books to the top of a "hardest first" sort).
+_NULLABLE_SORTS = {"difficulty", "density", "overall_difficulty", "fame"}
 
 # A leading "The"/"A"/"An" is stripped before alphabetizing or bucketing by
 # first letter -- a live corpus scan found 4176 of 11357 titles (37%) start
@@ -194,6 +197,8 @@ class AuthorRow(BaseModel):
                             # (deduped) numerator saturates, systematically
                             # crushing prolific authors' density.
     overall_difficulty: float | None  # see BookRow.overall_difficulty
+    fame_score: float | None      # 1-10, LLM-judged -- see concordance/fame.py
+    fame_reasoning: str | None
 
 
 class AuthorPage(BaseModel):
@@ -206,10 +211,13 @@ class AuthorPage(BaseModel):
 @router.get("/api/browse/authors", response_model=AuthorPage)
 def browse_authors(
     q: str | None = None,
+    author: str | None = None,   # exact match -- the author-detail page's own lookup (see book's own `author` filter)
     book_id: list[int] = Query([]),
     domain: list[str] = Query([]),
     difficulty_min: float | None = None,
     difficulty_max: float | None = None,
+    fame_min: float | None = None,
+    fame_max: float | None = None,
     archaic: list[str] = Query([]),
     pos: list[str] = Query([]),
     quizzable_only: bool = False,
@@ -217,7 +225,7 @@ def browse_authors(
     random: bool = False,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
-    sort: Literal["author", "book_count", "word_count", "difficulty", "density", "overall_difficulty"] = "word_count",
+    sort: Literal["author", "book_count", "word_count", "difficulty", "density", "overall_difficulty", "fame"] = "word_count",
     dir: Literal["asc", "desc"] = "desc",
     _: dict = Depends(_main.require_viewer),
 ) -> AuthorPage:
@@ -246,6 +254,9 @@ def browse_authors(
     # most-common "author" and dominate the A-Z strip's "V" bucket.
     filters.append("b.author != ALL(%s)")
     params.append(list(PLACEHOLDER_AUTHORS))
+    if author:
+        filters.append("b.author = %s")
+        params.append(author)
     if letter:
         filters.append("lower(left(b.author, 1)) = %s")
         params.append(letter.lower())
@@ -253,6 +264,25 @@ def browse_authors(
         filters.append("b.author ILIKE %s")
         params.append(f"%{q}%")
     where = " AND ".join(filters)
+
+    # fame_score lives on author_fame, joined separately below (at the point
+    # each query has a clean, un-fanned-out `author` to join against) rather
+    # than folded into `filters`/`where` -- the main query below builds
+    # author_base through several CTEs that each independently re-apply
+    # `WHERE {where}` against the same word/book-fanned-out join, and every
+    # one of them would need its own author_fame join for a shared filters
+    # list to work; simpler and just as correct to apply this one filter
+    # once, after the joins that actually need it.
+    fame_filters = []
+    fame_params: list = []
+    if fame_min is not None:
+        fame_filters.append("af.fame_score >= %s")
+        fame_params.append(fame_min)
+    if fame_max is not None:
+        fame_filters.append("af.fame_score <= %s")
+        fame_params.append(fame_max)
+    fame_where = (" AND " + " AND ".join(fame_filters)) if fame_filters else ""
+
     if random:
         order_by = "random()"
         limit = 1
@@ -272,10 +302,11 @@ def browse_authors(
                     JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
                     JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id
                     LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
-                    WHERE {where}
-                    GROUP BY b.author
+                    LEFT JOIN {_main.SCHEMA}.author_fame af ON af.author = b.author
+                    WHERE {where}{fame_where}
+                    GROUP BY b.author, af.fame_score
                 ) sub""",
-            params,
+            (*params, *fame_params),
         )
         total = cur.fetchone()[0]
 
@@ -361,19 +392,23 @@ def browse_authors(
                    ab2.mean_difficulty, ab2.stddev_difficulty, ab2.density,
                    CASE WHEN dr.diff_pct IS NOT NULL AND de.dens_pct IS NOT NULL
                         THEN round((((dr.diff_pct + de.dens_pct) / 2) * 100)::numeric, 1)
-                   END AS overall_difficulty
+                   END AS overall_difficulty,
+                   af.fame_score, af.fame_reasoning
             FROM author_base ab2
             LEFT JOIN diff_rank dr ON dr.author = ab2.author
             LEFT JOIN dens_rank de ON de.author = ab2.author
+            LEFT JOIN {_main.SCHEMA}.author_fame af ON af.author = ab2.author
+            WHERE true{fame_where}
             ORDER BY {order_by}
             LIMIT %s OFFSET %s""",
-            (*params, *params, limit, offset),
+            (*params, *params, *fame_params, limit, offset),
         )
         rows = cur.fetchall()
 
     items = [
         AuthorRow(author=r[0], book_count=r[1], word_count=r[2], scored_word_count=r[3],
-                  mean_difficulty=r[4], stddev_difficulty=r[5], density=r[6], overall_difficulty=r[7])
+                  mean_difficulty=r[4], stddev_difficulty=r[5], density=r[6], overall_difficulty=r[7],
+                  fame_score=r[8], fame_reasoning=r[9])
         for r in rows
     ]
     return AuthorPage(items=items, total=total, page=page, page_size=page_size)
@@ -400,6 +435,8 @@ class BookRow(BaseModel):
                             # overall_difficulty's percent_rank already gives for free.
     archive_path: str | None  # set -> /api/browse/books/{id}/text can serve it
     overall_difficulty: float | None
+    fame_score: float | None      # 1-10, LLM-judged -- see concordance/fame.py
+    fame_reasoning: str | None
     # percent_rank(mean_difficulty) averaged with percent_rank(density), *100,
     # rounded to 1dp -- e.g. 74.3 reads as "harder than 74.3% of the corpus."
     # NOT a z-score blend: a live scan found density's distribution stddev
@@ -428,6 +465,8 @@ def browse_books(
     domain: list[str] = Query([]),
     difficulty_min: float | None = None,
     difficulty_max: float | None = None,
+    fame_min: float | None = None,
+    fame_max: float | None = None,
     archaic: list[str] = Query([]),
     pos: list[str] = Query([]),
     quizzable_only: bool = False,
@@ -435,7 +474,7 @@ def browse_books(
     random: bool = False,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
-    sort: Literal["title", "word_count", "difficulty", "density", "overall_difficulty"] = "title",
+    sort: Literal["title", "word_count", "difficulty", "density", "overall_difficulty", "fame"] = "title",
     dir: Literal["asc", "desc"] = "asc",
     _: dict = Depends(_main.require_viewer),
 ) -> BookPage:
@@ -462,6 +501,18 @@ def browse_books(
     if letter:
         filters.append(f"left({_SORT_TITLE_EXPR}, 1) = %s")
         params.append(letter.lower())
+    # fame_score lives on a LEFT JOINed table (book_fame), not the word-level
+    # aggregation the rest of `filters` targets -- appended to the same
+    # WHERE clause regardless, since a plain equality/range condition on a
+    # LEFT JOINed column works identically there (it just also has to be
+    # true of NULL-having rows being excluded, which is exactly what a
+    # min/max filter on an unscored book should do).
+    if fame_min is not None:
+        filters.append("bf.fame_score >= %s")
+        params.append(fame_min)
+    if fame_max is not None:
+        filters.append("bf.fame_score <= %s")
+        params.append(fame_max)
     where = " AND ".join(filters)
     if random:
         order_by = "random()"
@@ -482,8 +533,9 @@ def browse_books(
                     JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
                     JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id
                     LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
+                    LEFT JOIN {_main.SCHEMA}.book_fame bf ON bf.book_id = b.id
                     WHERE {where}
-                    GROUP BY b.id
+                    GROUP BY b.id, bf.fame_score
                 ) sub""",
             params,
         )
@@ -501,13 +553,16 @@ def browse_books(
                        stddev_samp(wd.difficulty) AS stddev_difficulty,
                        CASE WHEN b.distinct_nonstop_word_count > 0
                             THEN count(DISTINCT w.id)::float / b.distinct_nonstop_word_count END AS density,
+                       bf.fame_score, bf.fame_reasoning,
                        {_SORT_TITLE_EXPR} AS sort_title
                 FROM {_main.SCHEMA}.book b
                 JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
                 JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id
                 LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
+                LEFT JOIN {_main.SCHEMA}.book_fame bf ON bf.book_id = b.id
                 WHERE {where}
-                GROUP BY b.id, b.title, b.author, b.archive_path, b.distinct_nonstop_word_count
+                GROUP BY b.id, b.title, b.author, b.archive_path, b.distinct_nonstop_word_count,
+                         bf.fame_score, bf.fame_reasoning
             ),
             diff_rank AS (
                 SELECT id, percent_rank() OVER (ORDER BY mean_difficulty) AS diff_pct
@@ -521,7 +576,8 @@ def browse_books(
                    bb.mean_difficulty, bb.stddev_difficulty, bb.density, bb.archive_path,
                    CASE WHEN dr.diff_pct IS NOT NULL AND de.dens_pct IS NOT NULL
                         THEN round((((dr.diff_pct + de.dens_pct) / 2) * 100)::numeric, 1)
-                   END AS overall_difficulty
+                   END AS overall_difficulty,
+                   bb.fame_score, bb.fame_reasoning
             FROM book_base bb
             LEFT JOIN diff_rank dr ON dr.id = bb.id
             LEFT JOIN dens_rank de ON de.id = bb.id
@@ -534,7 +590,8 @@ def browse_books(
     items = [
         BookRow(id=r[0], title=r[1], author=r[2], word_count=r[3],
                 scored_word_count=r[4], mean_difficulty=r[5], stddev_difficulty=r[6],
-                density=r[7], archive_path=r[8], overall_difficulty=r[9])
+                density=r[7], archive_path=r[8], overall_difficulty=r[9],
+                fame_score=r[10], fame_reasoning=r[11])
         for r in rows
     ]
     return BookPage(items=items, total=total, page=page, page_size=page_size)

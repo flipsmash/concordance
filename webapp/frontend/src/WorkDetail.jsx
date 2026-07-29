@@ -103,6 +103,16 @@ function WorkDetail() {
         </button>
       </header>
 
+      {book?.fame_score != null && (
+        <section className="browse-facets work-detail-section">
+          <h2 className="work-detail-heading">Fame &amp; importance</h2>
+          <p>
+            <strong>{book.fame_score.toFixed(1)} / 10</strong>
+            {book.fame_reasoning && <span className="muted"> — {book.fame_reasoning}</span>}
+          </p>
+        </section>
+      )}
+
       <section className="browse-facets work-detail-section">
         <h2 className="work-detail-heading">Domains represented</h2>
         <DomainDistribution bookId={bookId} />
