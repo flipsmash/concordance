@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
 from rich.console import Console
 
-from . import clean, db, extract, floor, judge, localdict, master, output, propernouns, resolve, tokenize, validity, validity_score
+from . import clean, db, extract, floor, judge, localdict, master, mw, output, propernouns, resolve, tokenize, validity, validity_score
 from .dictionary import make_session
 from .config import Config
-from .model import Candidate, RejectReason, Verdict, junk_pos_reason
+from .model import Candidate, RejectReason, Verdict, junk_pos_reason, normalize_pos
 
 
 @dataclass
@@ -54,6 +55,57 @@ def apply_known_verdicts(candidates: dict[str, Candidate], known: dict[str, str]
         c.verdict, c.reject_reason = _VERDICT_MAP[kind]
         counts["reject" if kind in _REJECT_KINDS else kind] += 1
     return counts
+
+
+def _enrich_one(cand: Candidate, *, lexicon: dict, session, mw_api_key: str) -> bool:
+    """Resolve one shortlisted candidate: LOCAL/FREE via
+    resolve.resolve_definition, then Merriam-Webster's Collegiate API
+    (mw.py) if FREE still left it undefined and a key is configured --
+    ingest's own cascade becomes LOCAL -> FREE -> MW, still skipping
+    Wordnik/yourdictionary/web (too slow/capped for ingest throughput, see
+    resolve.py's own max_tier docstring).
+
+    Returns True if this call cast the candidate out as a foreign-language
+    loanword via MW's own "<Language> noun/verb/..." fl convention (see
+    mw.is_foreign_pos) -- that signal only survives on MW's RAW
+    part_of_speech string, before normalize_pos lowercases it away, so it
+    has to be caught here rather than in process()'s existing post-loop,
+    which only ever sees the already-normalized part_of_speech.
+
+    Thread-safe: touches only `cand` (a distinct object per call -- shortlist
+    entries are never shared across calls), the shared read-only `lexicon`
+    (localdict.enrich never mutates it), and the shared `session` (urllib3's
+    connection pool does its own locking). mw.lookup_api's on-disk cache/
+    quota bookkeeping is protected by mw._LOCK, so concurrent MW calls from
+    multiple workers are safe but serialize against each other by design --
+    MW is quota-scarce and doesn't need concurrency anyway."""
+    resolve.resolve_definition(cand, max_tier=resolve.Tier.FREE, lexicon=lexicon, session=session)
+    if cand.definition or not mw_api_key:
+        return False
+
+    entries = mw.exact_matches(mw.lookup_api(cand.lemma, mw_api_key, session), cand.lemma)
+    if not entries:
+        return False
+
+    entry = mw.pick_entry(entries, cand.pos)   # cand.pos is spaCy's own coarse tagger POS
+    cand.definition = "; ".join(entry.definitions)
+    cand.definition_source = entry.source
+    cand.part_of_speech = normalize_pos(entry.part_of_speech)
+    if entry.etymology:
+        cand.etymology = entry.etymology
+    # NOT cand.ipa: MW's pronunciation is a proprietary respelling, not real
+    # IPA -- word.ipa is trusted elsewhere (audio.py's Azure TTS synthesis)
+    # to actually contain IPA; same rule db.mw_backfill already enforces.
+
+    if mw.is_foreign_pos(entry.part_of_speech):
+        cand.verdict = Verdict.DROP
+        cand.reject_reason = RejectReason.FOREIGN_LANGUAGE
+        cand.interesting_reason = (
+            f"Merriam-Webster listed this as a {entry.part_of_speech.lower()} — cast out")
+        return True
+
+    resolve.apply_pos_repair(cand, lexicon)
+    return False
 
 
 def process(book: str | Path, cfg: Config, console: Console | None = None,
@@ -128,12 +180,36 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
     console.print(f"[bold]{len(shortlist)}[/bold] words on the shortlist.")
 
     # --- enrichment ------------------------------------------------------
+    # Parallelized across cfg.enrichment_workers threads -- network-bound
+    # (each word's LOCAL/FREE/MW lookup is independent I/O), so real
+    # (GIL-released) speedup. dictionary._get already retries/backs off on
+    # 429 per request; this only changes how many requests are in flight at
+    # once, which is exactly what a real serial-vs-parallel measurement
+    # against the throttling risk documented in dictionary.py's own module
+    # docstring needs to validate before this default is trusted.
     if cfg.lookup_definitions and shortlist:
         session = make_session()
+        mw_api_key = mw.mw_api_key() if cfg.mw_enrichment else ""
+        if mw_api_key and mw.quota_exhausted():
+            console.print("[dim]Merriam-Webster daily quota already exhausted — "
+                           "skipping the MW step for this book.[/dim]")
+            mw_api_key = ""
+
+        foreign_cast = 0
         with console.status("[bold]Looking up definitions…") as status:
-            for i, cand in enumerate(shortlist, 1):
-                resolve.resolve_definition(cand, max_tier=resolve.Tier.FREE, lexicon=lexicon, session=session)
-                status.update(f"[bold]Looking up definitions… {i}/{len(shortlist)}")
+            with ThreadPoolExecutor(max_workers=max(1, cfg.enrichment_workers)) as pool:
+                futures = {
+                    pool.submit(_enrich_one, cand, lexicon=lexicon, session=session,
+                                mw_api_key=mw_api_key): cand
+                    for cand in shortlist
+                }
+                for i, fut in enumerate(as_completed(futures), 1):
+                    if fut.result():   # propagates a worker exception, same as the old serial loop
+                        foreign_cast += 1
+                    status.update(f"[bold]Looking up definitions… {i}/{len(shortlist)}")
+        if foreign_cast:
+            console.print(f"[dim]{foreign_cast} more cast out post-enrichment "
+                           "(Merriam-Webster: foreign-language loanword).[/dim]")
 
         # A dictionary hit can reveal, only now, that a survivor is a symbol
         # (ISO code / roman-numeral page) or a proper noun the extraction-time
@@ -173,6 +249,12 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
         cast_out = 0
         flagged = 0
         for cand in shortlist:
+            if cand.verdict is Verdict.DROP:
+                # Already cast out above (e.g. _enrich_one's MW foreign-
+                # language signal) -- skip, so it doesn't also pay for a
+                # variant_reject_reason computation and pick up a confusing
+                # "flagged for human review" mark on a word already dropped.
+                continue
             reason = junk_pos_reason(cand.part_of_speech)
             if reason:
                 cand.verdict = Verdict.DROP

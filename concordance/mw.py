@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -40,6 +41,23 @@ _CACHE_FILE = _CACHE_DIR / "mw_api_cache.json"
 _USAGE_FILE = _CACHE_DIR / "mw_api_usage.json"
 _DAILY_QUOTA = 1000
 _WARN_THRESHOLD = 900
+
+# Guards the entire uncached branch of lookup_api (cache read-check, quota
+# check, API call, cache write) now that ingest's parallel enrichment step
+# calls this from multiple worker threads -- previously only mw_backfill's
+# sequential loop called it, so the read-modify-write race on both the cache
+# file and the usage counter never mattered. Coarse on purpose: locking only
+# the usage-counter increment still leaves the cache save race (two threads
+# resolving two different new words can each load the cache before either
+# saves, and the second save clobbers the first thread's new entry -- that
+# word then costs a second query next time). Cached hits stay lock-free;
+# only genuinely new words serialize against each other, which is fine --
+# MW is quota-scarce and doesn't need concurrency anyway.
+#
+# Thread-scoped only, not cross-process: this does not protect against a
+# concurrent `ingest` and `mw-backfill` invocation racing the same on-disk
+# cache/usage files. Don't run them at the same time.
+_LOCK = threading.Lock()
 
 
 @dataclass
@@ -127,36 +145,41 @@ def lookup_api(word: str, api_key: str, session: requests.Session | None = None,
     fallback" -- covers both a confirmed miss and a quota-exhausted skip; the
     caller doesn't need to tell those apart, just fall back either way."""
     session = session or requests.Session()
-    cache = _load_json(_CACHE_FILE)
     key = word.lower()
 
+    cache = _load_json(_CACHE_FILE)
     if key in cache:
         raw = cache[key]
     else:
-        if _usage_count() >= _DAILY_QUOTA:
-            if console:
-                console.print(f"[yellow]MW API daily quota ({_DAILY_QUOTA}) reached — skipping API for {word!r}.[/yellow]")
-            return []
-        resp = _get(session, _API_URL.format(word=quote(word)), params={"key": api_key})
-        if resp is None:
-            if console:
-                console.print(f"[yellow]MW API unreachable for {word!r} — not caching, will retry next time.[/yellow]")
-            return []
-        used = _record_usage()   # a request reached MW (good key or bad) -- counts against quota either way
-        if console and used >= _WARN_THRESHOLD:
-            console.print(f"[yellow]MW API usage today: {used}/{_DAILY_QUOTA}[/yellow]")
-        if resp.status_code != 200:
-            if console:
-                console.print(f"[yellow]MW API returned HTTP {resp.status_code} for {word!r} — not caching (check MW_DICTIONARY_API_KEY).[/yellow]")
-            return []
-        try:
-            raw = resp.json()
-        except ValueError:
-            if console:
-                console.print(f"[yellow]MW API returned non-JSON for {word!r} — not caching.[/yellow]")
-            return []
-        cache[key] = raw
-        _save_json(_CACHE_FILE, cache)
+        with _LOCK:
+            cache = _load_json(_CACHE_FILE)   # re-read: another thread may have just cached this
+            if key in cache:
+                raw = cache[key]
+            else:
+                if _usage_count() >= _DAILY_QUOTA:
+                    if console:
+                        console.print(f"[yellow]MW API daily quota ({_DAILY_QUOTA}) reached — skipping API for {word!r}.[/yellow]")
+                    return []
+                resp = _get(session, _API_URL.format(word=quote(word)), params={"key": api_key})
+                if resp is None:
+                    if console:
+                        console.print(f"[yellow]MW API unreachable for {word!r} — not caching, will retry next time.[/yellow]")
+                    return []
+                used = _record_usage()   # a request reached MW (good key or bad) -- counts against quota either way
+                if console and used >= _WARN_THRESHOLD:
+                    console.print(f"[yellow]MW API usage today: {used}/{_DAILY_QUOTA}[/yellow]")
+                if resp.status_code != 200:
+                    if console:
+                        console.print(f"[yellow]MW API returned HTTP {resp.status_code} for {word!r} — not caching (check MW_DICTIONARY_API_KEY).[/yellow]")
+                    return []
+                try:
+                    raw = resp.json()
+                except ValueError:
+                    if console:
+                        console.print(f"[yellow]MW API returned non-JSON for {word!r} — not caching.[/yellow]")
+                    return []
+                cache[key] = raw
+                _save_json(_CACHE_FILE, cache)
 
     if not raw or isinstance(raw[0], str):   # list[str] == MW's "did you mean" no-match signal
         return []

@@ -62,6 +62,8 @@ def run(
     min_zipf: float = typer.Option(3.5, "--min-zipf", help="Frequency floor; higher keeps rarer words only."),
     limit: int = typer.Option(0, "--limit", "-l", help="Cap the shortlist size (0 = no cap)."),
     no_lookup: bool = typer.Option(False, "--no-lookup", help="Skip online definition lookups."),
+    workers: int = typer.Option(4, "--workers", help="Enrichment worker threads (network-bound; see Config.enrichment_workers)."),
+    no_mw: bool = typer.Option(False, "--no-mw", help="Skip the Merriam-Webster fallback step during enrichment."),
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema to check for already-pruned words."),
 ) -> None:
     """Run the extraction pipeline on a book."""
@@ -69,6 +71,8 @@ def run(
         min_zipf=min_zipf,
         limit=limit,
         lookup_definitions=not no_lookup,
+        enrichment_workers=workers,
+        mw_enrichment=not no_mw,
     )
     if stub:
         cfg.model_path = ""              # explicit opt-out of the model
@@ -101,6 +105,8 @@ def ingest(
     no_lookup: bool = typer.Option(False, "--no-lookup",
                                     help="Skip online definition lookups, and the archive-metadata step's "
                                          "Gutenberg publication-date lookup."),
+    workers: int = typer.Option(4, "--workers", help="Enrichment worker threads (network-bound; see Config.enrichment_workers)."),
+    no_mw: bool = typer.Option(False, "--no-mw", help="Skip the Merriam-Webster fallback step during enrichment."),
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema to write into."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
     no_archive: bool = typer.Option(False, "--no-archive", help="Leave source book files in place instead of moving them to archive/."),
@@ -121,6 +127,8 @@ def ingest(
         min_zipf=min_zipf,
         limit=limit,
         lookup_definitions=not no_lookup,
+        enrichment_workers=workers,
+        mw_enrichment=not no_mw,
     )
     if stub:
         cfg.model_path = ""              # explicit opt-out of the model

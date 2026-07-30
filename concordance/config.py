@@ -38,6 +38,24 @@ class Config:
 
     # --- Enrichment (§03.9) ----------------------------------------------
     lookup_definitions: bool = True
+    # Ingest's enrichment loop (pipeline.process) resolves LOCAL/FREE-tier
+    # lookups concurrently across this many worker threads -- network-bound,
+    # so real (GIL-released) parallelism. Must be >=1. Placeholder default
+    # pending a real serial-vs-parallel measurement; dictionary._get already
+    # retries/backs off on 429 per request, this only changes how many
+    # requests can be in flight at once.
+    enrichment_workers: int = 4
+    # Try Merriam-Webster's Collegiate API (mw.py) for any word the FREE
+    # tier still missed, before giving up on it for this book -- ingest's
+    # own cascade becomes LOCAL -> FREE -> MW, never Wordnik/yourdict/web
+    # (see resolve.py's max_tier docstring for why those stay excluded
+    # here). MW doesn't reduce load on Free Dictionary/Wiktionary -- it's a
+    # separate tier tried only after both already missed -- so this is an
+    # independent knob from enrichment_workers, not a mitigation for it.
+    # mw.mw_api_key() returning "" (no MW_DICTIONARY_API_KEY configured)
+    # already no-ops this on its own; this is mainly for isolating the
+    # parallelism-only effect during measurement.
+    mw_enrichment: bool = True
 
     # --- Output (§03.10) -------------------------------------------------
     # No interactive review knobs: the shortlist is written whole and hand-edited,
