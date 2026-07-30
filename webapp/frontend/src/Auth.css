@@ -55,7 +55,29 @@
   cursor: default;
 }
 
+.auth-cta {
+  margin-top: 6px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: white;
+  border-radius: 6px;
+  padding: 9px 14px;
+  font-size: 14px;
+  text-align: center;
+  text-decoration: none;
+}
+
 .auth-error {
   color: var(--danger);
   font-size: 13px;
+}
+
+.auth-hint {
+  color: var(--text);
+  font-size: 13px;
+  margin: 0;
+}
+
+.auth-hint a {
+  color: var(--accent);
 }

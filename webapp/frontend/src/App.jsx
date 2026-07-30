@@ -8,6 +8,7 @@ import { AuthProvider } from './AuthContext'
 import Login from './Login'
 import Register from './Register'
 import RejectedView from './RejectedView'
+import RequestInvite from './RequestInvite'
 import RequireAdmin from './RequireAdmin'
 import RequireAuth from './RequireAuth'
 
@@ -101,6 +102,7 @@ function App() {
             Access" note. */}
         <Route path="login" element={<Login />} />
         <Route path="register" element={<Register />} />
+        <Route path="request-invite" element={<RequestInvite />} />
         <Route path="app" element={<RequireAuth />}>
           <Route element={<AppShell />}>
             <Route

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuth } from './AuthContext'
 import './Auth.css'
 
@@ -48,6 +48,9 @@ function Login() {
         <button type="submit" disabled={submitting}>
           {submitting ? 'Logging in…' : 'Log in'}
         </button>
+        <p className="auth-hint">
+          Don&apos;t have an account? <Link to="/request-invite">Request an invite</Link>
+        </p>
       </form>
     </div>
   )
