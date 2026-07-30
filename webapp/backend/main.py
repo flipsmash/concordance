@@ -577,6 +577,12 @@ class BookRef(BaseModel):
     author: str | None  # nullable in the DB; pre-dates the author column backfill
 
 
+class DefinitionLink(BaseModel):
+    word_id: int
+    lemma: str
+    surface: str  # the literal inflected form found in THIS word's definition text
+
+
 class WordDetail(BaseModel):
     id: int
     lemma: str
@@ -608,6 +614,7 @@ class WordDetail(BaseModel):
 
     categories: list[WordCategory]
     books: list[BookRef]
+    definition_links: list[DefinitionLink]
 
 
 @app.get("/api/words/{word_id}", response_model=WordDetail)
@@ -616,9 +623,11 @@ def word_detail(word_id: int, _: dict = Depends(require_viewer)) -> WordDetail:
     `word`, the composite difficulty + its factor breakdown from
     `word_difficulty`, raw Ngram history from `word_ngram`, which audio source
     (if any) `word_audio` has, every USAS category it carries (not just the
-    one /graph picks for a node color), and which book(s) it came from. Three
-    round trips rather than one fused query: word_category and word_book are
-    both 1:many against word, so joining either into the 1:1
+    one /graph picks for a node color), which book(s) it came from, and which
+    OTHER active words its own definition text mentions (word_definition_link,
+    populated by `concordance link-definitions`). Four round trips rather than
+    one fused query: word_category/word_book/word_definition_link are all
+    1:many against word, so joining any of them into the 1:1
     difficulty/ngram/audio row would fan out into duplicate rows."""
     from wordfreq import zipf_frequency
 
@@ -672,6 +681,22 @@ def word_detail(word_id: int, _: dict = Depends(require_viewer)) -> WordDetail:
         )
         books = [BookRef(id=bid, title=title, author=author) for bid, title, author in cur.fetchall()]
 
+        cur.execute(
+            f"""SELECT wdl.target_word_id, w2.lemma, wdl.surface
+                FROM {SCHEMA}.word_definition_link wdl
+                JOIN {SCHEMA}.word w2 ON w2.id = wdl.target_word_id
+                WHERE wdl.source_word_id = %s AND w2.active
+                ORDER BY w2.lemma ASC""",
+            (word_id,),
+        )
+        # w2.active guards against a link whose target was pruned/deactivated
+        # after link-definitions last ran -- without it the UI could offer a
+        # dead link into a word that no longer resolves.
+        definition_links = [
+            DefinitionLink(word_id=target_id, lemma=lemma2, surface=surface)
+            for target_id, lemma2, surface in cur.fetchall()
+        ]
+
     return WordDetail(
         id=word_id, lemma=lemma, part_of_speech=pos, definition=definition, ipa=ipa,
         sentence=sentence, chapter=chapter, synonyms=synonyms, etymology=etymology,
@@ -682,7 +707,7 @@ def word_detail(word_id: int, _: dict = Depends(require_viewer)) -> WordDetail:
         quizzable=quizzable, quizzable_reason=quizzable_reason,
         ngram_peak=ngram_peak, ngram_recent=ngram_recent, ngram_recency_ratio=ngram_recency_ratio,
         ngram_peak_year=ngram_peak_year, audio_source=audio_source,
-        categories=categories, books=books,
+        categories=categories, books=books, definition_links=definition_links,
     )
 
 

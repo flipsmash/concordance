@@ -1389,6 +1389,118 @@ def test_expand_synonym_definitions_strips_css_junk_and_is_idempotent(monkeypatc
 
 
 @pg
+def test_compute_definition_links_matches_lemma_and_excludes_self_and_inactive():
+    from concordance.model import Candidate
+
+    schema = "cc_test_definition_links"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    # recondite -> abstruse: exact-lemma mention, real cross-link expected.
+    abstruse = Candidate(lemma="abstruse", pos="ADJ")
+    abstruse.definition = "Difficult to understand; obscure."
+    recondite = Candidate(lemma="recondite", pos="ADJ")
+    recondite.definition = "Abstruse and obscure in nature."
+
+    # vilify -> mentioned via an INFLECTED form ("vilified") -- tests
+    # lemma-aware matching, not just exact substring matching.
+    vilify = Candidate(lemma="vilify", pos="VERB")
+    vilify.definition = "To speak or write about in an abusively disparaging manner."
+    banisher = Candidate(lemma="banisher", pos="NOUN")
+    banisher.definition = "One who has vilified or exiled another."
+
+    # amble: a word whose own definition happens to reuse its own lemma --
+    # must NOT create a self-link.
+    amble = Candidate(lemma="amble", pos="VERB")
+    amble.definition = "To amble along at a leisurely pace."
+
+    # inert: target exists but is INACTIVE -- must not be linked.
+    inert = Candidate(lemma="inert", pos="ADJ")
+    inert.definition = "Sluggish; lacking vigor."
+    sluggard = Candidate(lemma="sluggard", pos="NOUN")
+    sluggard.definition = "A person who is inert and lazy."
+
+    db.sync_book_results(
+        conn, "Book One",
+        kept=[abstruse, recondite, vilify, banisher, amble, inert, sluggard],
+        rejected=[], schema=schema,
+    )
+    with conn.cursor() as cur:
+        cur.execute(f"UPDATE {schema}.word SET active=false WHERE lemma='inert'")
+    conn.commit()
+
+    stats = db.compute_definition_links(conn, schema)
+    assert stats["words_examined"] == 6   # 7 inserted, "inert" excluded (inactive)
+    assert stats["words_with_links"] == 2  # recondite, banisher
+    assert stats["links_created"] == 2
+
+    def _links_for(lemma):
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT w2.lemma, wdl.surface FROM {schema}.word_definition_link wdl
+                    JOIN {schema}.word w1 ON w1.id = wdl.source_word_id
+                    JOIN {schema}.word w2 ON w2.id = wdl.target_word_id
+                    WHERE w1.lemma = %s""",
+                (lemma,),
+            )
+            return cur.fetchall()
+
+    assert _links_for("recondite") == [("abstruse", "Abstruse")]
+    assert _links_for("banisher") == [("vilify", "vilified")]
+    assert _links_for("amble") == []       # no self-link
+    assert _links_for("sluggard") == []    # target ("inert") is inactive
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_compute_definition_links_is_idempotent_after_definition_change():
+    from concordance.model import Candidate
+
+    schema = "cc_test_definition_links_idempotent"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    verbose = Candidate(lemma="verbose", pos="ADJ")
+    verbose.definition = "Using more words than needed."
+    prolix = Candidate(lemma="prolix", pos="ADJ")
+    prolix.definition = "Tediously verbose."
+    db.sync_book_results(conn, "Book One", kept=[verbose, prolix], rejected=[], schema=schema)
+
+    stats = db.compute_definition_links(conn, schema)
+    assert stats["links_created"] == 1
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT count(*) FROM {schema}.word_definition_link")
+        assert cur.fetchone() == (1,)
+
+    # Definition rewritten to no longer mention "verbose" -- rerunning must
+    # remove the now-stale link, not just leave it stranded.
+    with conn.cursor() as cur:
+        cur.execute(f"UPDATE {schema}.word SET definition='Excessively long-winded.' WHERE lemma='prolix'")
+    conn.commit()
+
+    stats2 = db.compute_definition_links(conn, schema)
+    assert stats2["links_created"] == 0
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT count(*) FROM {schema}.word_definition_link")
+        assert cur.fetchone() == (0,)
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
 def test_compute_book_similarity_idf_weighting_and_thresholds():
     # 4 books. book1/book2 share 4 rare words (each appearing in ONLY those
     # two books) -- should score highly and be stored both directions.

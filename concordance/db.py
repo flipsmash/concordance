@@ -80,6 +80,24 @@ CREATE TABLE IF NOT EXISTS {s}.word_book (
     PRIMARY KEY (word_id, book_id)
 );
 
+-- `concordance link-definitions` -- one row per (source, target) pair when a
+-- word's OWN definition text uses another word that's also in this app's
+-- vocabulary (lemma-matched, see db.compute_definition_links), so the
+-- webapp can render a real clickable link instead of inert prose. `surface`
+-- is the literal inflected form found in the text ("proscribed"), not
+-- necessarily target's own headword spelling ("proscribe") -- the frontend
+-- highlights that exact substring. The UNIQUE constraint's own index
+-- already serves "every link for word X" lookups (source_word_id leads).
+CREATE TABLE IF NOT EXISTS {s}.word_definition_link (
+    id               serial PRIMARY KEY,
+    source_word_id   integer NOT NULL REFERENCES {s}.word(id) ON DELETE CASCADE,
+    target_word_id   integer NOT NULL REFERENCES {s}.word(id) ON DELETE CASCADE,
+    surface          text NOT NULL,
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    CHECK (source_word_id != target_word_id),
+    UNIQUE (source_word_id, target_word_id)
+);
+
 CREATE TABLE IF NOT EXISTS {s}.category (
     id          serial PRIMARY KEY,
     taxonomy    text NOT NULL DEFAULT 'usas',
@@ -1919,6 +1937,75 @@ def expand_synonym_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int
                 _invalidate_definition_dependents(cur, s, wid)
                 stats["target_created"] += 1
             conn.commit()
+    return stats
+
+
+def compute_definition_links(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
+                              chunk_size: int = 500) -> dict:
+    """`concordance link-definitions`: find every case where an active word's
+    OWN definition text uses another word that's ALSO active in this app's
+    vocabulary, so the webapp can render a real clickable link
+    (word_definition_link) instead of inert prose. Matching is lemma-aware
+    (spaCy, tokenize._resolve_lemma -- the same mis-lemmatization guards the
+    ingestion pipeline itself relies on, not a fresh/divergent heuristic) so
+    an inflected mention ("proscribed") still matches the target's headword
+    ("proscribe"). Target pool is this app's own `word` table only, never
+    the broader local Wiktionary dump -- `word` already holds only curated
+    rare/interesting vocabulary, so there's no meaningful over-linking risk
+    the way there would be linking against ordinary-word coverage.
+
+    Full recompute every run, no watermark column: a word's definition can
+    be rewritten later by refill/deepen/mw-backfill/expand-synonyms, and
+    with ~67k short definitions a full spaCy pass is cheap, so "just rerun
+    this command" is the staleness fix, same manual-backfill convention
+    already used everywhere else in this codebase (mw-backfill, dedupe-
+    plurals, expand-synonyms) rather than a new automatic-invalidation hook."""
+    from . import tokenize
+
+    s = _safe_schema(schema)
+    nlp = tokenize.load_nlp()
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT id, lemma_lc, definition FROM {s}.word
+                WHERE active AND definition IS NOT NULL AND definition != ''
+                ORDER BY id""" + (f" LIMIT {int(limit)}" if limit else "")
+        )
+        rows = cur.fetchall()
+
+    stats = {"words_examined": len(rows), "words_with_links": 0, "links_created": 0}
+    if not rows:
+        return stats
+
+    lemma_to_id = {lemma_lc: wid for wid, lemma_lc, _ in rows}
+    docs = nlp.pipe((definition for _, _, definition in rows), batch_size=200)
+
+    with conn.cursor() as cur:
+        for i, ((word_id, lemma_lc, _definition), doc) in enumerate(zip(rows, docs), 1):
+            # target lemma -> first surface form seen for it in this definition
+            matches: dict[str, str] = {}
+            for tok in doc:
+                if not tok.is_alpha or tok.is_stop or len(tok) < 3:
+                    continue
+                target_lemma = tokenize._resolve_lemma(tok)
+                if target_lemma == lemma_lc or target_lemma not in lemma_to_id:
+                    continue
+                matches.setdefault(target_lemma, tok.text)
+
+            cur.execute(f"DELETE FROM {s}.word_definition_link WHERE source_word_id = %s", (word_id,))
+            if matches:
+                stats["words_with_links"] += 1
+                stats["links_created"] += len(matches)
+                cur.executemany(
+                    f"""INSERT INTO {s}.word_definition_link (source_word_id, target_word_id, surface)
+                        VALUES (%s, %s, %s)""",
+                    [(word_id, lemma_to_id[target_lemma], surface) for target_lemma, surface in matches.items()],
+                )
+
+            if i % chunk_size == 0:
+                conn.commit()
+        conn.commit()
+
     return stats
 
 

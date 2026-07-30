@@ -1120,6 +1120,30 @@ def expand_synonyms(
                   f"{stats['target_inactive']} left unchanged (target exists but inactive)")
 
 
+@app.command("link-definitions")
+def link_definitions(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap words processed (0 = all)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Cross-link a word's definition to any OTHER active word it mentions
+    (lemma-aware), so the webapp can render a real clickable link instead of
+    inert prose. Safe to re-run any time a definition changes (refill/
+    deepen/mw-backfill/expand-synonyms all rewrite word.definition) — this
+    always does a full recompute, not an incremental one."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    with console.status("[bold]Cross-linking definitions…"):
+        stats = db.compute_definition_links(conn, schema, limit=limit)
+    conn.close()
+    console.print(f"[green]✓[/green] link-definitions: [bold]{stats['words_examined']}[/bold] words examined — "
+                  f"[bold]{stats['words_with_links']}[/bold] have at least one link, "
+                  f"[bold]{stats['links_created']}[/bold] links total")
+
+
 @app.command()
 def refill(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),

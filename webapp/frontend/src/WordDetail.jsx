@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import AddToSetMenu from './AddToSetMenu'
 import { useAuth } from './AuthContext'
 import GraphView from './GraphView'
+import LinkedDefinition from './LinkedDefinition'
 import { colorForBucket } from './domainColors'
 import './WordDetail.css'
 
@@ -169,7 +170,9 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
       </div>
 
       <section className="word-detail-section">
-        <p className="word-detail-definition">{word.definition || '—'}</p>
+        <p className="word-detail-definition">
+          {word.definition ? <LinkedDefinition text={word.definition} links={word.definition_links} /> : '—'}
+        </p>
         {word.etymology && <p className="word-detail-etymology">{word.etymology}</p>}
         {word.synonyms.length > 0 && (
           <div className="word-detail-synonyms">
