@@ -9,6 +9,23 @@
   grid-template-columns: 12px 150px 1fr auto;
   align-items: center;
   gap: 10px;
+  width: 100%;
+  padding: 3px 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.domain-dist-row:hover {
+  background: var(--border);
+}
+
+.domain-dist-row.active {
+  border-width: 2px;
+  font-weight: 500;
 }
 
 .domain-dist-swatch {

@@ -2,6 +2,25 @@ import { useCallback, useEffect, useState } from 'react'
 
 const API_BASE = '' // relative — dev proxies /api via vite.config.js, prod is same-origin
 
+/** Merges `extra` (arrays repeat the key, other truthy values set it,
+ * falsy/empty values are omitted) onto a base params object -- the same
+ * array/scalar convention every browse facet endpoint expects. Shared here
+ * so a page fetching a facet-summary endpoint (domain-summary,
+ * difficulty-bands) alongside its usePagedTable word list builds query
+ * strings the same way as the table itself does, rather than re-deriving
+ * this loop per call site. */
+export function buildQueryParams(base, extra) {
+  const params = new URLSearchParams(base)
+  for (const [key, value] of Object.entries(extra)) {
+    if (Array.isArray(value)) {
+      value.forEach((v) => params.append(key, v))
+    } else if (value) {
+      params.set(key, value)
+    }
+  }
+  return params
+}
+
 /** Shared pagination/sort/fetch lifecycle for a sortable, paginated API table. */
 export function usePagedTable({ endpoint, pageSize = 50, defaultSort, defaultDir = 'asc', extraParams = {} }) {
   const [items, setItems] = useState([])
@@ -17,14 +36,7 @@ export function usePagedTable({ endpoint, pageSize = 50, defaultSort, defaultDir
   const load = useCallback(() => {
     setLoading(true)
     setError(null)
-    const params = new URLSearchParams({ page: String(page), page_size: String(pageSize), sort, dir })
-    for (const [key, value] of Object.entries(extraParams)) {
-      if (Array.isArray(value)) {
-        value.forEach((v) => params.append(key, v))
-      } else if (value) {
-        params.set(key, value)
-      }
-    }
+    const params = buildQueryParams({ page: String(page), page_size: String(pageSize), sort, dir }, extraParams)
     fetch(`${API_BASE}${endpoint}?${params}`)
       .then((res) => {
         if (!res.ok) throw new Error(`load failed: ${res.status}`)

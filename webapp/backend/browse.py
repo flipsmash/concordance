@@ -138,6 +138,8 @@ def _build_word_filters(
     pos: list[str],
     quizzable_only: bool,
     top_code: list[str] = [],
+    uncategorized: bool = False,
+    unscored_only: bool = False,
 ) -> tuple[list[str], list]:
     """The combinable-facet WHERE clause every endpoint below shares, each
     facet independently optional -- author and book_id can both be set at
@@ -152,7 +154,20 @@ def _build_word_filters(
     indirection -- a word tagged at that code OR a real descendant of it
     matches (see usas.subtree_match) -- the field/sub-field/sub-sub-field
     Categories drill-down needs this, since a field's own code generally
-    isn't a bucket key."""
+    isn't a bucket key.
+
+    `uncategorized`/`unscored_only` are the two SQL fragments
+    /api/browse/domain-summary and /api/browse/difficulty-bands already
+    computed standalone for their own "Uncategorized"/"Not yet scored"
+    counts -- pulled in here so every caller (including /api/browse/words,
+    which needed them to make those two chart segments clickable) shares one
+    definition. Rejecting `uncategorized` alongside `domain`/`top_code`, or
+    `unscored_only` alongside `difficulty_min`/`difficulty_max`, is each
+    caller's job, not this helper's -- it just composes whatever it's given,
+    same as `top_code`'s own validation living in its endpoint. `unscored_only`
+    only means anything against a LEFT JOIN word_difficulty; a caller that
+    INNER JOINs word_difficulty (as browse_difficulty_bands's own band loop
+    does) must never pass it."""
     filters = ["w.active"]
     params: list = []
 
@@ -201,6 +216,13 @@ def _build_word_filters(
         params.append(pos)
     if quizzable_only:
         filters.append("wd.quizzable = true")
+    if uncategorized:
+        filters.append(
+            f"""NOT EXISTS (SELECT 1 FROM {_main.SCHEMA}.word_category wc
+                            WHERE wc.word_id = w.id)"""
+        )
+    if unscored_only:
+        filters.append("wd.difficulty IS NULL")
 
     return filters, params
 
@@ -1366,8 +1388,10 @@ def browse_words(
     book_id: list[int] = Query([]),
     domain: list[str] = Query([]),
     top_code: list[str] = Query([]),
+    uncategorized: bool = False,
     difficulty_min: float | None = None,
     difficulty_max: float | None = None,
+    unscored_only: bool = False,
     archaic: list[str] = Query([]),
     pos: list[str] = Query([]),
     quizzable_only: bool = False,
@@ -1383,8 +1407,13 @@ def browse_words(
     for code in top_code:
         if code not in _ALL_CODES:
             raise HTTPException(404, f"unknown category code {code!r}")
+    if uncategorized and (domain or top_code):
+        raise HTTPException(400, "uncategorized is mutually exclusive with domain/top_code")
+    if unscored_only and (difficulty_min is not None or difficulty_max is not None):
+        raise HTTPException(400, "unscored_only is mutually exclusive with difficulty_min/difficulty_max")
     filters, params = _build_word_filters(
-        author, book_id, domain, difficulty_min, difficulty_max, archaic, pos, quizzable_only, top_code
+        author, book_id, domain, difficulty_min, difficulty_max, archaic, pos, quizzable_only, top_code,
+        uncategorized, unscored_only,
     )
     if letter:
         filters.append("w.lemma_lc LIKE %s")
@@ -1510,6 +1539,7 @@ def browse_domain_summary(
     book_id: list[int] = Query([]),
     difficulty_min: float | None = None,
     difficulty_max: float | None = None,
+    unscored_only: bool = False,
     archaic: list[str] = Query([]),
     pos: list[str] = Query([]),
     quizzable_only: bool = False,
@@ -1523,25 +1553,35 @@ def browse_domain_summary(
     already depended on by the faceted Browse page's domain-chip click
     handler, which would silently no-op on an "uncategorized" chip (it isn't
     a real DOMAIN_BUCKETS key) -- safer to add the richer shape here than to
-    risk breaking already-shipped UI for the sake of this one."""
+    risk breaking already-shipped UI for the sake of this one.
+
+    No `domain`/`uncategorized` param here -- the bucket breakdown (including
+    the uncategorized count below) IS this endpoint's output, so it can't
+    also be an input filter; `unscored_only` (like `difficulty_min/max`) is
+    fair game since it narrows which words get bucketed, not which bucket a
+    word lands in."""
     base_filters, base_params = _build_word_filters(
-        author, book_id, [], difficulty_min, difficulty_max, archaic, pos, quizzable_only
+        author, book_id, [], difficulty_min, difficulty_max, archaic, pos, quizzable_only,
+        unscored_only=unscored_only,
     )
     where = " AND ".join(base_filters)
 
     with _main.get_conn() as conn, conn.cursor() as cur:
         buckets = _bucket_counts(cur, where, base_params)
 
+        uncat_filters, uncat_params = _build_word_filters(
+            author, book_id, [], difficulty_min, difficulty_max, archaic, pos, quizzable_only,
+            uncategorized=True, unscored_only=unscored_only,
+        )
+        uncat_where = " AND ".join(uncat_filters)
         cur.execute(
             f"""SELECT count(*) FROM {_main.SCHEMA}.word w
                 LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
-                WHERE {where} AND NOT EXISTS (
-                    SELECT 1 FROM {_main.SCHEMA}.word_category wc WHERE wc.word_id = w.id
-                )""",
-            base_params,
+                WHERE {uncat_where}""",
+            uncat_params,
         )
-        uncategorized = cur.fetchone()[0]
-        buckets.append(DomainBucketCount(bucket="uncategorized", name="Uncategorized", word_count=uncategorized))
+        uncategorized_count = cur.fetchone()[0]
+        buckets.append(DomainBucketCount(bucket="uncategorized", name="Uncategorized", word_count=uncategorized_count))
 
         cur.execute(
             f"""SELECT count(*) FROM {_main.SCHEMA}.word w
@@ -1568,6 +1608,7 @@ def browse_difficulty_bands(
     author: str | None = None,
     book_id: list[int] = Query([]),
     domain: list[str] = Query([]),
+    uncategorized: bool = False,
     archaic: list[str] = Query([]),
     pos: list[str] = Query([]),
     quizzable_only: bool = False,
@@ -1577,9 +1618,15 @@ def browse_difficulty_bands(
     """Word count per difficulty band, conditioned on every OTHER active
     facet, plus one explicit "not yet scored" band -- the mechanism that
     makes the corpus's current sparse difficulty coverage honest in the UI
-    rather than silently vanishing once a difficulty filter narrows it."""
+    rather than silently vanishing once a difficulty filter narrows it.
+
+    No `difficulty_min/max`/`unscored_only` here -- the band breakdown IS
+    this endpoint's output; `domain`/`uncategorized` (like the other facets)
+    are fair game since they narrow which words get banded, not which band a
+    word lands in."""
     base_filters, base_params = _build_word_filters(
-        author, book_id, domain, None, None, archaic, pos, quizzable_only
+        author, book_id, domain, None, None, archaic, pos, quizzable_only,
+        uncategorized=uncategorized,
     )
     where = " AND ".join(base_filters)
 
@@ -1603,11 +1650,16 @@ def browse_difficulty_bands(
             ))
             band_min = band_max
 
+        unscored_filters, unscored_params = _build_word_filters(
+            author, book_id, domain, None, None, archaic, pos, quizzable_only,
+            uncategorized=uncategorized, unscored_only=True,
+        )
+        unscored_where = " AND ".join(unscored_filters)
         cur.execute(
             f"""SELECT count(*) FROM {_main.SCHEMA}.word w
                 LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
-                WHERE {where} AND wd.difficulty IS NULL""",
-            base_params,
+                WHERE {unscored_where}""",
+            unscored_params,
         )
         unscored = cur.fetchone()[0]
         results.append(DifficultyBandCount(band_min=None, band_max=None, label="Not yet scored",

@@ -16,6 +16,24 @@
   gap: 4px;
   width: 64px;
   flex: 0 0 auto;
+  padding: 2px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+}
+
+.diff-hist-col:hover {
+  background: var(--border);
+}
+
+.diff-hist-col.active {
+  border-color: var(--accent);
+}
+
+.diff-hist-col.active .diff-hist-bar {
+  background: var(--accent-deep);
 }
 
 .diff-hist-count {

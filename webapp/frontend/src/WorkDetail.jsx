@@ -3,7 +3,8 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import DifficultyHistogram from './DifficultyHistogram'
 import DomainDistribution from './DomainDistribution'
 import SharedWordsPanel from './SharedWordsPanel'
-import { usePagedTable } from './usePagedTable'
+import { buildQueryParams, usePagedTable } from './usePagedTable'
+import { useWordFilters } from './useWordFilters'
 import './Authors.css'
 import './Browse.css'
 import './WorkDetail.css'
@@ -17,13 +18,22 @@ const PAGE_SIZE = 30
 // The difficulty distribution gets its own real histogram component
 // (DifficultyHistogram) rather than reusing Browse's compact filter strip,
 // which varies bar WIDTH not height and isn't a histogram.
+//
+// Both charts are click-to-filter (useWordFilters) and narrow the word list
+// below; they also cross-filter each other (selecting a difficulty band
+// re-fetches the domain chart's counts and vice versa) via the same
+// domainSummaryParams/bandsParams split the hook derives.
 function WorkDetail() {
   const { author, bookId } = useParams()
   const navigate = useNavigate()
   const [book, setBook] = useState(null)
+  const [domainSummary, setDomainSummary] = useState(null)
   const [bands, setBands] = useState([])
   const [related, setRelated] = useState(null) // null = not loaded yet, [] = loaded, none found
   const [compareBook, setCompareBook] = useState(null) // the related book currently being compared, or null
+
+  const { selectedDomain, selectedBand, toggleDomain, toggleBand, clear, wordParams, domainSummaryParams, bandsParams } =
+    useWordFilters()
 
   useEffect(() => {
     fetch(`${API_BASE}/api/browse/books?book_id=${bookId}`)
@@ -33,11 +43,20 @@ function WorkDetail() {
   }, [bookId])
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/browse/difficulty-bands?book_id=${bookId}`)
+    const params = buildQueryParams({ book_id: bookId }, domainSummaryParams)
+    fetch(`${API_BASE}/api/browse/domain-summary?${params}`)
+      .then((res) => res.json())
+      .then(setDomainSummary)
+      .catch(() => {})
+  }, [bookId, JSON.stringify(domainSummaryParams)]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const params = buildQueryParams({ book_id: bookId }, bandsParams)
+    fetch(`${API_BASE}/api/browse/difficulty-bands?${params}`)
       .then((res) => res.json())
       .then(setBands)
       .catch(() => {})
-  }, [bookId])
+  }, [bookId, JSON.stringify(bandsParams)]) // eslint-disable-line react-hooks/exhaustive-deps
 
   function surpriseMe() {
     fetch(`${API_BASE}/api/browse/books?random=true`)
@@ -74,8 +93,28 @@ function WorkDetail() {
     pageSize: PAGE_SIZE,
     defaultSort: 'lemma',
     defaultDir: 'asc',
-    extraParams: { book_id: [bookId] },
+    extraParams: { book_id: [bookId], ...wordParams },
   })
+
+  function selectDomain(bucket) {
+    toggleDomain(bucket)
+    setPage(1)
+  }
+
+  function selectBand(band) {
+    toggleBand(band)
+    setPage(1)
+  }
+
+  function clearFilters() {
+    clear()
+    setPage(1)
+  }
+
+  const selectedDomainName = domainSummary?.buckets.find((b) => b.bucket === selectedDomain)?.name
+  const selectedBandLabel = bands.find((b) =>
+    selectedBand === 'unscored' ? b.band_min === null : selectedBand && String(b.band_min) === selectedBand.min,
+  )?.label
 
   return (
     <div className="browse-page work-detail-page">
@@ -115,12 +154,12 @@ function WorkDetail() {
 
       <section className="browse-facets work-detail-section">
         <h2 className="work-detail-heading">Domains represented</h2>
-        <DomainDistribution bookId={bookId} />
+        <DomainDistribution summary={domainSummary} selected={selectedDomain} onSelect={selectDomain} />
       </section>
 
       <section className="browse-facets work-detail-section">
         <h2 className="work-detail-heading">Difficulty distribution</h2>
-        <DifficultyHistogram bands={bands} />
+        <DifficultyHistogram bands={bands} selectedBand={selectedBand} onSelect={selectBand} />
       </section>
 
       <section className="browse-facets work-detail-section">
@@ -173,6 +212,34 @@ function WorkDetail() {
       )}
 
       {error && <div className="error-banner">{error}</div>}
+
+      {(selectedDomainName || selectedBandLabel) && (
+        <div className="browse-shelf">
+          {selectedDomainName && (
+            <button type="button" className="browse-chip" onClick={() => selectDomain(selectedDomain)}>
+              {selectedDomainName} ×
+            </button>
+          )}
+          {selectedBandLabel && (
+            <button
+              type="button"
+              className="browse-chip"
+              onClick={() =>
+                selectBand(
+                  selectedBand === 'unscored'
+                    ? { band_min: null }
+                    : { band_min: Number(selectedBand.min), band_max: Number(selectedBand.max) },
+                )
+              }
+            >
+              {selectedBandLabel} ×
+            </button>
+          )}
+          <button type="button" className="browse-clear-all" onClick={clearFilters}>
+            Clear filters
+          </button>
+        </div>
+      )}
 
       <h2 className="work-detail-heading">Words ({total})</h2>
       <ul className="browse-results">

@@ -299,6 +299,33 @@ def test_difficulty_and_quizzable_filters_exclude_unscored_words_only_when_activ
 
 
 @pg
+def test_unscored_only_filters_words_and_domain_summary_but_rejects_with_difficulty_range():
+    """unscored_only is what makes DifficultyHistogram's "Not yet scored" bar
+    clickable (it can't be expressed as a difficulty_min/max range, since
+    there's no numeric range that means "no row at all") -- verify both the
+    word-list and domain-summary sides of that, plus the 400 guard that
+    keeps it from silently overriding an explicit range."""
+    schema = "cc_test_browse_unscored_only"
+    client, conn, restore = _setup(schema)
+    try:
+        scored = _insert_word(conn, schema, "scored", difficulty=70.0)
+        unscored = _insert_word(conn, schema, "unscored")
+        conn.commit()
+
+        res = client.get("/api/browse/words", params={"unscored_only": True})
+        lemmas = {w["lemma"] for w in res.json()["items"]}
+        assert lemmas == {"unscored"}
+
+        res = client.get("/api/browse/words", params={"unscored_only": True, "difficulty_min": 0})
+        assert res.status_code == 400
+
+        summary = client.get("/api/browse/domain-summary", params={"unscored_only": True}).json()
+        assert summary["total_words"] == 1
+    finally:
+        restore()
+
+
+@pg
 def test_domain_bucket_counts_every_bucket_a_word_belongs_to():
     schema = "cc_test_browse_domains"
     client, conn, restore = _setup(schema)
@@ -453,6 +480,36 @@ def test_domain_summary_includes_uncategorized_and_correct_total():
         assert isinstance(plain_domains, list)
         assert "uncategorized" not in [b["bucket"] for b in plain_domains]
         assert len(plain_domains) == 6
+    finally:
+        restore()
+
+
+@pg
+def test_uncategorized_filters_words_and_difficulty_bands_but_rejects_with_domain():
+    """uncategorized is what makes DomainDistribution's "Uncategorized" bar
+    clickable (domain=uncategorized isn't a real DOMAIN_BUCKETS key and
+    silently no-ops today otherwise) -- verify both the word-list and
+    difficulty-bands sides of that, plus the 400 guard against combining it
+    with an explicit domain."""
+    schema = "cc_test_browse_uncategorized"
+    client, conn, restore = _setup(schema)
+    try:
+        cat_society = _category(conn, schema, "S", "People Society Test")
+        tagged = _insert_word(conn, schema, "tagged", difficulty=50.0)
+        _tag_domain(conn, schema, tagged, cat_society)
+        plain = _insert_word(conn, schema, "plain", difficulty=50.0)
+        conn.commit()
+
+        res = client.get("/api/browse/words", params={"uncategorized": True})
+        lemmas = {w["lemma"] for w in res.json()["items"]}
+        assert lemmas == {"plain"}
+
+        res = client.get("/api/browse/words", params={"uncategorized": True, "domain": ["people_society"]})
+        assert res.status_code == 400
+
+        bands = client.get("/api/browse/difficulty-bands", params={"uncategorized": True}).json()
+        band_50 = next(b for b in bands if b["label"] == "40-60")
+        assert band_50["word_count"] == 1
     finally:
         restore()
 
