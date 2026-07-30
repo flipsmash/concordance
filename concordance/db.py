@@ -308,6 +308,13 @@ CREATE TABLE IF NOT EXISTS {s}.rejected_word (
 
 CREATE INDEX IF NOT EXISTS rejected_word_lemma_idx ON {s}.rejected_word (lemma_lc);
 
+-- Backs load_verdict_cache's `WHERE reason IN (...)` scan (re-run once per
+-- book during ingestion): without this the planner has no way to avoid a
+-- sequential scan of the whole table, which only gets more expensive as the
+-- corpus grows (measured: ~5.9s/full scan vs ~1.5s/index-only scan at ~40M
+-- rows, and the gap widens with table size).
+CREATE INDEX IF NOT EXISTS rejected_word_reason_lemma_idx ON {s}.rejected_word (reason) INCLUDE (lemma_lc);
+
 -- App-level accounts, separate from Cloudflare Access (which gates the admin
 -- curation UI at the network edge). is_admin distinguishes the curation-side
 -- role from an ordinary browsing/study account.
@@ -498,6 +505,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS wn_relation_term_lemma_pos_idx
     ON {s}.wn_relation_term (lemma_lc, wn_pos) WHERE word_id IS NULL;
 CREATE INDEX IF NOT EXISTS wn_relation_term_common_idx
     ON {s}.wn_relation_term (wn_pos) WHERE is_common;
+
+-- _find_term_id and the trap-lemma lookup in analogy_select.py both resolve
+-- a bare lemma_lc (+ optional wn_pos) to a term id without knowing in advance
+-- whether word_id is NULL, so neither of the two partial indexes above can
+-- serve them -- every such lookup was a full sequential scan (measured:
+-- ~22ms/call at ~63k rows, called 400k+ times total per pg_stat_user_tables,
+-- and this is the hottest query pattern against this table).
+CREATE INDEX IF NOT EXISTS wn_relation_term_lemma_lc_idx
+    ON {s}.wn_relation_term (lemma_lc, wn_pos);
 
 -- Resumability marker, one row per term once its relation edges have been
 -- extracted -- same "we looked and found nothing" shape as word_commons_search
