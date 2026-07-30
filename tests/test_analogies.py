@@ -35,6 +35,8 @@ def test_relation_family_covers_every_relation_type_used_in_schema():
         "antonym", "similar_to", "derivationally_related", "attribute",
         "definition_pattern_kind_of", "definition_pattern_agent",
         "definition_pattern_part_of", "definition_pattern_purpose",
+        "definition_pattern_relates_to", "definition_pattern_resembling",
+        "definition_pattern_characterized_by",
     }
     assert expected_types == set(an._RELATION_FAMILY)
 
@@ -83,7 +85,16 @@ def test_definition_pattern_matchers():
     assert labels_for("one who habitually tells lies") == ["agent"]
     assert labels_for("a small part of the engine") == ["part_of"]
     assert labels_for("used for cutting wood") == ["purpose"]
-    # A bare-NP definition with no signal phrase at all -- none of the four
+    # relates_to/resembling/characterized_by: added specifically for
+    # adjectives, where WordNet's own relation graph is almost empty (see
+    # _build_matchers' docstring).
+    assert labels_for("of or relating to business") == ["relates_to"]
+    assert labels_for("relating to the human heart") == ["relates_to"]
+    assert labels_for("resembling a small bear") == ["resembling"]
+    assert labels_for("like a sword") == ["resembling"]
+    assert labels_for("having a bushy tail") == ["characterized_by"]
+    assert labels_for("characterized by rapid growth") == ["characterized_by"]
+    # A bare-NP definition with no signal phrase at all -- none of the seven
     # patterns should fire (this is exactly the class of definition the
     # patterns are NOT meant to cover; see the module docstring).
     assert labels_for("a heavy wooden collar worn by prisoners") == []
