@@ -59,6 +59,7 @@ function Browse() {
   const bookIds = searchParams.getAll('book_id')
   const domains = searchParams.getAll('domain')
   const topCodes = searchParams.getAll('top_code')
+  const allTopCodes = searchParams.getAll('all_top_code')
   const difficultyMin = searchParams.get('difficulty_min') || ''
   const difficultyMax = searchParams.get('difficulty_max') || ''
   const archaic = searchParams.getAll('archaic')
@@ -110,6 +111,19 @@ function Browse() {
     })
   }
 
+  // all_top_code is an AND (word carries a category under EVERY given
+  // code) -- deliberately separate from top_code's OR, only ever arriving
+  // via the Categories overlap heatmap's off-diagonal click
+  // (/app/browse?all_top_code=X&all_top_code=Y). Same no-facet-row,
+  // shelf-only treatment as top_code.
+  function removeAllTopCode(code) {
+    updateParams((next) => {
+      const current = next.getAll('all_top_code')
+      next.delete('all_top_code')
+      current.filter((c) => c !== code).forEach((c) => next.append('all_top_code', c))
+    })
+  }
+
   function setDifficultyRange(min, max) {
     updateParams((next) => {
       if (min !== '' && min != null) next.set('difficulty_min', min)
@@ -147,7 +161,7 @@ function Browse() {
   }
 
   const activeFacetCount =
-    (author ? 1 : 0) + bookIds.length + domains.length + topCodes.length +
+    (author ? 1 : 0) + bookIds.length + domains.length + topCodes.length + allTopCodes.length +
     (difficultyMin || difficultyMax ? 1 : 0) + archaic.length +
     (quizzableOnly ? 1 : 0) + (letter ? 1 : 0)
 
@@ -162,6 +176,7 @@ function Browse() {
     bookIds.forEach((id) => p.append('book_id', id))
     domains.forEach((d) => p.append('domain', d))
     topCodes.forEach((c) => p.append('top_code', c))
+    allTopCodes.forEach((c) => p.append('all_top_code', c))
     if (difficultyMin !== '') p.set('difficulty_min', difficultyMin)
     if (difficultyMax !== '') p.set('difficulty_max', difficultyMax)
     archaic.forEach((a) => p.append('archaic', a))
@@ -274,6 +289,7 @@ function Browse() {
       book_id: bookIds,
       domain: domains,
       top_code: topCodes,
+      all_top_code: allTopCodes,
       difficulty_min: difficultyMin,
       difficulty_max: difficultyMax,
       archaic,
@@ -417,6 +433,11 @@ function Browse() {
             {topCodes.map((c) => (
               <button type="button" key={c} className="browse-chip" onClick={() => removeTopCode(c)}>
                 Field: {topCodeNames[c] || c} ×
+              </button>
+            ))}
+            {allTopCodes.map((c) => (
+              <button type="button" key={c} className="browse-chip" onClick={() => removeAllTopCode(c)}>
+                Field (all): {topCodeNames[c] || c} ×
               </button>
             ))}
             {(difficultyMin || difficultyMax) && (

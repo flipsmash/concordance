@@ -134,3 +134,14 @@
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+
+/* --- category overlap graph --------------------------------------------- */
+
+.category-overlap-canvas-wrap {
+  position: relative;
+  width: 100%;
+  height: 420px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}

@@ -351,6 +351,113 @@ def test_domain_bucket_counts_every_bucket_a_word_belongs_to():
 
 
 @pg
+def test_category_overlap_at_parent_level():
+    # Real USAS codes throughout -- children_of/bucket_for/subtree_match are
+    # keyed to the hardcoded tagset in concordance/usas.py, not whatever's
+    # in the test schema's own category table. A1/A2 are real direct
+    # children of "A".
+    schema = "cc_test_category_overlap_parent"
+    client, conn, restore = _setup(schema)
+    try:
+        cat_a1 = _category(conn, schema, "A1", "General", level=1)
+        cat_a2 = _category(conn, schema, "A2", "Affect", level=1)
+
+        only_a1 = _insert_word(conn, schema, "onlya1")
+        _tag_domain(conn, schema, only_a1, cat_a1)
+        only_a2 = _insert_word(conn, schema, "onlya2")
+        _tag_domain(conn, schema, only_a2, cat_a2)
+        both = _insert_word(conn, schema, "bothcats")
+        _tag_domain(conn, schema, both, cat_a1, is_primary=True)
+        _tag_domain(conn, schema, both, cat_a2, is_primary=False)
+        conn.commit()
+
+        data = client.get("/api/browse/category-overlap?parent=A").json()
+        sizes = {s["code"]: s["word_count"] for s in data["sizes"]}
+        assert sizes["A1"] == 2  # onlya1 + bothcats
+        assert sizes["A2"] == 2  # onlya2 + bothcats
+        assert len(data["cells"]) == 1
+        cell = data["cells"][0]
+        assert {cell["code_a"], cell["code_b"]} == {"A1", "A2"}
+        assert cell["shared_words"] == 1
+        assert cell["ratio"] == pytest.approx(1 / 3, abs=1e-4)  # 1 shared / (2+2-1) union; endpoint rounds to 4dp
+
+        # A1 (in this schema) has no children at all -- degrades to empty
+        # cells, never an error or a broken single-cell grid.
+        no_children = client.get("/api/browse/category-overlap?parent=A1").json()
+        assert no_children["cells"] == []
+
+        res = client.get("/api/browse/category-overlap?bucket=mind_language&parent=A")
+        assert res.status_code == 400
+
+        # all_top_code (used by the overlap heatmap's own off-diagonal
+        # click) is an AND/intersection -- only "bothcats" carries a
+        # category under BOTH A1 and A2. Deliberately NOT the same as
+        # top_code, which is an OR and would also match onlya1/onlya2.
+        words = client.get("/api/browse/words?all_top_code=A1&all_top_code=A2").json()
+        assert {w["lemma"] for w in words["items"]} == {"bothcats"}
+        either = client.get("/api/browse/words?top_code=A1&top_code=A2").json()
+        assert either["total"] == 3  # onlya1 + onlya2 + bothcats -- the OR case, for contrast
+    finally:
+        restore()
+
+
+@pg
+def test_category_overlap_at_bucket_level():
+    # "A" and "X" are both real members of the mind_language bucket.
+    schema = "cc_test_category_overlap_bucket"
+    client, conn, restore = _setup(schema)
+    try:
+        cat_a = _category(conn, schema, "A", "General & Abstract", level=0)
+        cat_x = _category(conn, schema, "X", "Psychological Actions", level=0)
+
+        a_word = _insert_word(conn, schema, "atagged")
+        _tag_domain(conn, schema, a_word, cat_a)
+        x_word = _insert_word(conn, schema, "xtagged")
+        _tag_domain(conn, schema, x_word, cat_x)
+        ax_word = _insert_word(conn, schema, "axtagged")
+        _tag_domain(conn, schema, ax_word, cat_a, is_primary=True)
+        _tag_domain(conn, schema, ax_word, cat_x, is_primary=False)
+        conn.commit()
+
+        data = client.get("/api/browse/category-overlap?bucket=mind_language").json()
+        sizes = {s["code"]: s["word_count"] for s in data["sizes"]}
+        assert sizes["A"] == 2  # atagged + axtagged
+        assert sizes["X"] == 2  # xtagged + axtagged
+        by_pair = {frozenset((c["code_a"], c["code_b"])): c for c in data["cells"]}
+        assert by_pair[frozenset(("A", "X"))]["shared_words"] == 1  # axtagged only
+    finally:
+        restore()
+
+
+@pg
+def test_category_overlap_at_top_bucket_level():
+    # "A" -> mind_language, "S" -> people_society (usas_domains.DOMAIN_BUCKETS).
+    schema = "cc_test_category_overlap_top"
+    client, conn, restore = _setup(schema)
+    try:
+        cat_a = _category(conn, schema, "A", "General & Abstract", level=0)
+        cat_s = _category(conn, schema, "S", "Social Actions", level=0)
+
+        a_word = _insert_word(conn, schema, "atagged")
+        _tag_domain(conn, schema, a_word, cat_a)
+        s_word = _insert_word(conn, schema, "stagged")
+        _tag_domain(conn, schema, s_word, cat_s)
+        as_word = _insert_word(conn, schema, "astagged")
+        _tag_domain(conn, schema, as_word, cat_a, is_primary=True)
+        _tag_domain(conn, schema, as_word, cat_s, is_primary=False)
+        conn.commit()
+
+        data = client.get("/api/browse/category-overlap").json()
+        sizes = {s["code"]: s["word_count"] for s in data["sizes"]}
+        assert sizes["mind_language"] == 2   # atagged + astagged
+        assert sizes["people_society"] == 2  # stagged + astagged
+        by_pair = {frozenset((c["code_a"], c["code_b"])): c for c in data["cells"]}
+        assert by_pair[frozenset(("mind_language", "people_society"))]["shared_words"] == 1  # astagged only
+    finally:
+        restore()
+
+
+@pg
 def test_anonymous_requests_are_refused():
     schema = "cc_test_browse_auth"
     from starlette.testclient import TestClient

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import CategoryLeaderList from './CategoryLeaderList'
+import CategoryOverlapGraph from './CategoryOverlapGraph'
 import { colorForBucket } from './domainColors'
 import './Browse.css'
 import './Categories.css'
@@ -85,6 +86,11 @@ function CategorySubfieldDetail() {
             ))}
           </div>
         )}
+      </section>
+
+      <section className="browse-facets viz-section">
+        <h2 className="viz-heading">How much do these sub-divisions overlap?</h2>
+        <CategoryOverlapGraph parent={subcode} basePath={`/app/categories/${bucket}/${code}/${subcode}`} />
       </section>
 
       <CategoryLeaderList code={subcode} />

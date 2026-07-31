@@ -35,7 +35,9 @@ Mixing these up in either direction is the bug to avoid.
 
 from __future__ import annotations
 
+import itertools
 import math
+from collections import defaultdict
 from pathlib import Path
 from typing import Literal
 
@@ -138,6 +140,7 @@ def _build_word_filters(
     pos: list[str],
     quizzable_only: bool,
     top_code: list[str] = [],
+    all_top_code: list[str] = [],
     uncategorized: bool = False,
     unscored_only: bool = False,
 ) -> tuple[list[str], list]:
@@ -155,6 +158,15 @@ def _build_word_filters(
     matches (see usas.subtree_match) -- the field/sub-field/sub-sub-field
     Categories drill-down needs this, since a field's own code generally
     isn't a bucket key.
+
+    `all_top_code` is a THIRD, independent category filter, deliberately
+    separate from `top_code`: `top_code` with multiple values is an OR (any
+    one of them), the right semantics for "browse this field" links, but
+    the category-overlap heatmap's own click-through needs the opposite --
+    "words carrying a category under BOTH A and BOTH B" (an intersection,
+    matching exactly what browse_category_overlap's own shared-word count
+    computes). One EXISTS per code, so it composes with plain AND via the
+    filters list below rather than needing new join/logic here.
 
     `uncategorized`/`unscored_only` are the two SQL fragments
     /api/browse/domain-summary and /api/browse/difficulty-bands already
@@ -202,6 +214,14 @@ def _build_word_filters(
                         WHERE wc.word_id = w.id AND ({subtree_where}))"""
         )
         params.extend(subtree_params)
+    for code in all_top_code:
+        exact, like = usas.subtree_sql(code)
+        filters.append(
+            f"""EXISTS (SELECT 1 FROM {_main.SCHEMA}.word_category wc
+                        JOIN {_main.SCHEMA}.category c ON c.id = wc.category_id
+                        WHERE wc.word_id = w.id AND (c.code = %s OR c.code LIKE %s))"""
+        )
+        params.extend([exact, like])
     if archaic:
         filters.append("wd.archaic = ANY(%s)")
         params.append(archaic)
@@ -1388,6 +1408,7 @@ def browse_words(
     book_id: list[int] = Query([]),
     domain: list[str] = Query([]),
     top_code: list[str] = Query([]),
+    all_top_code: list[str] = Query([]),
     uncategorized: bool = False,
     difficulty_min: float | None = None,
     difficulty_max: float | None = None,
@@ -1407,13 +1428,16 @@ def browse_words(
     for code in top_code:
         if code not in _ALL_CODES:
             raise HTTPException(404, f"unknown category code {code!r}")
-    if uncategorized and (domain or top_code):
-        raise HTTPException(400, "uncategorized is mutually exclusive with domain/top_code")
+    for code in all_top_code:
+        if code not in _ALL_CODES:
+            raise HTTPException(404, f"unknown category code {code!r}")
+    if uncategorized and (domain or top_code or all_top_code):
+        raise HTTPException(400, "uncategorized is mutually exclusive with domain/top_code/all_top_code")
     if unscored_only and (difficulty_min is not None or difficulty_max is not None):
         raise HTTPException(400, "unscored_only is mutually exclusive with difficulty_min/difficulty_max")
     filters, params = _build_word_filters(
-        author, book_id, domain, difficulty_min, difficulty_max, archaic, pos, quizzable_only, top_code,
-        uncategorized, unscored_only,
+        author, book_id, domain, difficulty_min, difficulty_max, archaic, pos, quizzable_only,
+        top_code=top_code, all_top_code=all_top_code, uncategorized=uncategorized, unscored_only=unscored_only,
     )
     if letter:
         filters.append("w.lemma_lc LIKE %s")
@@ -1769,6 +1793,145 @@ def browse_category_counts(
                       word_count=counts.get(code, 0))
         for code in codes
     ]
+
+
+# --- /api/browse/category-overlap -----------------------------------------------
+
+class CategoryOverlapCell(BaseModel):
+    code_a: str
+    code_b: str
+    shared_words: int
+    ratio: float  # shared / (size_a + size_b - shared) -- Jaccard, not a raw count:
+                   # categories vary hugely in size, so a raw count would mostly just
+                   # track how big the two categories are, not how related they are
+
+
+class CategoryOverlap(BaseModel):
+    sizes: list[CategoryCount]        # one row per sibling -- the heatmap's diagonal
+    cells: list[CategoryOverlapCell]  # only pairs that actually co-occur at least once
+
+
+def _overlap_matrix(pairs: list[tuple[int, str]], siblings: list[dict],
+                     bucket_lookup: bool) -> CategoryOverlap:
+    """Shared aggregation for every branch of browse_category_overlap below.
+    `pairs` is (word_id, sibling_code) for every (word, sibling its
+    categories land in) combination -- a word contributes one row per
+    sibling it touches, so a word touching 2+ siblings in the SAME call is
+    exactly the overlap event (a word carries at most 3 USAS categories, so
+    this is never more than 3 rows per word). `bucket_lookup` is True only
+    for the true top-of-drilldown case (the 6 UI buckets), where a
+    sibling's OWN "bucket" field must be itself, not looked up via a
+    top-level code it isn't."""
+    word_siblings: dict[int, set[str]] = defaultdict(set)
+    for word_id, code in pairs:
+        word_siblings[word_id].add(code)
+
+    sizes: dict[str, int] = defaultdict(int)
+    shared: dict[tuple[str, str], int] = defaultdict(int)
+    for codes in word_siblings.values():
+        for code in codes:
+            sizes[code] += 1
+        if len(codes) > 1:
+            for a, b in itertools.combinations(sorted(codes), 2):
+                shared[(a, b)] += 1
+
+    size_rows = [
+        CategoryCount(code=s["code"], name=s["name"],
+                      bucket=s["code"] if bucket_lookup else usas_domains.bucket_for(s["code"]),
+                      word_count=sizes.get(s["code"], 0))
+        for s in siblings
+    ]
+    cells = [
+        CategoryOverlapCell(
+            code_a=a, code_b=b, shared_words=n,
+            ratio=round(n / (sizes[a] + sizes[b] - n), 4) if (sizes[a] + sizes[b] - n) else 0.0,
+        )
+        for (a, b), n in shared.items()
+    ]
+    return CategoryOverlap(sizes=size_rows, cells=cells)
+
+
+@router.get("/api/browse/category-overlap", response_model=CategoryOverlap)
+def browse_category_overlap(
+    bucket: str | None = None,
+    parent: str | None = None,
+    _: dict = Depends(_main.require_viewer),
+) -> CategoryOverlap:
+    """How much a Categories-drilldown level's sibling categories' word sets
+    overlap -- feeds the heatmap next to every tile subgrid. Three levels,
+    mirroring the drilldown's own three distinct tiers:
+      - neither given -> overlap among the 6 UI buckets themselves --
+        CategoriesOverview's own level. Different from category-counts's
+        unscoped case (the 21 top-level fields): CategoriesOverview never
+        calls category-counts, it calls /api/browse/domains, so this
+        endpoint's own top tier has to be the buckets, not the fields.
+      - bucket given -> overlap among that bucket's member top-level fields
+      - parent given -> overlap among that code's direct children
+
+    Degrades to an empty `cells` list (never an error) when a level has
+    fewer than 2 siblings to compare -- the common case at the deeper tiers
+    (e.g. only 17 sub-sub-sub-fields exist at all, among 100 sub-sub-field
+    parents), not a bug to guard against specially."""
+    if bucket is not None and parent is not None:
+        raise HTTPException(400, "at most one of bucket or parent may be given")
+
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        if parent is not None:
+            if parent not in _ALL_CODES:
+                raise HTTPException(404, f"unknown category code {parent!r}")
+            siblings = usas.children_of(parent)
+            if len(siblings) < 2:
+                return _overlap_matrix([], siblings, bucket_lookup=False)
+
+            or_clauses: list[str] = []
+            params: list[str] = []
+            for s in siblings:
+                exact, like = usas.subtree_sql(s["code"])
+                or_clauses.append("(c.code = %s OR c.code LIKE %s)")
+                params.extend([exact, like])
+            cur.execute(
+                f"""SELECT w.id, c.code FROM {_main.SCHEMA}.word w
+                    JOIN {_main.SCHEMA}.word_category wc ON wc.word_id = w.id
+                    JOIN {_main.SCHEMA}.category c ON c.id = wc.category_id
+                    WHERE w.active AND ({" OR ".join(or_clauses)})""",
+                params,
+            )
+            # A code's children aren't a uniform prefix expression across
+            # siblings of different code lengths (same reason
+            # _child_subtree_counts can't use one GROUP BY either), so the
+            # owning sibling is resolved per row here rather than in SQL.
+            pairs = [
+                (word_id, next(s["code"] for s in siblings if usas.subtree_match(s["code"], code)))
+                for word_id, code in cur.fetchall()
+            ]
+            return _overlap_matrix(pairs, siblings, bucket_lookup=False)
+
+        if bucket is not None and bucket not in usas_domains.DOMAIN_BUCKETS:
+            raise HTTPException(404, f"unknown bucket {bucket!r}")
+
+        if bucket is not None:
+            top_codes = usas_domains.DOMAIN_BUCKETS[bucket]["codes"]
+            siblings = [{"code": c, "name": _TOP_CODE_NAMES[c]} for c in top_codes]
+        else:
+            top_codes = _TOP_CODES
+            siblings = [{"code": key, "name": v["name"]} for key, v in usas_domains.DOMAIN_BUCKETS.items()]
+        if len(siblings) < 2:
+            return _overlap_matrix([], siblings, bucket_lookup=bucket is None)
+
+        cur.execute(
+            f"""SELECT w.id, left(c.code, 1) FROM {_main.SCHEMA}.word w
+                JOIN {_main.SCHEMA}.word_category wc ON wc.word_id = w.id
+                JOIN {_main.SCHEMA}.category c ON c.id = wc.category_id
+                WHERE w.active AND left(c.code, 1) = ANY(%s)""",
+            (top_codes,),
+        )
+        rows = cur.fetchall()
+        # bucket=X: the fetched top-level code IS the sibling code directly.
+        # Unscoped (the 6 buckets): a top-level code maps to its bucket.
+        pairs = rows if bucket is not None else [
+            (word_id, usas_domains.bucket_for(top_code)) for word_id, top_code in rows
+        ]
+        return _overlap_matrix(pairs, siblings, bucket_lookup=bucket is None)
 
 
 # --- /api/browse/category-leaders ---------------------------------------------------
