@@ -229,6 +229,79 @@ def ingest(
     console.rule("[bold green]Done[/bold green]")
 
 
+@app.command("oed-ingest")
+def oed_ingest(
+    paths: Optional[list[Path]] = typer.Argument(None, help="OED volume PDF(s). Omit to process every .pdf in dictionaries/."),
+    force: bool = typer.Option(False, "--force", help="Re-ingest a volume already marked done (e.g. after a file replacement)."),
+    page_limit: Optional[int] = typer.Option(None, "--page-limit", help="Stop after this many pages (per volume) — useful for a smoke test."),
+    schema: str = typer.Option("oed", "--schema", help="Postgres schema to write into (separate from the concordance schema)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Extract headwords/definitions/quotations/pronunciations from scanned OED
+    volume PDFs into their own `oed` Postgres schema (same database, standalone
+    from the concordance vocab schema). See concordance/oed/pipeline.py.
+
+    Resumable and idempotent by file hash: a volume already ingested is
+    skipped; a volume that errored partway resumes from where it left off.
+    Pronunciation extraction needs a local vision model configured (see
+    OedConfig.vision_model_path/vision_mmproj_path) — without one, entries
+    are still written with headword/POS/etymology/definitions/quotations,
+    just no pronunciation (pronunciation_needs_review stays true)."""
+    from .oed import db as oed_db
+    from .oed.config import OedConfig
+    from .oed.pipeline import ingest_volume
+
+    dictionaries_dir = Path("dictionaries")
+    if paths:
+        volumes = list(paths)
+    else:
+        if not dictionaries_dir.is_dir():
+            console.print(f"[red]✗[/red] no such directory: {dictionaries_dir}/")
+            raise typer.Exit(code=1)
+        volumes = sorted(dictionaries_dir.glob("*.pdf"))
+        if not volumes:
+            console.print(f"[yellow]![/yellow] no .pdf files found in {dictionaries_dir}/")
+            raise typer.Exit(code=0)
+
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}")
+        console.print("[dim]set DATABASE_URL in the environment or a .env file[/dim]")
+        raise typer.Exit(code=1)
+
+    cfg = OedConfig(schema=schema)
+    oed_db.apply_schema(conn, schema)
+
+    from .oed import pronunciation as _pron
+    with console.status("[bold]Loading pronunciation transcriber…"):
+        transcriber = _pron.get_transcriber(cfg)
+    if isinstance(transcriber, _pron.StubTranscriber):
+        console.print("[yellow]![/yellow] no local vision model configured — "
+                       "entries will be written without pronunciations "
+                       f"(see OedConfig.vision_model_path: {cfg.vision_model_path})")
+
+    for i, vol_path in enumerate(volumes, 1):
+        if not vol_path.exists():
+            console.print(f"[red]✗[/red] no such file: {vol_path}")
+            continue
+        console.print()
+        console.rule(f"[bold]{i}/{len(volumes)} · {vol_path.name}")
+        try:
+            stats = ingest_volume(vol_path, conn, cfg, console, force=force,
+                                   transcriber=transcriber, page_limit=page_limit)
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]✗[/red] {exc}")
+            continue
+        if not stats.get("skipped"):
+            console.print(f"[bold]{stats['entries_written']}[/bold] entries written "
+                           f"over {stats['pages']} page(s)")
+
+    conn.close()
+    console.print()
+    console.rule("[bold green]Done[/bold green]")
+
+
 @app.command()
 def define(
     vocab_csv: Path = typer.Argument(..., help="A <book>.vocab.csv; undefined rows are resolved / scored."),

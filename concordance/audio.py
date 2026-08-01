@@ -170,7 +170,21 @@ def fetch_commons_audio(url: str, dest_mp3: Path, tries: int = 4) -> bool:
         proc = subprocess.run(
             ["ffmpeg", "-y", "-i", str(tmp_src), "-codec:a", "libmp3lame", "-qscale:a", "4", str(dest_mp3)],
             capture_output=True, timeout=30,
+            # stdin=DEVNULL, not inherited: a corrupt/truncated download can
+            # make ffmpeg probe for more input and block on stdin. Inherited
+            # from a real terminal, ffmpeg (running in its own job-control
+            # process group) then gets SIGTTIN and stops — which stops the
+            # WHOLE process group, including this Python process itself, not
+            # just ffmpeg (confirmed live: a `concordance audio` run froze
+            # repeatedly in the same way before landing on the timeout
+            # below and crashing outright on an unrelated word, "serotine").
+            stdin=subprocess.DEVNULL,
         )
         return proc.returncode == 0 and dest_mp3.exists()
+    except (subprocess.TimeoutExpired, OSError):
+        # One bad Commons file (corrupt/truncated download, hung ffmpeg)
+        # must not take down an entire batch run — every caller loops over
+        # many words with no per-call try/except of its own.
+        return False
     finally:
         tmp_src.unlink(missing_ok=True)

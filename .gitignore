@@ -47,5 +47,8 @@ wordnet-domains-sentiwords/
 data/
 audio/
 
+# Local dictionary data
+dictionaries/
+
 # Operational logs from one-off scripts (scripts/*.sh) — output, not source
 scripts/*.log
