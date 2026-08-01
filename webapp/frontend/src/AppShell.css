@@ -132,6 +132,16 @@
   padding: 18px 0;
 }
 
+.rail-brand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 0 16px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--rule);
+  color: var(--rail-accent);
+}
+
 .thumb-rail-tab {
   appearance: none;
   border: none;
@@ -234,9 +244,9 @@
 
 .guide-header {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
-  padding: 14px 26px;
+  padding: 13px 26px;
   border-bottom: 1px solid var(--rule);
   font-family: var(--font-data);
   background: var(--paper);
@@ -259,10 +269,9 @@
   opacity: 0.5;
 }
 
-.guide-label {
-  font-size: 11px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+.guide-brand {
+  display: flex;
+  align-items: center;
   color: var(--rail-accent);
 }
 
@@ -332,7 +341,8 @@
     transform: translateY(-3px);
   }
 
-  .rail-divider {
+  .rail-divider,
+  .rail-brand {
     display: none;
   }
 

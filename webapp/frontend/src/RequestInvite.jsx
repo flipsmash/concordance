@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
+import { LogoMark } from './Logo'
 import './Auth.css'
 
 const REQUEST_ADDRESS = 'concordance.vocab@gmail.com'
@@ -17,6 +18,7 @@ function RequestInvite() {
   return (
     <div className="auth-page">
       <div className="auth-form">
+        <div className="auth-brand"><LogoMark width={170} /></div>
         <h1>Request an invite</h1>
         <p className="auth-hint">
           This app is invite-only. Enter the email you&apos;d like the invite sent to, then click the

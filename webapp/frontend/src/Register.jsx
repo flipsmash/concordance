@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuth } from './AuthContext'
+import { LogoMark } from './Logo'
 import './Auth.css'
 
 const API_BASE = ''
@@ -42,6 +43,7 @@ function Register() {
     return (
       <div className="auth-page">
         <div className="auth-form">
+          <div className="auth-brand"><LogoMark width={170} /></div>
           <h1>Create account</h1>
           <p className="auth-error">This page needs an invite link — ask the admin for one.</p>
         </div>
@@ -52,6 +54,7 @@ function Register() {
   return (
     <div className="auth-page">
       <form className="auth-form" onSubmit={handleSubmit}>
+        <div className="auth-brand"><LogoMark width={170} /></div>
         <h1>Create account</h1>
         {error && <div className="auth-error">{error}</div>}
         <label>

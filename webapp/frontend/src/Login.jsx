@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuth } from './AuthContext'
+import { LogoMark } from './Logo'
 import './Auth.css'
 
 const API_BASE = ''
@@ -35,6 +36,7 @@ function Login() {
   return (
     <div className="auth-page">
       <form className="auth-form" onSubmit={handleSubmit}>
+        <div className="auth-brand"><LogoMark width={170} /></div>
         <h1>Log in</h1>
         {error && <div className="auth-error">{error}</div>}
         <label>

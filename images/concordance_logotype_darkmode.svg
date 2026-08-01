@@ -1,0 +1,7 @@
+<svg width="680" height="220" viewBox="0 0 680 220" xmlns="http://www.w3.org/2000/svg">
+<g transform="translate(240,110)">
+<circle cx="-6" cy="0" r="14" fill="none" stroke="#7fa8d9" stroke-width="2.5"/>
+<circle cx="6" cy="0" r="14" fill="none" stroke="#7fa8d9" stroke-width="2.5"/>
+</g>
+<text x="266" y="120" font-family="Helvetica, Arial, sans-serif" font-size="38" font-weight="500" letter-spacing="-0.5" fill="#7fa8d9">concordance</text>
+</svg>

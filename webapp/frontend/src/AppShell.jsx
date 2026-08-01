@@ -2,6 +2,7 @@ import { NavLink, Outlet } from 'react-router-dom'
 import './AppShell.css'
 import { useAuth } from './AuthContext'
 import { GuideWordProvider, useGuideHeader } from './GuideWordContext'
+import { LogoIcon, LogoMark } from './Logo'
 
 // The destinations a reader can always reach, one click away, from anywhere
 // in the app -- the whole point of this shell. Admin is filtered out
@@ -32,6 +33,9 @@ function ThumbRail() {
 
   return (
     <nav className="thumb-rail" aria-label="Main sections">
+      <NavLink to="/app" end className="rail-brand" aria-label="concordance home">
+        <LogoIcon size={26} />
+      </NavLink>
       {visible.map((s) => (
         <NavLink
           key={s.key}
@@ -57,7 +61,9 @@ function GuideHeaderBar() {
   return (
     <div className="guide-header">
       <span className="guide-word guide-word-left">{left}</span>
-      <span className="guide-label">{center}</span>
+      <span className="guide-brand" role="img" aria-label={`concordance — ${center}`}>
+        <LogoMark width={120} />
+      </span>
       <span className="guide-word guide-word-right">{right}</span>
     </div>
   )

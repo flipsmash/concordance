@@ -17,6 +17,13 @@
   padding: 28px;
 }
 
+.auth-brand {
+  display: flex;
+  justify-content: center;
+  color: var(--accent-deep);
+  margin-bottom: 2px;
+}
+
 .auth-form h1 {
   font-size: 20px;
   margin: 0 0 4px;
