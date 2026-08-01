@@ -5,7 +5,8 @@ import { useLocation } from 'react-router-dom'
 // section with real dynamic data (the actual first/last lemma on screen) --
 // everywhere else this is the whole answer.
 const SECTION_DEFAULTS = [
-  { test: (p) => p === '/app', left: 'a', center: 'browse', right: 'z' },
+  { test: (p) => p === '/app', left: 'a', center: 'home', right: 'z' },
+  { test: (p) => p === '/app/words', left: 'a', center: 'browse', right: 'z' },
   { test: (p) => p.startsWith('/app/books'), left: 'a', center: 'books', right: 'z' },
   { test: (p) => p.startsWith('/app/authors'), left: 'authors', center: 'writers', right: 'works' },
   { test: (p) => p.startsWith('/app/quiz/history'), left: 'calendar', center: 'quiz history', right: 'review' },

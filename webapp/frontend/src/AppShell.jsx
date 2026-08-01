@@ -1,4 +1,4 @@
-import { NavLink, Outlet } from 'react-router-dom'
+import { Link, NavLink, Outlet } from 'react-router-dom'
 import './AppShell.css'
 import { useAuth } from './AuthContext'
 import { GuideWordProvider, useGuideHeader } from './GuideWordContext'
@@ -12,7 +12,8 @@ import { LogoIcon, LogoMark } from './Logo'
 // that isn't a letter at all (Admin), a distinct glyph is used instead --
 // never a wrong letter.
 const SECTIONS = [
-  { key: 'words', letter: 'W', label: 'Words', to: '/app', end: true },
+  { key: 'home', letter: 'H', label: 'Home', to: '/app', end: true },
+  { key: 'words', letter: 'W', label: 'Words', to: '/app/words' },
   { key: 'books', letter: 'B', label: 'Books', to: '/app/books' },
   { key: 'authors', letter: 'A', label: 'Authors', to: '/app/authors' },
   { key: 'categories', letter: 'C', label: 'Categories', to: '/app/categories' },
@@ -61,9 +62,9 @@ function GuideHeaderBar() {
   return (
     <div className="guide-header">
       <span className="guide-word guide-word-left">{left}</span>
-      <span className="guide-brand" role="img" aria-label={`concordance — ${center}`}>
+      <Link to="/app" className="guide-brand" role="img" aria-label={`concordance — ${center}`}>
         <LogoMark width={120} />
-      </span>
+      </Link>
       <span className="guide-word guide-word-right">{right}</span>
     </div>
   )

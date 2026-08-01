@@ -16,6 +16,7 @@ import RequireAuth from './RequireAuth'
 // when the Graph tab is actually opened, so Accepted/Rejected stay unaffected.
 const GraphView = lazy(() => import('./GraphView'))
 const WordDetail = lazy(() => import('./WordDetail'))
+const Home = lazy(() => import('./Home'))
 const Browse = lazy(() => import('./Browse'))
 const QuizConfig = lazy(() => import('./QuizConfig'))
 const QuizRun = lazy(() => import('./QuizRun'))
@@ -109,6 +110,14 @@ function App() {
               index
               element={
                 <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <Home />
+                </Suspense>
+              }
+            />
+            <Route
+              path="words"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
                   <Browse />
                 </Suspense>
               }
@@ -117,7 +126,7 @@ function App() {
               path="words/:id"
               element={
                 <Suspense fallback={<div className="page-loading">Loading…</div>}>
-                  <WordDetail backTo="/app" showBackLink={false} />
+                  <WordDetail backTo="/app/words" showBackLink={false} />
                 </Suspense>
               }
             />

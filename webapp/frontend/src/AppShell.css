@@ -273,6 +273,7 @@
   display: flex;
   align-items: center;
   color: var(--rail-accent);
+  text-decoration: none;
 }
 
 .app-shell-outlet {
