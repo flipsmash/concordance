@@ -21,7 +21,7 @@ extract → clean → tokenize → frequency-floor → cross-book verdict cache
 - **cross-book verdict cache** — a lemma already kept/pruned/judge-rejected in an earlier book is pre-marked from `word`/`rejected_word` and never re-judged: the LLM judge's input is purely `(lemma, frequency band)`, so at temp 0 its verdict on a given lemma is always the same. This is what keeps per-book judge time from scaling with corpus size — cost tracks *distinct new rare words*, which saturates fast on a shared-vocabulary corpus.
 - **validity gate** — multi-source, keep-biased. A word is a real word if *any* authority vouches for it — the local `vocab.wiktionary` DB dump (~500k terms, checked first because it's free and carries no "Proper noun" POS to get confused by), then the SymSpell 82k wordlist, **WordNet**, or **NLTK's 234k dictionary corpus** (which carries the archaic vocabulary — *destrier, bartizan, cangue* — that trips up single-dictionary checks). A foreign-language-context check runs early too. Only then is misspelling considered, by *relative* near-neighbor frequency (with a recurrence escape hatch — a "misspelling" that keeps showing up is probably a real coinage). NLTK's `wordnet` and `words` data download automatically on first run.
 - **LLM judge** — a local model decides what's worth learning (stubbed until you point it at a model). To keep a weak local model honest it emits a *minimal* per-word verdict (`{"w","k"}`, no free-text reason) so it doesn't truncate its output and silently drop words; any word it omits is re-queried for up to three passes before the keep-biased fallback, so junk can't flood the list by omission. A corpus frequency hint (common / uncommon / rare) steadies its rarity sense but is never a hard cut. Frequency alone can't do this job — *tendril* is rarer than *refectory* yet everyone knows it — which is exactly why the judgment is the model's, not the floor's.
-- **dictionary lookup** — one shared cascade (`concordance/resolve.py`), used identically by `ingest`, `maintain`'s `fill-definitions`, and the standalone `refill`/`deepen`/`lookup_word.py`: local Wiktionary dump → Free Dictionary API → Wiktionary online → Wordnik (paced internally to its 5 req/min free-tier cap) → yourdictionary.com → web-search + grounded local-LLM extraction as the true last resort. `ingest` only goes as deep as the free tier inline (speed); whatever's still blank afterward gets the full depth from `maintain`/`refill`/`deepen` (below). Bulk lookups retry with exponential backoff and honour `Retry-After`, so a run of a thousand words doesn't get silently emptied by rate limiting.
+- **dictionary lookup** — one shared cascade (`concordance/resolve.py`), used identically by `maintain`'s `fill-definitions` and the standalone `refill`/`deepen`/`lookup_word.py`: local Wiktionary dump → Free Dictionary API → Wiktionary online → Wordnik (paced internally to its 5 req/min free-tier cap) → yourdictionary.com → web-search + grounded local-LLM extraction as the true last resort. `ingest`'s own inline cascade stops one tier short — **LOCAL → FREE → Merriam-Webster's Collegiate API** (`concordance/mw.py`, needs `MW_DICTIONARY_API_KEY`) — skipping Wordnik/yourdictionary/web-search as too slow/rate-capped for ingest throughput; whatever's still blank afterward gets the full remaining depth from `maintain`/`refill`/`deepen` (below). Enrichment runs on a worker pool (`Config.enrichment_workers`, default 4) rather than one word at a time — this stage's per-book cost is both the dominant and most variable part of `ingest` (measured up to 310s/426 words serial on a real book) — and MW's own on-disk cache/quota lock guards only the local bookkeeping, never the network call itself, so concurrent MW lookups genuinely overlap instead of queuing behind each other's retry chains. Every HTTP call retries with exponential backoff; `Retry-After` is honoured on a real 429 (capped at 10s) but not on a bare 5xx — measured live, a single transient 502 carrying a `Retry-After: 60` header cost 60s of one word's lookup in an otherwise ~1s batch, confirming the header means nothing coming from a gateway hiccup the way it does from an actual rate limiter.
 - **review** — prune too-common/easy terms afterward in the [web app](#web-app-webapp) (a soft delete — `word.active = false` — nothing is destroyed)
 - nothing is ever silently dropped — every cut is logged to `rejected_word`, one row per (book, lemma)
 
@@ -106,15 +106,17 @@ commands to remember and re-order by hand:
 concordance maintain   # fill-definitions -> classify -> normalize-pos -> ngram
                         # -> archaic -> difficulty -> quizdef -> quizzable
                         # -> calibrate-difficulty -> book-similarity -> book-clustering
-                        # -> author-similarity -> author-clustering -> wordnik-pron -> ipa -> embed
+                        # -> author-similarity -> author-clustering -> wordnik-pron -> ipa
+                        # -> embed -> backfill-analogies
 ```
 
 Every step runs incrementally (only-missing / blank-only / not-yet-embedded),
 so a re-run after everything's caught up is fast — it only touches the newest
 batch's words. The **first** run against a corpus with a real backlog is not:
-`classify` and `quizdef` both load a local LLM and call it per word, so
-catching up a few thousand words is likely to take hours. That cost is paid
-once. Use `--skip-fill-definitions`, `--skip-classify`, `--skip-quizdef`, etc.
+`classify`, `quizdef`, and `backfill-analogies` all load a local LLM and call
+it per word (or per candidate relation), so catching up a few thousand words
+is likely to take hours. That cost is paid once. Use `--skip-fill-definitions`,
+`--skip-classify`, `--skip-quizdef`, `--skip-analogies`, etc.
 (one flag per step) to defer the slow ones to run separately/overnight
 instead of blocking on them inline; `--limit` caps words processed per step,
 useful for chunking a large backlog into resumable pieces
@@ -387,6 +389,23 @@ the next `maintain` run recomputes them from the new text — the same fix
 `sync_book_results` already applies for a re-ingested word whose sense
 changed, needed here too since this writes `word.definition` directly.
 
+## Definition cross-linking (`link-definitions`)
+
+```bash
+concordance link-definitions    # full recompute every run, not incremental
+```
+
+Cross-links a word's definition to any OTHER **active** word it mentions
+(lemma-aware, spaCy), so the review webapp can render a real clickable link
+instead of inert prose — powers `LinkedDefinition.jsx` on the word-detail
+page. Always a full recompute rather than an only-missing pass — cheap
+enough that it's safe to re-run any time a definition changes (`refill`/
+`deepen`/`mw-backfill`/`expand-synonyms` all rewrite `word.definition`, and
+none of them know to invalidate this on their own). Written to
+`word_definition_link`, joined back with an `active` guard on the target so
+a link whose target was later pruned never renders as a dead link.
+Standalone only — not part of `maintain`.
+
 ## Enrichment & scoring (`classify`, `archaic`, `ngram`, `difficulty`, `quizdef`, `quizzable`, `calibrate-difficulty`)
 
 A further pass of DB-only commands (no book/model pipeline; each just reads
@@ -605,6 +624,133 @@ All four are wired into `maintain` (`--skip-book-similarity`,
 `--skip-author-clustering`) and reachable from the review webapp's
 **Visualizations** page — see below.
 
+## Cultural & historical importance (`author-fame`, `book-fame`)
+
+A different axis from vocabulary overlap above: how *important* a book or
+author is, not how related it is to anything else. An ABSOLUTE 1–10 score,
+LLM-judged against a fixed external rubric anchored on real reference
+figures (Shakespeare = 10) — deliberately **not** a corpus-relative
+percentile, so a score stays meaningful in isolation and doesn't drift every
+time the corpus grows, at the cost of the resulting spread reflecting how
+skewed real fame actually is (this corpus is mostly public-domain/pulp-
+heavy, so score mass sits low, not spread evenly 1–10 — see
+`concordance/fame.py`'s module docstring for the full tradeoff). Evidence
+gathered per entity: Google Books Ngram phrase frequency of the name/title,
+Wikidata sitelinks count (the standard academic proxy for lasting cultural
+importance — Wikipedia presence across many language editions, unlike
+recency-biased pageviews), and web search snippets. Every gathering function
+records an explicit failure/skip marker rather than silently omitting a
+signal — a run scoring an entity blind would look identical to "the LLM
+weighed this evidence and found it weak," which is exactly the failure mode
+this module is built to avoid.
+
+```bash
+concordance author-fame              # score every real author, 1-10
+concordance book-fame                # score every book, one level down
+concordance author-fame --stub       # dry run: gather + print evidence, no LLM call, no write
+```
+
+Run `author-fame` before `book-fame` — book scoring uses the author's
+already-computed score as weak context only, never a floor or cap (a famous
+author's forgotten minor book still scores low on its own; `book-fame`
+tolerates an author with no fame row yet). Excludes `PLACEHOLDER_AUTHORS`.
+`book.author` is stored library-catalog style ("Last, First M. (Full Given
+Name)") and normalized to a natural name before every external query —
+confirmed live that querying Wikidata/Ngram/web search with the raw string
+measurably degrades results. A genuinely expensive job (several network
+round-trips plus one real LLM generation per entity, realistically 5–15s
+each, so a full ~4,000-author corpus is on the order of a day) — deliberately
+**not** part of `maintain`; run it as its own occasional pass.
+`--stale-days` rescores entities checked more than N days ago (default: only
+never-scored ones).
+
+Surfaced throughout the web app once scored: a ⭐ score with a filter range
+on the Books/Authors browse pages, the score plus the model's own reasoning
+on each book's/author's detail page, and the Home page's "most acclaimed
+book" / "most acclaimed author" stat. Coverage fills in gradually, not all
+at once — as an expensive occasional pass rather than something `ingest`
+triggers automatically, `author-fame` runs well ahead of `book-fame` in
+practice, so expect the ⭐ tag to show up on more authors than books until
+both passes catch up.
+
+## Analogy relations (`backfill-analogies`)
+
+A word-relation graph built for one specific purpose — the quiz's "*A is to
+B as C is to ___*" question type (see "Quizzing" below), not a general
+knowledge-graph feature. Two sources feed candidate edges, both required to
+pass local-LLM verification against both terms' real definitions before
+either is usable — mandatory, not optional: live checks found roughly
+60–80% of raw WordNet "hypernym" edges for rare/abstract words are actually
+disguised near-synonyms, unfit for a question whose whole point is "these
+are different but related."
+
+- **WordNet** relations — hypernym, holonym (part/member/substance),
+  antonym, similar-to, derivationally-related, attribute.
+- **Definition-pattern parsing** — a spaCy `Matcher` over `word.definition`
+  recovers relations for words WordNet has no useful synset for, straight
+  from prose that states one outright ("a wooden collar worn by prisoners"
+  → *kind of* collar) — exactly the rare/archaic vocabulary this project
+  exists to surface, and where WordNet's own coverage is thinnest.
+
+```bash
+concordance backfill-analogies         # extract + verify, resumable
+```
+
+Resumable at two grains, the same way `classify` is: a term already scanned
+is skipped on a later run, and within one run each `--chunk-size` (default
+200) batch of terms is extracted, verified, and committed as its own unit —
+a kill mid-run loses at most one in-flight chunk of already-GPU-verified
+work, not the whole run. Loads the same local judge model `classify`/
+`quizdef` do, so — like those — it's slow against a real backlog; it runs as
+the last step of `maintain` by default (`--skip-analogies` to defer it).
+
+## OED reference dictionary (`oed-ingest`)
+
+A separate, standalone ingestion pipeline over scanned OED volume PDFs —
+not the vocabulary-extraction pipeline above, and not merged into it. Lives
+in its own `oed` Postgres schema (`volume`/`entry`/`definition`/`quotation`
+tables, no foreign keys into `concordance.word`) with its own admin-only
+browsing UI (see "Web app" below) — a reference dictionary to browse and
+cross-check against, not a source of quizzable vocabulary.
+
+```bash
+concordance oed-ingest                       # every .pdf in dictionaries/
+concordance oed-ingest dictionaries/09.pdf   # one volume
+concordance oed-ingest --page-limit 20 dictionaries/09.pdf   # smoke-test
+```
+
+Per-volume pipeline: hash-check (`file_hash`, so re-running is idempotent —
+a volume already ingested is skipped, one that errored partway resumes from
+where it stopped) → extract → headword segmentation → stopword filter →
+definition-entry filter → parse (headword/POS/etymology/senses/quotations)
+→ pronunciation → write. One volume's failure doesn't abort the rest of a
+batch run.
+
+- **Headword detection** (`concordance/oed/segment.py`) uses two OCR-text
+  heuristics rather than a text-layer bold/italic signal — the baked-in OCR
+  text layer from these scans doesn't preserve font weight, so a
+  look-for-bold approach (viable on a born-digital PDF) isn't available
+  here. A font-size-ratio filter plus a left-margin-alignment check
+  (catching small-caps cross-references mid-paragraph that are
+  headword-sized but don't start flush at the column margin) together cut
+  real-page false positives substantially, without fully eliminating the
+  ambiguity between a genuine headword and same-size OCR noise.
+- **Pronunciation** is read straight off a cropped image region by a local
+  vision-LLM (Qwen2.5-VL via `llama-cpp-python`), never trusted from the OCR
+  text layer — falls back to leaving `pronunciation_needs_review = true`
+  with no transcription if no vision model is configured, rather than
+  guessing from spelling the way `audio-guess` (above) explicitly flags as
+  a last resort elsewhere in this project.
+- **Known gaps**: an entry that continues onto the next page is truncated at
+  the page boundary; every detected headword is currently written as a
+  plain `entry_type='main'` (run-on/compound sub-entries and repeated
+  homographs like lead¹/lead² aren't distinguished yet); sense/quotation
+  splitting is a first-pass regex parser, not yet calibrated against broad
+  output the way the pronunciation pipeline was.
+
+Not part of `maintain` — own schema, own concern, run on demand as volumes
+are acquired.
+
 ## Running the local model (RTX 3060, 12 GB)
 
 The judge talks to `llama.cpp` through the `llama-cpp-python` bindings — no
@@ -655,6 +801,14 @@ doesn't hard-delete it — it flips `word.active` to false, so every downstream
 feature (quizzing, stats) just needs to filter on `active = true`, and history
 (audio, ngram data, etc.) stays intact.
 
+- **Home page** (`/app`, linked from both header logos) — the app's landing
+  page: a large logo; four headline counts — active words, books, authors,
+  and the fixed 21 top-level USAS categories (the only one of the four
+  that isn't a growing corpus measurement); a few "impressive" bonus stats
+  (most-acclaimed book/author by fame score — see "Cultural & historical
+  importance" above, the single hardest word by difficulty score, total
+  quiz questions answered); and a table-of-contents linking every
+  top-level section.
 - **Accepted tab** — term/POS/definition/difficulty/validity-score/
   validity-label/validity-notes table, filterable by POS and by validity
   label, sortable by validity score (score/label/notes are `validity_score.py`'s
@@ -665,6 +819,25 @@ feature (quizzing, stats) just needs to filter on `active = true`, and history
   (both multi-select), with an "Add" button that rescues a word back in (live
   dictionary lookup, since rejects were never enriched) and flags it
   `rescued_from_reject` for after-the-fact tracking.
+- **OED entries tab** (admin-only) — read-only browsing of the separate
+  `oed` schema `oed-ingest` populates (see above): search/A–Z letter jump/
+  volume filter/needs-review filter over the entry list, each row showing a
+  definition preview; the detail view shows the full entry — pronunciation
+  (flagged if it still needs a human's review), etymology, and every sense
+  with its supporting quotations. A QA/browsing tool over raw ingest output,
+  not a curation queue — no edit actions, just visibility into data that
+  previously required direct SQL to inspect.
+
+Every book's and author's own detail page additionally shows: its ⭐ fame
+score with the model's own reasoning (see "Cultural & historical importance"
+above); a domain-distribution chart and a difficulty histogram over its own
+words that cross-filter each other on click (pick a USAS domain segment to
+narrow the histogram to just that domain, or a difficulty bucket to narrow
+the chart to just that range — "uncategorized"/"not yet scored" are
+clickable segments in their own right, not just the populated categories);
+and, in its word list, each definition auto-linked to any other active vocab
+word it mentions (`LinkedDefinition.jsx`, powered by `link-definitions` —
+see above).
 
 ```bash
 # first time only
@@ -693,6 +866,12 @@ gated by one-time invite links rather than open signup:
   username/password and lands on `/app` — a non-admin browse page (word
   search → full word detail, including its similarity graph) with no access
   to the curation API.
+- The login page also has a **"Request an invite"** link for someone without
+  an account yet — a plain `mailto:` link (an optional email field
+  interpolated into the pre-filled subject/body), not a form submission or a
+  new backend endpoint. The app has no email-sending infrastructure, so this
+  hands off to the visitor's own mail client rather than building a first
+  real SMTP path just for this one page.
 - Sessions are an httpOnly, Secure cookie (`concordance_session`, 30-day
   expiry) backed by a `sessions` table — not JWTs — so a session can be
   revoked server-side (`/api/auth/logout`) rather than just expiring.
@@ -718,12 +897,21 @@ Any logged-in account (admin or invited viewer) can take a quiz — configure
 it at `/app/quiz`, driven entirely by `webapp/backend/quiz.py` and
 `concordance/distractors.py`:
 
-- **Three question types, blendable in one session**: multiple choice,
-  true/false, and matching (a set of word↔definition pairs). Pick one type
+- **Four question types, blendable in one session**: multiple choice,
+  true/false, matching (a set of word↔definition pairs), and **analogy**
+  ("*A is to B as C is to ___*", drawn only from words with at least one
+  LLM-verified relation edge — see "Analogy relations" above). Pick one type
   for a single-type test or several to mix them. A matching set counts as
   one question toward the test length no matter how many pairs it holds, and
   scores with **per-pair credit** — 3 of 4 correct pairs contributes 0.75 to
-  that slot, not a binary pass/fail.
+  that slot, not a binary pass/fail. Analogy questions have their own
+  options-per-question setting (`analogy_choice_count`, 2–8, default 4),
+  separate from multiple choice's option count, and their own distractor
+  strategy (`select_analogy_distractors`) — a plausible wrong completion has
+  to respect the relation itself (an "analogy_trap" option drawn from the
+  same relation family), not just general word similarity, so it isn't part
+  of the orthographic/semantic/domain/random blend the other question types
+  share below.
 - **Direction** — "show the definition, pick the word" or "show the word,
   pick the definition." Matching is direction-agnostic (always shows both).
 - **Filters**: length (5/10/20/custom), difficulty range, POS, and domain
@@ -806,6 +994,14 @@ Every relatedness view in one place, linked from the main Browse page:
   not a hardcoded "all," and the highlight search box only offers entities
   actually in that run — picking from the full corpus meant most picks
   landed on "isn't in this view," a control that mostly didn't work.
+- **Categories drilldown** (`/app/categories`) — each level's sibling
+  categories (the 21 top-level USAS discourse fields, then their
+  subcategories on drill-in) as a force-directed graph: node radius by word
+  count (sqrt-scaled, since counts span orders of magnitude within one
+  level), edge width by pairwise Jaccard overlap of the categories' word
+  sets. Clicking an edge opens the actual word-set **intersection** between
+  those two categories — a new `all_top_code` AND-semantics filter, distinct
+  from the OR-semantics category filter used everywhere else.
 - **Discipline-category relationship map** (`/app/visualizations/domain-map`)
   — a different axis entirely from every view above: instead of
   shared-vocabulary overlap, this positions books (≥50 words) and authors
@@ -889,6 +1085,52 @@ WSLg itself keeps working. Neither file lives in this repo (machine-specific,
 like the tunnel config). Check it's running with `systemctl status
 fix-run-user-runtime-dir.service`.
 
+## Corpus housekeeping (`book-merge`, `incoming-merge`, `archive-metadata`, `refresh-rejected-index`, `import-defined`)
+
+Occasional/one-time commands, none part of `maintain` — each addresses a
+specific corpus-hygiene problem rather than routine per-batch upkeep:
+
+- **`book-merge`** — Project Gutenberg splits some works into multiple
+  files ("Vol. I"/"Vol. II", "Part 1", ...). Detects already-ingested books
+  sharing a title (once the part label is stripped) and author, compiles
+  them into one `"{title} (Complete) -- {author}.txt"` in `archive/`, and
+  folds the corresponding `book` rows together in Postgres — idempotent and
+  resumable via a `book_merge_group` manifest; original per-volume files are
+  never deleted. `--dry-run` reports every eligible group and why a
+  near-match was excluded (duplicate number, a gap, an existing sibling
+  conflict) with zero writes; `--compile-only` stops before the DB merge.
+  Re-run `book-similarity`/`book-clustering`/`book-fame` for touched books
+  afterward — their precomputed rows are cleared, not recomputed inline.
+- **`incoming-merge`** — the same split-volume detection, run BEFORE
+  ingestion instead of after: scans `incoming/` (`.txt` only) and compiles
+  matching part-files together prior to `concordance ingest` ever seeing
+  them. No DB work (nothing has a `book` row yet), but the original
+  per-part files ARE deleted once compiled — destructive; run `--dry-run`
+  first.
+- **`archive-metadata`** — backfills `word_count`/
+  `distinct_nonstop_word_count`/`archive_path` (and, best-effort,
+  `publication_year`/`publication_era` for `.txt`/Gutenberg-style books) for
+  books whose full text sits in `archive/`. `ingest` already computes the
+  same fields inline for new books via the same shared
+  `archive_metadata.compute_book_metadata`; this exists for historical
+  backlog or re-running after an interrupted/`--no-archive` run.
+  Only-missing by default; the Gutenberg year lookup is slow (thousands of
+  requests, hours-scale), which is why this stays a standalone pass rather
+  than folding into `maintain`.
+- **`refresh-rejected-index`** — refreshes `rejected_lemma_index`, the
+  precomputed distinct-lemma view behind the Rejected tab's search box and
+  A–Z letter jump (`rejected_word` itself is tens of millions of rows,
+  hundreds of thousands of distinct lemmas — too big to search directly).
+  Cheap (~15–20s); meant to run on its own daily cron/systemd schedule,
+  since curation search can tolerate being briefly stale in a way
+  `maintain`'s enrichment steps can't.
+- **`import-defined`** — one-time bootstrap: imports genuinely-new terms
+  from a legacy `vocab.defined` table (term/POS/definition, no book source)
+  into `word` as book-less words, skipping phrases, already-flagged-bad
+  rows, terms already in `word`, and anything ever rejected in any book.
+  Not part of `maintain` — run once, then run `maintain` to classify/score
+  whatever it added.
+
 ## Status
 
 Every stage is real and runs end-to-end; the LLM judge is live, running the
@@ -900,25 +1142,40 @@ response data (`calibrate-difficulty` — see "Enrichment & scoring" above),
 quiz-safe definitions + a quizzable flag, a
 pronunciation-audio pipeline (real recordings first, IPA-guided synthesis
 otherwise), a unified definition-lookup cascade (one `resolve.py` cascade
-behind `ingest`/`refill`/`deepen`/`fill-definitions`/`lookup_word.py`, with
+behind `refill`/`deepen`/`fill-definitions`/`lookup_word.py`, with
 web-search + grounded local-LLM extraction as the default last resort — real-
 scale testing found it's where nearly all of a `deepen` run's actual yield
-comes from) plus a human-review flag (not an auto-reject — see "Backfilling
-definitions" above) for words that look foreign or like an archaic spelling
-of a common word, a separate Merriam-Webster lookup source (`lookup_mw.py`
-for one-off checks, `mw-backfill` as a batch pass over whatever `deepen`'s
-cascade still couldn't resolve — see "Merriam-Webster word lookup" above)
-for the words nothing else in the cascade catches, and semantic-distance vectors (definition-embedding +
-corpus-trained FastText, queried via a pgvector HNSW index — infrastructure
-for future visualization and quiz-distractor generation, not those features
-themselves yet) are all in place. Vocabulary-relatedness visualization is
+comes from; `ingest` runs the same LOCAL→FREE tiers inline plus Merriam-
+Webster as a third, faster fallback — see "Pipeline" above) plus a
+human-review flag (not an auto-reject — see "Backfilling definitions" above)
+for words that look foreign or like an archaic spelling of a common word, a
+separate Merriam-Webster lookup source (`lookup_mw.py` for one-off checks,
+`mw-backfill` as a batch pass over whatever `deepen`'s cascade still
+couldn't resolve — see "Merriam-Webster word lookup" above) for the words
+nothing else in the cascade catches, definition cross-linking so a
+definition's mention of another active word renders as a real link
+(`link-definitions` — see above), and semantic-distance vectors
+(definition-embedding + corpus-trained FastText, queried via a pgvector HNSW
+index — infrastructure for future visualization and quiz-distractor
+generation, not those features themselves yet) are all in place. Also live:
+an absolute, LLM-judged 1–10 cultural/historical importance score for every
+author and book (`author-fame`/`book-fame` — see "Cultural & historical
+importance" above), a verified WordNet + definition-pattern relation graph
+powering a fourth "A is to B as C is to ___" quiz question type
+(`backfill-analogies` — see "Analogy relations" above), and a wholly separate
+OED reference-dictionary ingestion pipeline over scanned volume PDFs, into
+its own schema with its own admin-only browsing UI (`oed-ingest` — see "OED
+reference dictionary" above). Vocabulary-relatedness visualization is
 also live: book/author lexical-overlap similarity, real (cross-linked, not
-star-shaped) ego-graphs, a shared-vocabulary comparison view, and — for
-both books and authors — hierarchical clustering surfaced as a cluster
+star-shaped) ego-graphs, a shared-vocabulary comparison view, a
+category-overlap force-directed graph in the Categories drilldown, and —
+for both books and authors — hierarchical clustering surfaced as a cluster
 map, a seriated similarity matrix, and a dendrogram, plus a discipline-
 category relationship map positioning books/authors by USAS-field
 vocabulary distribution rather than shared words (see "Vocabulary
-relatedness" and "Visualizations" above). Deferred by choice: other languages, Anki
+relatedness" and "Visualizations" above). A logo-bearing Home page ties all
+of the above together with headline corpus stats and links to every
+top-level section (see "Web app" above). Deferred by choice: other languages, Anki
 export, scanned-PDF OCR, a curated names/gazetteer list to close the one
 known gap in proper-noun filtering (every validity authority is itself
 somewhat name-polluted; deliberately not started — see
