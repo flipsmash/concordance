@@ -42,17 +42,35 @@ _USAGE_FILE = _CACHE_DIR / "mw_api_usage.json"
 _DAILY_QUOTA = 1000
 _WARN_THRESHOLD = 900
 
-# Guards the entire uncached branch of lookup_api (cache read-check, quota
-# check, API call, cache write) now that ingest's parallel enrichment step
-# calls this from multiple worker threads -- previously only mw_backfill's
-# sequential loop called it, so the read-modify-write race on both the cache
-# file and the usage counter never mattered. Coarse on purpose: locking only
-# the usage-counter increment still leaves the cache save race (two threads
-# resolving two different new words can each load the cache before either
-# saves, and the second save clobbers the first thread's new entry -- that
-# word then costs a second query next time). Cached hits stay lock-free;
-# only genuinely new words serialize against each other, which is fine --
-# MW is quota-scarce and doesn't need concurrency anyway.
+# Guards ONLY the on-disk cache/usage-counter read-modify-write in
+# lookup_api's uncached branch -- NOT the network call itself. Originally
+# wrapped the whole branch (cache re-check, quota check, the `_get` call
+# with its own internal retry/backoff, cache write), which meant two worker
+# threads that both needed a fresh (uncached) MW lookup in the same book
+# could never issue their HTTP requests concurrently: the second thread
+# queued behind the first's ENTIRE retry chain (dictionary._get's 4-try
+# exponential backoff, worst case tens of seconds to ~2 minutes on a
+# throttled/erroring response) before it could even start its own. With
+# ingest's enrichment batch waiting for every worker to finish (see
+# pipeline.process's ThreadPoolExecutor loop), two or three such words in
+# one book's shortlist reproduced live as exactly "the last couple of
+# definitions take forever" -- confirmed by inspection, not just theory:
+# this lock previously spanned mw.py:163's `_get(...)` call directly.
+#
+# Narrowing it to just the cache/quota bookkeeping (each a fast local
+# read/write, not a network round trip) lets concurrent MW lookups actually
+# run in parallel, which is the whole point of ingest's worker pool. The
+# tradeoff, accepted deliberately: two threads racing the SAME uncached
+# word can both slip past the quota check before either increments the
+# counter, so usage can overshoot _DAILY_QUOTA by up to a few requests
+# (bounded by enrichment_workers, 4 by default) -- utterly preferable to
+# serializing every network call for a quota that has 1000 requests/day of
+# headroom. The cache-save race this lock was ALSO guarding against (two
+# threads resolving two different new words each loading the cache before
+# either saves, second save clobbering the first thread's new entry) is
+# still fully prevented: the cache is re-loaded fresh immediately before
+# each locked save below, so a save that lost the race for lock acquisition
+# still merges against whatever the winner just wrote, never clobbering it.
 #
 # Thread-scoped only, not cross-process: this does not protect against a
 # concurrent `ingest` and `mw-backfill` invocation racing the same on-disk
@@ -151,35 +169,52 @@ def lookup_api(word: str, api_key: str, session: requests.Session | None = None,
     if key in cache:
         raw = cache[key]
     else:
+        # Lock held only for the cache re-check + quota check -- both fast
+        # local reads, never the network call itself (see _LOCK's docstring
+        # above for why: that used to be the whole point of this bug).
+        quota_ok = False   # only read below when already_cached is False; set here so a
+                           # raising _usage_count() can't leave it unbound instead of
+                           # degrading gracefully like the rest of this function does
         with _LOCK:
             cache = _load_json(_CACHE_FILE)   # re-read: another thread may have just cached this
-            if key in cache:
-                raw = cache[key]
-            else:
-                if _usage_count() >= _DAILY_QUOTA:
-                    if console:
-                        console.print(f"[yellow]MW API daily quota ({_DAILY_QUOTA}) reached — skipping API for {word!r}.[/yellow]")
-                    return []
-                resp = _get(session, _API_URL.format(word=quote(word)), params={"key": api_key})
-                if resp is None:
-                    if console:
-                        console.print(f"[yellow]MW API unreachable for {word!r} — not caching, will retry next time.[/yellow]")
-                    return []
+            already_cached = key in cache
+            if not already_cached:
+                quota_ok = _usage_count() < _DAILY_QUOTA
+        if already_cached:
+            raw = cache[key]
+        else:
+            if not quota_ok:
+                if console:
+                    console.print(f"[yellow]MW API daily quota ({_DAILY_QUOTA}) reached — skipping API for {word!r}.[/yellow]")
+                return []
+            resp = _get(session, _API_URL.format(word=quote(word)), params={"key": api_key})
+            if resp is None:
+                if console:
+                    console.print(f"[yellow]MW API unreachable for {word!r} — not caching, will retry next time.[/yellow]")
+                return []
+            with _LOCK:
                 used = _record_usage()   # a request reached MW (good key or bad) -- counts against quota either way
-                if console and used >= _WARN_THRESHOLD:
-                    console.print(f"[yellow]MW API usage today: {used}/{_DAILY_QUOTA}[/yellow]")
-                if resp.status_code != 200:
-                    if console:
-                        console.print(f"[yellow]MW API returned HTTP {resp.status_code} for {word!r} — not caching (check MW_DICTIONARY_API_KEY).[/yellow]")
-                    return []
-                try:
-                    raw = resp.json()
-                except ValueError:
-                    if console:
-                        console.print(f"[yellow]MW API returned non-JSON for {word!r} — not caching.[/yellow]")
-                    return []
-                cache[key] = raw
-                _save_json(_CACHE_FILE, cache)
+            if console and used >= _WARN_THRESHOLD:
+                console.print(f"[yellow]MW API usage today: {used}/{_DAILY_QUOTA}[/yellow]")
+            if resp.status_code != 200:
+                if console:
+                    console.print(f"[yellow]MW API returned HTTP {resp.status_code} for {word!r} — not caching (check MW_DICTIONARY_API_KEY).[/yellow]")
+                return []
+            try:
+                raw = resp.json()
+            except ValueError:
+                if console:
+                    console.print(f"[yellow]MW API returned non-JSON for {word!r} — not caching.[/yellow]")
+                return []
+            with _LOCK:
+                # Re-read-then-save, not a save against the `cache` dict
+                # loaded above -- another thread may have cached ITS OWN
+                # word in the meantime, and saving our stale copy would
+                # silently drop that entry (the exact clobbering race this
+                # lock exists to prevent).
+                fresh = _load_json(_CACHE_FILE)
+                fresh[key] = raw
+                _save_json(_CACHE_FILE, fresh)
 
     if not raw or isinstance(raw[0], str):   # list[str] == MW's "did you mean" no-match signal
         return []

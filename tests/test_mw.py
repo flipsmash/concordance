@@ -113,6 +113,47 @@ def test_lookup_api_does_not_cache_unreachable_network(monkeypatch, tmp_path):
     assert mw._load_json(mw._CACHE_FILE) == {}
 
 
+def test_lookup_api_concurrent_uncached_words_run_in_parallel_not_serialized(monkeypatch, tmp_path):
+    # Regression for the "last two definitions take forever" bug: _LOCK used
+    # to wrap the network call itself, so two threads each needing a fresh
+    # (uncached) word queued fully behind one another -- two 1s "network"
+    # calls took ~2s+ serialized. Confirms they now overlap: two calls of 1s
+    # each complete in well under their 2s serial sum. Fake sleep is 1s (not
+    # the original 0.3s) so the parallel/serial gap is wide enough to not
+    # flake under load -- a thin margin already needed padding once on a
+    # machine with a concurrent `concordance ingest` running.
+    import threading
+    import time
+
+    _isolate_cache(monkeypatch, tmp_path)
+
+    def slow_get(session, url, params=None):
+        time.sleep(1.0)
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = [{"meta": {"id": "x"}, "fl": "noun",
+                                    "hwi": {}, "shortdef": ["a definition"]}]
+        return resp
+
+    monkeypatch.setattr(mw, "_get", slow_get)
+
+    results = {}
+
+    def run(word):
+        results[word] = mw.lookup_api(word, "key")
+
+    start = time.monotonic()
+    threads = [threading.Thread(target=run, args=(w,)) for w in ("alpha", "beta")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    elapsed = time.monotonic() - start
+
+    assert len(results["alpha"]) == 1
+    assert len(results["beta"]) == 1
+    assert elapsed < 1.5   # would be >=2.0s if the two _get calls serialized
+
+
 # --- pick_entry / exact_matches / is_foreign_pos (db.mw_backfill support) ---
 
 def _entry(headword: str, pos: str, defs=("a definition",)) -> mw.MWEntry:

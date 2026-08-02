@@ -66,9 +66,21 @@ def _get(session: requests.Session, url: str, params: dict | None = None):
             delay *= 2
             continue
         if resp.status_code in _RETRY_STATUS and attempt < _MAX_TRIES - 1:
+            # Retry-After is a considered rate-limit instruction on 429; on a
+            # 5xx it's often just a gateway's static error-page header with no
+            # real signal behind it. Measured live: a transient 502 from Free
+            # Dictionary carrying Retry-After: 60 cost 60s of sleep across two
+            # retries (previously capped at 30s each, honoured regardless of
+            # status) for ONE word in a 15-word batch that otherwise finished
+            # in ~1s -- attempt 3 then succeeded in 0.03s, confirming nothing
+            # needed cooling off. This is what "the last definition takes
+            # forever" actually was. Only 429 still honours the header now.
             retry_after = resp.headers.get("Retry-After", "")
-            wait = float(retry_after) if retry_after.strip().isdigit() else delay
-            time.sleep(min(wait, 30.0))   # never sleep absurdly long on a bad header
+            if resp.status_code == 429 and retry_after.strip().isdigit():
+                wait = min(float(retry_after), 10.0)
+            else:
+                wait = delay
+            time.sleep(wait)
             delay *= 2
             continue
         return resp
