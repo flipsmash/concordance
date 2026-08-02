@@ -42,6 +42,8 @@ const Sets = lazy(() => import('./Sets'))
 const SetDetail = lazy(() => import('./SetDetail'))
 const FlashcardRun = lazy(() => import('./FlashcardRun'))
 const Progress = lazy(() => import('./Progress'))
+const OedEntries = lazy(() => import('./OedEntries'))
+const OedEntryDetail = lazy(() => import('./OedEntryDetail'))
 
 function tabClass({ isActive }) {
   return isActive ? 'tab active' : 'tab'
@@ -69,6 +71,9 @@ function Layout() {
           </NavLink>
           <NavLink to="settings" className={tabClass}>
             Settings
+          </NavLink>
+          <NavLink to="oed" className={tabClass}>
+            OED
           </NavLink>
         </div>
       </header>
@@ -337,6 +342,22 @@ function App() {
                   element={
                     <Suspense fallback={<div className="page-loading">Loading…</div>}>
                       <GraphView />
+                    </Suspense>
+                  }
+                />
+                <Route
+                  path="oed"
+                  element={
+                    <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                      <OedEntries />
+                    </Suspense>
+                  }
+                />
+                <Route
+                  path="oed/:entryId"
+                  element={
+                    <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                      <OedEntryDetail />
                     </Suspense>
                   }
                 />

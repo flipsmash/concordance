@@ -1,0 +1,46 @@
+/* Small additions on top of Authors.css's list/row/toolbar chrome (reused
+   as-is, see OedEntries.jsx's import) -- just the handful of bits specific
+   to OED entries: the needs-review checkbox, IPA display, the
+   needs-review badge, and the definition preview line on a row. */
+
+.oed-def-preview {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.oed-no-def {
+  font-style: italic;
+  opacity: 0.6;
+}
+
+.oed-review-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.oed-ipa {
+  font-family: var(--mono);
+  color: var(--text-h);
+}
+
+.oed-no-ipa {
+  color: var(--text);
+  opacity: 0.6;
+  font-style: italic;
+}
+
+.oed-review-badge {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  border-radius: 4px;
+  padding: 1px 6px;
+}

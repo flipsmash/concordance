@@ -1090,6 +1090,10 @@ app.include_router(_progress.router)
 from webapp.backend import home as _home  # noqa: E402
 app.include_router(_home.router)
 
+# Same ordering requirement, same reason.
+from webapp.backend import oed as _oed  # noqa: E402
+app.include_router(_oed.router)
+
 # Serves the built frontend (webapp/frontend/dist, from `npm run build`) so a
 # single port can be exposed publicly. Registered last so it never shadows an
 # /api/* route above; absent in plain local dev, where the Vite dev server is
