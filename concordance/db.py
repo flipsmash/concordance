@@ -766,6 +766,12 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS wordnik_pron_raw text")
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS wordnik_pron_type text")
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS wordnik_checked_at timestamptz")
+        # Provenance of the IPA string currently in `ipa` -- 'kaikki'/'wordnik'/
+        # 'local_wiktionary'/'oed', kept in sync on every write to `ipa` (see
+        # compute_ipa, compute_audio, backfill_ipa_from_oed). NULL means legacy
+        # (predates this column) and is always treated as US dialect, matching
+        # every existing source's actual behavior -- see audio.ipa_dialect_for_source.
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS ipa_source text")
         # soft-delete flag for the review-and-prune web UI: pruned words stay in
         # place (history/audio/etc. intact) but drop out of every downstream view
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS active boolean NOT NULL DEFAULT true")
@@ -3664,7 +3670,9 @@ def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None
     "murmurer" had the French verb's transcription). Idempotent: with
     only_missing=True (default), only words with an empty or invalid ipa are
     candidates, so a re-run after everything's resolved does no dump parsing
-    at all and is a no-op."""
+    at all and is a no-op. ipa_source is kept in sync with every write here
+    (set to whichever of the three sources won, cleared alongside a NULLed
+    ipa) -- see audio.ipa_dialect_for_source for why this matters downstream."""
     from collections import Counter
     from . import ahd, arpabet, audio, localdict, wiktextract
     s = _safe_schema(schema)
@@ -3734,16 +3742,84 @@ def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None
                 dist["already_valid"] += 1  # nothing to do, no change
                 continue
             if not (existing_ipa or "").strip() and replacement:
-                cur.execute(f"UPDATE {s}.word SET ipa=%s WHERE id=%s", (replacement, wid))
+                cur.execute(f"UPDATE {s}.word SET ipa=%s, ipa_source=%s WHERE id=%s", (replacement, source, wid))
                 dist[f"backfilled_{source}"] += 1
             elif (existing_ipa or "").strip() and not had_valid_existing and replacement:
-                cur.execute(f"UPDATE {s}.word SET ipa=%s WHERE id=%s", (replacement, wid))
+                cur.execute(f"UPDATE {s}.word SET ipa=%s, ipa_source=%s WHERE id=%s", (replacement, source, wid))
                 dist[f"corrected_{source}"] += 1
             elif (existing_ipa or "").strip() and not had_valid_existing:
-                cur.execute(f"UPDATE {s}.word SET ipa=NULL WHERE id=%s", (wid,))
+                cur.execute(f"UPDATE {s}.word SET ipa=NULL, ipa_source=NULL WHERE id=%s", (wid,))
                 dist["cleared_no_replacement"] += 1
             else:
                 dist["unresolved"] += 1
+    conn.commit()
+    return dict(dist)
+
+
+def backfill_ipa_from_oed(conn, schema: str = DEFAULT_SCHEMA, oed_schema: str = "oed",
+                           only_missing: bool = True, limit: int = 0) -> dict:
+    """Backfill word.ipa from the oed schema's double-pass-verified
+    pronunciation_ipa (see oed/pronunciation.py's module docstring for how
+    that's gated -- confirmed live: pronunciation_ipa IS NOT NULL implies
+    pronunciation_needs_review=false for all 5007 resolved entries in this
+    corpus, 0 counterexamples). Standalone, like `wordnik-pron`/`ipa` --
+    OED coverage is partial (3 of ~20 planned volumes as of this writing)
+    and grows with each future `oed-ingest` run, so this is meant to be
+    re-run periodically, not folded into `maintain`. No local LLM or
+    embedding model, so safe to run alongside GPU-bound steps.
+
+    Same only_missing candidate gate as compute_ipa (empty or invalid
+    existing ipa). A headword can map to several oed.entry rows (homographs
+    -- "bay"/"fleet"/"back" each have up to 10 in this corpus); this only
+    writes when every entry with a resolved pronunciation for that headword
+    agrees on the same IPA (confirmed live: true for 4408/4424 headwords
+    with any resolved pronunciation at all -- OED's part_of_speech field is
+    unparsed OCR abbreviation soup, not usable to pick the "right" homograph,
+    so agreement is the disambiguation signal instead of POS matching). A
+    genuine conflict is skipped, not guessed at. Only fills currently-empty
+    slots -- never overrides an existing valid IPA from another source, even
+    though OED is higher-confidence; upgrading a lower-confidence existing
+    IPA to OED's is a deliberate non-goal for now."""
+    from collections import Counter
+    from . import audio
+    from .oed import db as oed_db
+    s = _safe_schema(schema)
+
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT id, lemma, ipa FROM {s}.word ORDER BY id")
+        all_rows = cur.fetchall()
+
+    def is_valid(ipa):
+        return bool(ipa) and audio.looks_like_english_ipa(ipa)
+
+    candidates = all_rows if not only_missing else [r for r in all_rows if not is_valid(r[2])]
+    dist: Counter = Counter(total=len(all_rows), already_valid=len(all_rows) - len(candidates))
+    if limit:
+        candidates = candidates[:limit]
+    if not candidates:
+        return dict(dist)
+
+    lemmas = {lemma.strip().lower() for _, lemma, _ in candidates}
+    lexicon = oed_db.pronunciation_lexicon(conn, lemmas, schema=oed_schema)
+
+    with conn.cursor() as cur:
+        for i, (wid, lemma, _existing_ipa) in enumerate(candidates, 1):
+            if i % 5000 == 0:
+                conn.commit()
+                print(f"  ...{i}/{len(candidates)} words checked")
+            matches = lexicon.get(lemma.strip().lower())
+            if not matches:
+                dist["no_match"] += 1
+                continue
+            if len(matches) > 1:
+                dist["ambiguous_homograph"] += 1
+                continue
+            candidate_ipa = matches[0]
+            if not audio.looks_like_english_ipa(candidate_ipa):
+                dist["failed_sanity_check"] += 1
+                continue
+            cur.execute(f"UPDATE {s}.word SET ipa=%s, ipa_source='oed' WHERE id=%s", (candidate_ipa, wid))
+            dist["backfilled"] += 1
     conn.commit()
     return dict(dist)
 
@@ -3809,7 +3885,11 @@ def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = No
     missed, else Azure IPA-guided synthesis where a transcription is known
     (ours, kaikki's, or Wordnik's — backfilling word.ipa along the way), else
     a 'none' placeholder so re-runs don't keep re-parsing the dump for words
-    with nothing to find."""
+    with nothing to find. Azure synthesis picks its voice/lang from the
+    word's ipa_source (audio.ipa_dialect_for_source/voice_for_dialect) so an
+    OED-sourced (British RP) transcription gets the UK voice and the RP
+    linking-r convention, not the US voice's rhotic default -- see
+    audio.normalize_ipa's docstring for why that distinction matters."""
     import time
     from collections import Counter
     from . import audio, wiktextract
@@ -3818,7 +3898,7 @@ def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = No
     where = (f" WHERE NOT EXISTS (SELECT 1 FROM {s}.word_audio a WHERE a.word_id=w.id)"
              if only_missing else "")
     with conn.cursor() as cur:
-        cur.execute(f"""SELECT w.id, w.lemma, w.ipa, cs.download_url
+        cur.execute(f"""SELECT w.id, w.lemma, w.ipa, w.ipa_source, cs.download_url
                         FROM {s}.word w
                         LEFT JOIN {s}.word_commons_search cs ON cs.word_id = w.id{where}""" +
                     (f" LIMIT {int(limit)}" if limit else ""))
@@ -3828,7 +3908,7 @@ def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = No
     if not rows:
         return {"candidates": 0, **dist}
 
-    lemmas = {lemma.strip().lower() for _, lemma, _, _ in rows}
+    lemmas = {lemma.strip().lower() for _, lemma, _, _, _ in rows}
     dump_path = dump_path or wiktextract.DEFAULT_DUMP_PATH
     lexicon = wiktextract.build_lexicon(
         dump_path, lemmas, progress_cb=lambda n: print(f"  ...{n} lines scanned"))
@@ -3839,7 +3919,7 @@ def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = No
     audio.AUDIO_DIR.mkdir(exist_ok=True)
 
     with conn.cursor() as cur:
-        for i, (wid, lemma, existing_ipa, direct_search_url) in enumerate(rows, start=1):
+        for i, (wid, lemma, existing_ipa, ipa_source, direct_search_url) in enumerate(rows, start=1):
             lemma_lc = lemma.strip().lower()
             entry = lexicon.get(lemma_lc, {})
 
@@ -3849,8 +3929,9 @@ def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = No
             if kaikki_ipa and not audio.looks_like_english_ipa(kaikki_ipa):
                 kaikki_ipa = None
             if kaikki_ipa and not (existing_ipa or "").strip():
-                cur.execute(f"UPDATE {s}.word SET ipa=%s WHERE id=%s", (kaikki_ipa, wid))
+                cur.execute(f"UPDATE {s}.word SET ipa=%s, ipa_source='kaikki' WHERE id=%s", (kaikki_ipa, wid))
                 existing_ipa = kaikki_ipa
+                ipa_source = "kaikki"
 
             # tries=2 (not fetch_commons_audio's default 4-6): this loop needs to
             # move fast through many candidates and has Azure as a good fallback.
@@ -3873,11 +3954,16 @@ def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = No
                            "verify per-file license before public reuse")
                     dist["commons_direct_search"] += 1
             if row is None and (existing_ipa or "").strip() and key and region:
-                clip = audio.synthesize_azure(lemma, existing_ipa, key, region)
+                dialect = audio.ipa_dialect_for_source(ipa_source)
+                voice, lang = audio.voice_for_dialect(dialect)
+                keep_optional = dialect == "us"
+                clip = audio.synthesize_azure(lemma, existing_ipa, key, region,
+                                               voice=voice, lang=lang, keep_optional=keep_optional)
                 if clip:
                     dest = audio.AUDIO_DIR / f"{lemma_lc}.mp3"
                     dest.write_bytes(clip)
-                    row = ("azure", str(dest), audio.normalize_ipa(existing_ipa), audio.AZURE_VOICE, None)
+                    ipa_used = audio.normalize_ipa(existing_ipa, keep_optional=keep_optional)
+                    row = ("azure", str(dest), ipa_used, voice, None)
                     dist["azure"] += 1
             if row is None:
                 row = ("none", None, None, None, None)

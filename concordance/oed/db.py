@@ -114,6 +114,47 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> None
     conn.commit()
 
 
+def _close_unbalanced_paren(ipa: str) -> str:
+    """Fixes a known pronunciation.py extraction artifact: confirmed live on
+    615/5007 resolved entries (e.g. "abandoner" -> "ˈbændənə(r", missing the
+    closing paren on OED's linking-r marker). Only closes the specific case
+    of exactly one more '(' than ')' -- anything else is left alone rather
+    than guessed at."""
+    if ipa.count("(") == ipa.count(")") + 1:
+        return ipa + ")"
+    return ipa
+
+
+def pronunciation_lexicon(conn: psycopg.Connection, headwords: set[str],
+                           schema: str = DEFAULT_SCHEMA) -> dict[str, list[str]]:
+    """headword_norm -> every distinct resolved pronunciation_ipa across its
+    entries -- a headword can have many oed.entry rows (homographs: "bay",
+    "fleet", "back" each have up to 10 in this corpus), and most of those
+    rows have no resolved pronunciation at all (pronunciation_ipa IS NULL --
+    confirmed live: only 5007/24892). Callers decide what to do with >1
+    distinct value; this just reports what's there. Mirrors
+    localdict.build_lexicon's bulk-lookup shape (one query for every
+    candidate headword, empty dict on an empty input rather than a
+    `= ANY('{}')` query that would just scan nothing)."""
+    if not headwords:
+        return {}
+    s = schema
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT headword_norm, pronunciation_ipa FROM {s}.entry
+                WHERE headword_norm = ANY(%s) AND pronunciation_ipa IS NOT NULL""",
+            (list(headwords),),
+        )
+        rows = cur.fetchall()
+    lexicon: dict[str, list[str]] = {}
+    for headword_norm, ipa in rows:
+        cleaned = _close_unbalanced_paren(ipa)
+        entries = lexicon.setdefault(headword_norm, [])
+        if cleaned not in entries:
+            entries.append(cleaned)
+    return lexicon
+
+
 def file_hash(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:

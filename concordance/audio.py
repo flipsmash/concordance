@@ -35,7 +35,28 @@ from .deepdef import _load_dotenv
 AUDIO_DIR = Path("audio")
 AZURE_ENDPOINT = "https://{region}.tts.speech.microsoft.com/cognitiveservices/v1"
 AZURE_VOICE = "en-US-AvaNeural"
+# Verified live against the real Azure Speech resource (eastus region) before
+# adopting -- a wrong/unavailable voice name fails synthesis silently
+# per-word rather than loudly, so this isn't a guess.
+AZURE_VOICE_UK = "en-GB-SoniaNeural"
 _RETRY_STATUS = {429, 500, 502, 503, 504}
+
+
+def ipa_dialect_for_source(source: str | None) -> str:
+    """word.ipa_source -> 'us'/'uk' -- every source except 'oed' is US-biased
+    by design (wiktextract.best_ipa prefers US-tagged entries, local
+    Wiktionary's column is literally us_pronunciation, Wordnik's ARPAbet/AHD-5
+    converters are both US phoneme systems). None (legacy rows predating
+    ipa_source) is treated as 'us' too -- matches current behavior exactly,
+    zero change for every word already filled before this existed."""
+    return "uk" if source == "oed" else "us"
+
+
+def voice_for_dialect(dialect: str) -> tuple[str, str]:
+    """dialect -> (azure_voice, ssml_lang)."""
+    if dialect == "uk":
+        return AZURE_VOICE_UK, "en-GB"
+    return AZURE_VOICE, "en-US"
 
 # Combining double inverted breve (IPA tie bar, e.g. t͡ʃ). Both Azure and the
 # local StyleTTS2 test were trained on/expect the decomposed two-letter form
@@ -44,7 +65,7 @@ _RETRY_STATUS = {429, 500, 502, 503, 504}
 _TIE = "͡"
 
 
-def normalize_ipa(ipa: str) -> str:
+def normalize_ipa(ipa: str, *, keep_optional: bool = True) -> str:
     """Curated IPA (Wiktionary/kaikki, possibly slash/bracket-delimited, possibly
     tie-barred) -> a plain phoneme string safe to hand to a synthesizer.
 
@@ -52,13 +73,25 @@ def normalize_ipa(ipa: str) -> str:
     parentheses (e.g. "gibber" -> /ˈdʒɪbə(ɹ)/, the r-coloring some dialects
     drop). Literal "(" ")" aren't valid IPA/SSML phoneme characters — Azure
     silently rejected these, and 165 words with perfectly good IPA fell through
-    to the no-data bucket as a result. Keep the optional sound rather than
-    drop it (the fuller pronunciation), just remove the parentheses themselves.
-    """
+    to the no-data bucket as a result.
+
+    keep_optional=True (default): keep the optional sound rather than drop it
+    (the fuller pronunciation), just remove the parentheses themselves -- the
+    right call for a US voice, where post-vocalic r is always pronounced.
+    keep_optional=False: drop the whole parenthetical span. OED's (r) marks an
+    RP linking/intrusive r -- pronounced only in connected speech before a
+    following vowel, dropped in citation form -- so for a UK voice, KEEPING
+    the letter (the True behavior) produces a rhotic mispronunciation exactly
+    backwards from what the notation means. The trailing `?` in the pattern
+    defensively handles a still-unclosed paren even though callers are
+    expected to have already balanced it before this point."""
     ipa = ipa.strip().strip("/[]")
     ipa = ipa.replace(_TIE, "")
     ipa = ipa.replace(".", "")
-    ipa = ipa.replace("(", "").replace(")", "")
+    if keep_optional:
+        ipa = ipa.replace("(", "").replace(")", "")
+    else:
+        ipa = re.sub(r"\([^)]*\)?", "", ipa)
     return ipa
 
 
@@ -110,12 +143,15 @@ def _synthesize_ssml(ssml: str, key: str, region: str, tries: int = 4) -> bytes 
 
 
 def synthesize_azure(word: str, ipa: str, key: str, region: str,
-                      voice: str = AZURE_VOICE, tries: int = 4) -> bytes | None:
-    """IPA-guided: returns mp3 bytes, or None on a hard failure (bad phoneme, network)."""
-    ph = normalize_ipa(ipa)
+                      voice: str = AZURE_VOICE, lang: str = "en-US",
+                      keep_optional: bool = True, tries: int = 4) -> bytes | None:
+    """IPA-guided: returns mp3 bytes, or None on a hard failure (bad phoneme, network).
+    lang/keep_optional should match voice's dialect -- see voice_for_dialect
+    and normalize_ipa's own docstring for why keep_optional flips per dialect."""
+    ph = normalize_ipa(ipa, keep_optional=keep_optional)
     ssml = (
-        "<speak version='1.0' xml:lang='en-US'>"
-        f"<voice xml:lang='en-US' name='{voice}'>"
+        f"<speak version='1.0' xml:lang='{lang}'>"
+        f"<voice xml:lang='{lang}' name='{voice}'>"
         f"<phoneme alphabet='ipa' ph='{ph}'>{word}</phoneme>"
         "</voice></speak>"
     )
@@ -123,14 +159,15 @@ def synthesize_azure(word: str, ipa: str, key: str, region: str,
 
 
 def synthesize_azure_guess(word: str, key: str, region: str,
-                           voice: str = AZURE_VOICE, tries: int = 4) -> bytes | None:
+                           voice: str = AZURE_VOICE, lang: str = "en-US",
+                           tries: int = 4) -> bytes | None:
     """No IPA available anywhere for this word — Azure's own text-to-speech
     front-end guesses pronunciation from spelling alone, same as any other
     engine would. Callers MUST record this as a distinct, lower-confidence
     source (never conflate with IPA-guided output) since it's unverified."""
     ssml = (
-        "<speak version='1.0' xml:lang='en-US'>"
-        f"<voice xml:lang='en-US' name='{voice}'>{word}</voice></speak>"
+        f"<speak version='1.0' xml:lang='{lang}'>"
+        f"<voice xml:lang='{lang}' name='{voice}'>{word}</voice></speak>"
     )
     return _synthesize_ssml(ssml, key, region, tries)
 

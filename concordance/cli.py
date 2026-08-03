@@ -1467,6 +1467,45 @@ def ipa(
                   f"{stats.get('unresolved',0)} still unresolved")
 
 
+@app.command("oed-ipa")
+def oed_ipa_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    oed_schema: str = typer.Option("oed", "--oed-schema", help="Postgres schema for the oed tables."),
+    refetch: bool = typer.Option(False, "--refetch", help="Re-check every word (default: only empty/invalid ipa)."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of words checked."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Backfill word.ipa from the oed schema's double-pass-verified
+    pronunciation_ipa (see concordance/oed/pronunciation.py). Standalone, like
+    `wordnik-pron`/`ipa` — OED coverage is partial (grows with each future
+    `oed-ingest` run on another volume) so this is meant to be re-run
+    periodically, not folded into `maintain`. No local LLM or embedding
+    model loaded, so safe to run alongside GPU-bound steps like
+    `author-fame`/`book-fame`/`classify`/`quizdef`.
+
+    A headword with multiple oed entries (a homograph — "bay", "fleet",
+    "back" each have several) only gets backfilled when every entry with a
+    resolved pronunciation for that headword agrees; a genuine conflict is
+    skipped, not guessed at, since oed's part_of_speech field isn't clean
+    enough to pick the "right" homograph. Only fills currently-empty ipa —
+    never overrides an existing valid IPA from another source. Run `audio`
+    (or `compute_audio`) afterward — it picks the matching UK voice
+    automatically for anything backfilled from here."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    stats = db.backfill_ipa_from_oed(conn, schema, oed_schema, only_missing=not refetch, limit=limit)
+    conn.close()
+    console.print(f"[green]✓[/green] oed-ipa: {stats.get('total',0)} words — "
+                  f"[bold]{stats.get('already_valid',0)}[/bold] already valid, "
+                  f"{stats.get('backfilled',0)} backfilled from oed, "
+                  f"{stats.get('ambiguous_homograph',0)} ambiguous homographs skipped, "
+                  f"{stats.get('failed_sanity_check',0)} failed the English-IPA sanity check, "
+                  f"{stats.get('no_match',0)} had no oed match")
+
+
 @app.command()
 def maintain(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),

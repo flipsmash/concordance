@@ -394,6 +394,130 @@ def test_compute_ipa_limit_applies_after_the_only_missing_filter(monkeypatch):
 
 
 @pg
+def test_compute_ipa_sets_ipa_source_on_backfill_and_correction_and_clears_it(monkeypatch):
+    from concordance import wiktextract
+    from concordance.model import Candidate
+
+    schema = "cc_test_ipa_source"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    words = [
+        Candidate(lemma="freshword", pos="NOUN"),   # no existing ipa -> backfill
+        Candidate(lemma="badword", pos="NOUN"),      # invalid existing ipa, kaikki has a fix -> correction
+        Candidate(lemma="deadword", pos="NOUN"),     # invalid existing ipa, no fix anywhere -> cleared
+    ]
+    db.sync_book_results(conn, "Book One", kept=words, rejected=[], schema=schema)
+    with conn.cursor() as cur:
+        # French-cognate-leak pattern this sanity check exists to catch (see audio.py)
+        cur.execute(f"UPDATE {schema}.word SET ipa=%s, ipa_source='wordnik' WHERE lemma=%s",
+                    ("/myʁ.my.ʁe/", "badword"))
+        cur.execute(f"UPDATE {schema}.word SET ipa=%s, ipa_source='wordnik' WHERE lemma=%s",
+                    ("/ɑ̃.ʒe.lys/", "deadword"))
+    conn.commit()
+
+    lexicon = {
+        "freshword": {"ipa": [{"ipa": "ˈfrɛʃwɜːd", "tags": ["US"]}], "audio": []},
+        "badword": {"ipa": [{"ipa": "ˈbædwɜːd", "tags": ["US"]}], "audio": []},
+        # deadword: no kaikki entry at all -- nothing to fix it with
+    }
+    monkeypatch.setattr(wiktextract, "build_lexicon", lambda *a, **k: lexicon)
+
+    db.compute_ipa(conn, schema)
+
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT lemma, ipa, ipa_source FROM {schema}.word ORDER BY lemma")
+        rows = {lemma: (ipa, source) for lemma, ipa, source in cur.fetchall()}
+
+    assert rows["freshword"] == ("ˈfrɛʃwɜːd", "kaikki")   # backfilled + sourced
+    assert rows["badword"] == ("ˈbædwɜːd", "kaikki")       # corrected + sourced
+    assert rows["deadword"] == (None, None)                # cleared + source cleared too
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_backfill_ipa_from_oed(monkeypatch):
+    from concordance.model import Candidate
+    from concordance.oed import db as oed_db
+
+    schema = "cc_test_oed_ipa"
+    oed_schema = "oed_test_backfill"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        cur.execute(f"DROP SCHEMA IF EXISTS {oed_schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+    oed_db.apply_schema(conn, oed_schema)
+
+    words = [
+        Candidate(lemma="abandoner", pos="NOUN"),   # unambiguous OED match (unclosed paren in source)
+        Candidate(lemma="bay", pos="NOUN"),          # homograph, but both resolved entries agree
+        Candidate(lemma="fleet", pos="NOUN"),        # homograph, genuinely conflicting -- must skip
+        Candidate(lemma="nomatch", pos="NOUN"),      # no oed entry at all
+        Candidate(lemma="alreadyvalid", pos="NOUN"), # already has valid ipa -- must not be touched
+        Candidate(lemma="feuille", pos="NOUN"),      # oed has it, but it's French -- must fail sanity check
+    ]
+    db.sync_book_results(conn, "Book One", kept=words, rejected=[], schema=schema)
+    with conn.cursor() as cur:
+        cur.execute(f"UPDATE {schema}.word SET ipa=%s, ipa_source='kaikki' WHERE lemma=%s",
+                    ("/ɔːlˈrɛdi/", "alreadyvalid"))
+    conn.commit()
+
+    volume_id = oed_db.upsert_volume(conn, file_name="t.pdf", file_hash_="h1",
+                                      volume_label="V", page_count=1, schema=oed_schema)
+
+    def _entry(headword, ipa):
+        entry_id = oed_db.insert_entry(
+            conn, volume_id=volume_id, headword=headword, homograph_number=None,
+            part_of_speech="n", etymology=None, entry_type="main", parent_entry_id=None,
+            page_number=1, raw_text="raw", schema=oed_schema)
+        oed_db.update_pronunciation(conn, entry_id, pronunciation_raw="raw", pass1=ipa,
+                                     pass2=ipa, ipa=ipa, source="vision_llm",
+                                     needs_review=False, schema=oed_schema)
+
+    _entry("abandoner", "ˈbændənə(r")
+    _entry("bay", "beɪ")
+    _entry("bay", "beɪ")
+    _entry("fleet", "fliːt")
+    _entry("fleet", "flɛt")
+    _entry("feuille", "fœj")
+    conn.commit()
+
+    stats = db.backfill_ipa_from_oed(conn, schema, oed_schema)
+
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT lemma, ipa, ipa_source FROM {schema}.word ORDER BY lemma")
+        rows = {lemma: (ipa, source) for lemma, ipa, source in cur.fetchall()}
+
+    assert rows["abandoner"] == ("ˈbændənə(r)", "oed")   # paren closed, written
+    assert rows["bay"] == ("beɪ", "oed")                   # homograph agreement -> written
+    assert not rows["fleet"][0] and rows["fleet"][1] is None       # genuine conflict -> skipped
+    assert not rows["nomatch"][0] and rows["nomatch"][1] is None   # no oed entry -> skipped
+    assert rows["alreadyvalid"] == ("/ɔːlˈrɛdi/", "kaikki")  # untouched, not overridden by oed
+    assert not rows["feuille"][0] and rows["feuille"][1] is None   # French IPA -> failed sanity check
+
+    assert stats["backfilled"] == 2
+    assert stats["ambiguous_homograph"] == 1
+    assert stats["no_match"] == 1
+    assert stats["already_valid"] == 1
+    assert stats["failed_sanity_check"] == 1
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+        cur.execute(f"DROP SCHEMA {oed_schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
 def test_fill_definitions_web_tier_is_no_longer_gated_on_validity(monkeypatch, tmp_path):
     # Phase 5a: the WEB tier used to skip anything validity_score scored
     # likely-artifact, on the theory a web search for OCR noise was wasted
