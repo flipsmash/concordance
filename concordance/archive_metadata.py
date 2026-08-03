@@ -36,6 +36,12 @@ import re
 _START_RE = re.compile(r"^[ \t]*\*\*\*\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.*\*\*\*\s*$", re.MULTILINE | re.IGNORECASE)
 _END_RE = re.compile(r"^[ \t]*\*\*\*\s*END OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.*\*\*\*\s*$", re.MULTILINE | re.IGNORECASE)
 _EBOOK_ID_RE = re.compile(r"\[eBook #(\d+)\]", re.IGNORECASE)
+# The one-time bulk boilerplate strip (2026-08) rewrote every archive/*.txt
+# file in place, keeping just this one line where the full Gutenberg header
+# used to be -- confirmed live: with no header left to match _START_RE, that
+# line becomes the start of "text" and "eBook" itself gets counted as one of
+# the book's own words otherwise. Stripped before word_stats sees it.
+_LEADING_EBOOK_ID_LINE_RE = re.compile(r"\A[ \t]*\[eBook #\d+\][ \t]*\n+", re.IGNORECASE)
 _WORD_RE = re.compile(r"[A-Za-z]+")
 
 # marc520 states an exact year for a handful of globally-famous classics
@@ -227,6 +233,7 @@ def compute_book_metadata(path, *, skip_network: bool = False, delay: float = 0.
     if path.suffix.lower() == ".txt":
         raw = path.read_text(encoding="utf-8", errors="replace")
         text = strip_gutenberg_boilerplate(raw)
+        text = _LEADING_EBOOK_ID_LINE_RE.sub("", text, count=1)
         if not skip_network:
             gutenberg_id = extract_gutenberg_id(raw)
             if gutenberg_id:

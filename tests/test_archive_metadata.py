@@ -6,6 +6,7 @@ not unit-tested here)."""
 from concordance.archive_metadata import (
     _ERA_RE,
     _YEAR_RE,
+    compute_book_metadata,
     extract_gutenberg_id,
     strip_gutenberg_boilerplate,
     word_stats,
@@ -89,6 +90,20 @@ def test_strip_gutenberg_boilerplate_uses_last_end_to_avoid_truncating_a_compile
     assert "Part one text." in stripped
     assert "Part two text, which must survive." in stripped
     assert stripped.strip().endswith("Part two text, which must survive.")
+
+
+def test_compute_book_metadata_excludes_the_leading_ebook_id_line_from_word_count(tmp_path):
+    # Regression: the 2026-08 bulk boilerplate strip left every archive/*.txt
+    # file starting with just "[eBook #NNNN]" where the full header used to
+    # be -- with no START/END markers left to strip, that line was being
+    # counted as part of the book itself, inflating word_count by 1 ("eBook")
+    # for effectively the whole corpus.
+    path = tmp_path / "book.txt"
+    path.write_text("[eBook #3190]\n\nThe quick brown fox jumps over the lazy dog.\n", encoding="utf-8")
+    meta = compute_book_metadata(path, skip_network=True)
+    total, distinct_nonstop = word_stats("The quick brown fox jumps over the lazy dog.")
+    assert meta["word_count"] == total
+    assert meta["distinct_nonstop_word_count"] == distinct_nonstop
 
 
 def test_extract_gutenberg_id_finds_the_ebook_number():
