@@ -41,9 +41,7 @@ function DomainDistribution({ summary, selected, onSelect }) {
             <span className="domain-dist-track">
               <span className="domain-dist-fill" style={{ width: `${barWidth}%`, background: swatch }} />
             </span>
-            <span className="domain-dist-count">
-              {b.word_count} of {summary.total_words} ({Math.round(pct)}%)
-            </span>
+            <span className="domain-dist-count">{Math.round(pct)}%</span>
           </button>
         )
       })}

@@ -6,7 +6,14 @@
 
 .domain-dist-row {
   display: grid;
-  grid-template-columns: 12px 150px 1fr auto;
+  /* Last column is a small FIXED width, not auto -- auto used to size itself
+     to "1083 of 3320 (33%)", the longest count string in the set, leaving a
+     ~150-200px gutter after the track that visually reads as more chart
+     area a viewer scans for the bar's "100%" mark. That made every bar look
+     shorter than its own label: a 33% bar's fill really did fill 33% of its
+     track, but only ~20% of the visually-scanned row. The full count now
+     lives in the row's title tooltip; this column only needs to fit "100%". */
+  grid-template-columns: 12px 150px 1fr 36px;
   align-items: center;
   gap: 10px;
   width: 100%;
@@ -64,6 +71,7 @@
   font-size: 13px;
   color: var(--text);
   white-space: nowrap;
+  text-align: right;
   font-variant-numeric: tabular-nums;
 }
 
@@ -81,6 +89,6 @@
 
 @media (max-width: 520px) {
   .domain-dist-row {
-    grid-template-columns: 12px 110px 1fr auto;
+    grid-template-columns: 12px 110px 1fr 36px;
   }
 }
