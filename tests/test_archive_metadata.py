@@ -45,6 +45,52 @@ def test_strip_gutenberg_boilerplate_falls_back_to_start_only_when_end_missing()
     assert stripped.strip() == "Body text here."
 
 
+def test_strip_gutenberg_boilerplate_handles_an_indented_end_marker():
+    # Regression: confirmed live on ~54 real corpus files whose END marker
+    # is indented ("            *** END OF ... ***") -- a bare ^\*\*\* anchor
+    # never matched, silently leaving the whole license-footer text inside
+    # word_stats for every one of those books.
+    indented_footer = "\n            *** END OF THE PROJECT GUTENBERG EBOOK SOME BOOK ***\n\nMore boilerplate.\n"
+    text = _HEADER + "The quick brown fox jumps over the lazy dog." + indented_footer
+    stripped = strip_gutenberg_boilerplate(text)
+    assert stripped.strip() == "The quick brown fox jumps over the lazy dog."
+
+
+def test_strip_gutenberg_boilerplate_uses_last_start_when_header_is_duplicated():
+    # Regression: confirmed live on 2 real corpus files (a Gutenberg
+    # re-release that repeats its whole Title:/Author:/Release date: block
+    # -- each ending in its own START line) -- the FIRST start left the
+    # second header+marker embedded in the "stripped" text.
+    text = (
+        _HEADER
+        + _HEADER  # the whole header+START repeats verbatim before the real body
+        + "The quick brown fox jumps over the lazy dog."
+        + _FOOTER
+    )
+    stripped = strip_gutenberg_boilerplate(text)
+    assert stripped.strip() == "The quick brown fox jumps over the lazy dog."
+
+
+def test_strip_gutenberg_boilerplate_uses_last_end_to_avoid_truncating_a_compiled_work():
+    # Regression: a book-merge "(Complete)" compile can carry an
+    # intermediate part's own END marker mid-body (that part's marker went
+    # unmatched at compile time, so split_gutenberg_parts folded its footer
+    # into "body"). Using the FIRST end here silently discarded the entire
+    # rest of the work -- confirmed live, lost all of a 2-part play's second
+    # half. The last END must always be treated as the true final boundary.
+    text = (
+        _HEADER
+        + "Part one text."
+        + _FOOTER
+        + "Part two text, which must survive."
+        + _FOOTER
+    )
+    stripped = strip_gutenberg_boilerplate(text)
+    assert "Part one text." in stripped
+    assert "Part two text, which must survive." in stripped
+    assert stripped.strip().endswith("Part two text, which must survive.")
+
+
 def test_extract_gutenberg_id_finds_the_ebook_number():
     assert extract_gutenberg_id(_HEADER) == 3190
 

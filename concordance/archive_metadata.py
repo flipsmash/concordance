@@ -27,8 +27,14 @@ from __future__ import annotations
 
 import re
 
-_START_RE = re.compile(r"^\*\*\*\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.*\*\*\*\s*$", re.MULTILINE | re.IGNORECASE)
-_END_RE = re.compile(r"^\*\*\*\s*END OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.*\*\*\*\s*$", re.MULTILINE | re.IGNORECASE)
+
+# [ \t]* leading indent tolerance -- confirmed live: ~54 files in this corpus
+# have their END marker indented ("            *** END OF ... ***"), which a
+# bare ^\*\*\* anchor never matches, silently leaving the whole license-footer
+# text (a few thousand words) inside word_count/distinct_nonstop_word_count
+# for every such book until this was found.
+_START_RE = re.compile(r"^[ \t]*\*\*\*\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.*\*\*\*\s*$", re.MULTILINE | re.IGNORECASE)
+_END_RE = re.compile(r"^[ \t]*\*\*\*\s*END OF (?:THE|THIS) PROJECT GUTENBERG EBOOK.*\*\*\*\s*$", re.MULTILINE | re.IGNORECASE)
 _EBOOK_ID_RE = re.compile(r"\[eBook #(\d+)\]", re.IGNORECASE)
 _WORD_RE = re.compile(r"[A-Za-z]+")
 
@@ -73,19 +79,47 @@ def _stopwords() -> frozenset[str]:
     return _stopword_set
 
 
+def _boundaries(text: str):
+    """(start_match, end_match) picked to be maximally inclusive against a
+    corpus with duplicated markers -- confirmed live on real files:
+      - some releases repeat their ENTIRE header block (two Title:/Author:/
+        Release date: blocks, each ending its own START line) before the
+        real body -- using the FIRST start left the second header+marker
+        embedded in the kept text.
+      - a book-merge compiled "(Complete)" file can carry an intermediate
+        part's own END marker mid-body (that part's marker went unmatched
+        at compile time -- e.g. the indented-marker case below -- so
+        split_gutenberg_parts folded its footer into "body" back then).
+        Using the FIRST end here truncated the file at that intermediate
+        marker, silently discarding the rest of the work (confirmed live:
+        lost the entire second half of a 2-part play).
+    The fix that's safe against both: take the LAST end in the text (the
+    true final boundary), and the LAST start that still precedes it (so a
+    repeated header collapses to just the last one) -- this can only ever
+    widen the kept span relative to the naive first-match version, never
+    narrow it, so it cannot lose real body text the way "first end" did."""
+    starts = list(_START_RE.finditer(text))
+    ends = list(_END_RE.finditer(text))
+    if not starts:
+        return None, ends[-1] if ends else None
+    end = ends[-1] if ends else None
+    if end is not None:
+        starts = [s for s in starts if s.end() <= end.start()] or starts
+    return starts[-1], end
+
+
 def strip_gutenberg_boilerplate(text: str) -> str:
     """Everything between the START/END markers -- the actual book, not
     Gutenberg's license preamble/footer. Falls back to the full text
     unchanged if a marker is missing (confirmed live: true for well under
     1% of this corpus) so a malformed file still gets SOME stats rather
     than none."""
-    start = _START_RE.search(text)
-    end = _END_RE.search(text)
-    if start and end and end.start() > start.end():
+    start, end = _boundaries(text)
+    if not start:
+        return text
+    if end and end.start() > start.end():
         return text[start.end():end.start()]
-    if start:
-        return text[start.end():]
-    return text
+    return text[start.end():]
 
 
 def split_gutenberg_parts(text: str) -> tuple[str, str, str]:
@@ -96,13 +130,12 @@ def split_gutenberg_parts(text: str) -> tuple[str, str, str]:
     instead of concatenating every part's own full license boilerplate.
     Falls back to ("", text, "") if markers are missing, same "still
     usable, less clean" philosophy as strip_gutenberg_boilerplate."""
-    start = _START_RE.search(text)
-    end = _END_RE.search(text)
-    if start and end and end.start() > start.end():
+    start, end = _boundaries(text)
+    if not start:
+        return "", text, ""
+    if end and end.start() > start.end():
         return text[: start.end()], text[start.end(): end.start()], text[end.start():]
-    if start:
-        return text[: start.end()], text[start.end():], ""
-    return "", text, ""
+    return text[: start.end()], text[start.end():], ""
 
 
 def extract_gutenberg_id(text: str) -> int | None:
