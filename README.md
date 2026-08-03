@@ -489,7 +489,7 @@ if the underlying data later changed. They're cheap, pure-local computation
 `maintain` run is a fast, not-batched-for-performance choice — `--limit`
 exists purely for interface consistency with the slower steps.
 
-### Pronunciation audio (`wordnik-pron`, `ipa`, `commons-search`, `commons-download`, `audio`, `audio-guess`)
+### Pronunciation audio (`wordnik-pron`, `ipa`, `oed-ipa`, `commons-search`, `commons-download`, `audio`, `audio-guess`)
 
 Real human recordings where they exist, IPA-guided synthesis otherwise —
 never a blind spelling-to-speech guess unless nothing else is available:
@@ -497,6 +497,7 @@ never a blind spelling-to-speech guess unless nothing else is available:
 ```bash
 concordance wordnik-pron      # fetch raw Wordnik transcriptions (ARPAbet/AHD-5/IPA)
 concordance ipa               # backfill+validate word.ipa from kaikki, then Wordnik, then local Wiktionary
+concordance oed-ipa           # backfill word.ipa from the oed schema's verified pronunciations
 concordance commons-search    # find real Commons recordings kaikki's dump missed
 concordance commons-download  # download the recordings commons-search confirmed
 concordance audio             # Commons recording if present, else Azure IPA-guided TTS
@@ -513,6 +514,32 @@ commands rather than folded into `maintain`: Commons rate-limits hard and is
 meant to run for hours unattended, which would starve every other step if
 interleaved. `audio-guess` results are tagged `source='azure_guess'` (vs.
 `'azure'` for IPA-guided) so the app can flag them as unverified.
+
+`oed-ipa` is the one place the OED reference dictionary (below) feeds back
+into the main vocabulary pipeline — it draws on the oed schema's
+double-pass-verified `pronunciation_ipa`, only filling a word's `ipa` when
+it's currently empty/invalid and every oed entry for that headword agrees
+(a homograph like "bay"/"fleet"/"back" can have several entries; a genuine
+disagreement is skipped rather than guessed at, since oed's `part_of_speech`
+field is unparsed OCR abbreviation soup, not clean enough to pick the "right"
+one). Standalone like `wordnik-pron`/`commons-download` — OED coverage grows
+with each future volume ingested, so this is meant to be re-run periodically,
+not folded into `maintain`. No local LLM or embedding model, so it's safe to
+run alongside GPU-bound steps like `author-fame`/`book-fame`/`classify`.
+
+Every word backfilled from `oed-ipa` is tagged `ipa_source='oed'`, which
+`audio` uses to pick a matching British voice (`en-GB-SoniaNeural`) instead
+of the default US one (`en-US-AvaNeural`) — OED is a British dictionary, and
+every other IPA source here is deliberately US-biased (kaikki's lookup
+prefers US-tagged entries, local Wiktionary's column is literally
+`us_pronunciation`, Wordnik's ARPAbet/AHD-5 converters are both US phoneme
+systems), so feeding OED's RP transcriptions to the US voice would produce
+wrong/unnatural audio. The dialect switch also flips how an optional/
+dialectal sound in parentheses is handled: kept for the US voice (post-vocalic
+r is always pronounced), dropped for the UK voice (OED's `(r)` marks an RP
+linking r that's pronounced only in connected speech, not citation form —
+keeping it would be a rhotic mispronunciation backwards from what the
+notation means).
 
 ## Semantic distance (`train-fasttext`, `embed`)
 
@@ -749,7 +776,9 @@ batch run.
   output the way the pronunciation pipeline was.
 
 Not part of `maintain` — own schema, own concern, run on demand as volumes
-are acquired.
+are acquired. One exception to "not merged into" the vocabulary pipeline
+above: `oed-ipa` (see "Pronunciation audio") reads this schema's verified
+pronunciations back into `word.ipa` for words that still lack one.
 
 ## Running the local model (RTX 3060, 12 GB)
 
@@ -1165,7 +1194,11 @@ powering a fourth "A is to B as C is to ___" quiz question type
 (`backfill-analogies` — see "Analogy relations" above), and a wholly separate
 OED reference-dictionary ingestion pipeline over scanned volume PDFs, into
 its own schema with its own admin-only browsing UI (`oed-ingest` — see "OED
-reference dictionary" above). Vocabulary-relatedness visualization is
+reference dictionary" above), which now also feeds back into the main
+pipeline as an additional pronunciation source: `oed-ipa` backfills
+`word.ipa` from OED's verified transcriptions, and `audio` synthesizes those
+with a matching British voice instead of the US one every other source uses
+(see "Pronunciation audio" above). Vocabulary-relatedness visualization is
 also live: book/author lexical-overlap similarity, real (cross-linked, not
 star-shaped) ego-graphs, a shared-vocabulary comparison view, a
 category-overlap force-directed graph in the Categories drilldown, and —
