@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import DifficultyHistogram from './DifficultyHistogram'
 import DomainDistribution from './DomainDistribution'
+import Pagination from './Pagination'
 import SharedWordsPanel from './SharedWordsPanel'
 import { buildQueryParams, usePagedTable } from './usePagedTable'
 import { useWordFilters } from './useWordFilters'
@@ -295,17 +296,7 @@ function WorkDetail() {
         {!loading && items.length === 0 && <li className="browse-empty">No words found for this book.</li>}
       </ul>
 
-      <footer className="browse-footer">
-        <button type="button" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
-          ← Prev
-        </button>
-        <span>
-          Page {page} of {totalPages} ({total} words)
-        </span>
-        <button type="button" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>
-          Next →
-        </button>
-      </footer>
+      <Pagination page={page} totalPages={totalPages} total={total} itemLabel="words" onPageChange={setPage} />
     </div>
   )
 }

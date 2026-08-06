@@ -4,6 +4,8 @@ import AddToSetMenu from './AddToSetMenu'
 import AlphabetStrip from './AlphabetStrip'
 import AuthorSelect from './AuthorSelect'
 import MultiSelect from './MultiSelect'
+import Pagination from './Pagination'
+import SortControl from './SortControl'
 import { useAuth } from './AuthContext'
 import { colorForBucket } from './domainColors'
 import { useGuideWords } from './GuideWordContext'
@@ -13,6 +15,12 @@ import './Browse.css'
 const API_BASE = ''
 const ARCHAIC_VALUES = ['current', 'dated', 'archaic', 'obsolete']
 const PAGE_SIZE = 30
+const SORT_FIELDS = [
+  { key: 'lemma', label: 'Word (A–Z)' },
+  { key: 'difficulty', label: 'Difficulty' },
+  { key: 'part_of_speech', label: 'Part of speech' },
+  { key: 'book_count', label: 'Number of sources' },
+]
 
 // Every facet lives in the URL (useSearchParams), not local state -- a
 // filtered combination like "archaic Nature & Science words in Ulysses" is
@@ -279,31 +287,38 @@ function Browse() {
   }
 
   // --- results -----------------------------------------------------------------
-  const { items, setItems, total, setTotal, page, setPage, loading, error, setError, totalPages } = usePagedTable({
-    endpoint: '/api/browse/words',
-    pageSize: PAGE_SIZE,
-    defaultSort: 'lemma',
-    defaultDir: 'asc',
-    extraParams: {
-      author: author || '',
-      book_id: bookIds,
-      domain: domains,
-      top_code: topCodes,
-      all_top_code: allTopCodes,
-      difficulty_min: difficultyMin,
-      difficulty_max: difficultyMax,
-      archaic,
-      quizzable_only: quizzableOnly,
-      letter: letter || '',
-    },
-  })
+  const { items, setItems, total, setTotal, page, setPage, sort, dir, handleSort, loading, error, setError, totalPages } =
+    usePagedTable({
+      endpoint: '/api/browse/words',
+      pageSize: PAGE_SIZE,
+      defaultSort: 'lemma',
+      defaultDir: 'asc',
+      extraParams: {
+        author: author || '',
+        book_id: bookIds,
+        domain: domains,
+        top_code: topCodes,
+        all_top_code: allTopCodes,
+        difficulty_min: difficultyMin,
+        difficulty_max: difficultyMax,
+        archaic,
+        quizzable_only: quizzableOnly,
+        letter: letter || '',
+      },
+    })
 
   // Feeds the shell's guide-word header real first/last-on-screen text --
-  // the list is reliably lemma-ascending (no sort-toggle UI here), so this
-  // mirrors exactly what a dictionary page's own running head would show.
-  // The 'a'/'z' fallback keeps the header non-blank while loading or on an
-  // empty filtered result.
-  useGuideWords(items[0]?.lemma || 'a', 'browse', items.at(-1)?.lemma || 'z')
+  // only meaningful when the list is actually lemma-ascending (a dictionary
+  // page's running head shows the alphabetical range on screen); sorting by
+  // difficulty/POS/source count breaks that premise, so the header falls
+  // back to the same 'a'/'z' it already uses while loading or on an empty
+  // result rather than showing a non-alphabetical "range."
+  const lemmaOrdered = sort === 'lemma'
+  useGuideWords(
+    (lemmaOrdered && items[0]?.lemma) || 'a',
+    'browse',
+    (lemmaOrdered && items.at(-1)?.lemma) || 'z',
+  )
 
   return (
     <div className="browse-page">
@@ -412,6 +427,8 @@ function Browse() {
 
         <AlphabetStrip letter={letter} onChange={setLetter} />
 
+        <SortControl fields={SORT_FIELDS} sort={sort} dir={dir} onSort={handleSort} />
+
         {activeFacetCount > 0 && (
           <div className="browse-shelf">
             {author && (
@@ -497,6 +514,11 @@ function Browse() {
             <span className="browse-result-badges">
               {w.difficulty != null && <span className="browse-difficulty-pill">{Math.round(w.difficulty)}</span>}
               {w.archaic && w.archaic !== 'current' && <span className="browse-archaic-tag">{w.archaic}</span>}
+              {sort === 'book_count' && (
+                <span className="browse-difficulty-pill" title={`${w.book_count} source${w.book_count === 1 ? '' : 's'}`}>
+                  {w.book_count}
+                </span>
+              )}
             </span>
             {user?.is_admin && (
               <button
@@ -513,17 +535,7 @@ function Browse() {
         {!loading && items.length === 0 && <li className="browse-empty">No words match these filters.</li>}
       </ul>
 
-      <footer className="browse-footer">
-        <button type="button" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
-          ← Prev
-        </button>
-        <span>
-          Page {page} of {totalPages} ({total} words)
-        </span>
-        <button type="button" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>
-          Next →
-        </button>
-      </footer>
+      <Pagination page={page} totalPages={totalPages} total={total} itemLabel="words" onPageChange={setPage} />
 
       {selectMode && selectedIds.length > 0 && (
         <div className="browse-selection-bar">

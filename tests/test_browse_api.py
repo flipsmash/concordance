@@ -472,6 +472,36 @@ def test_shared_word_does_not_cross_contaminate_author_or_book_filters():
 
 
 @pg
+def test_browse_words_sorts_by_book_count():
+    schema = "cc_test_browse_words_book_count"
+    client, conn, restore = _setup(schema)
+    try:
+        b1 = _insert_book(conn, schema, "Book One")
+        b2 = _insert_book(conn, schema, "Book Two")
+        b3 = _insert_book(conn, schema, "Book Three")
+
+        in_three = _insert_word(conn, schema, "inthree")
+        in_two = _insert_word(conn, schema, "intwo")
+        in_one = _insert_word(conn, schema, "inone")
+        for b in (b1, b2, b3):
+            _link(conn, schema, in_three, b)
+        for b in (b1, b2):
+            _link(conn, schema, in_two, b)
+        _link(conn, schema, in_one, b1)
+        conn.commit()
+
+        res = client.get("/api/browse/words", params={"sort": "book_count", "dir": "desc"})
+        items = res.json()["items"]
+        assert [w["lemma"] for w in items] == ["inthree", "intwo", "inone"]
+        assert [w["book_count"] for w in items] == [3, 2, 1]
+
+        res_asc = client.get("/api/browse/words", params={"sort": "book_count", "dir": "asc"})
+        assert [w["lemma"] for w in res_asc.json()["items"]] == ["inone", "intwo", "inthree"]
+    finally:
+        restore()
+
+
+@pg
 def test_combined_facets_intersect_regardless_of_which_is_set_first():
     schema = "cc_test_browse_combined"
     client, conn, restore = _setup(schema)

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import AlphabetStrip from './AlphabetStrip'
 import { densityLabel, difficultySummary, overallDifficultyLabel } from './bookDifficulty'
+import Pagination from './Pagination'
 import SortControl from './SortControl'
 import { usePagedTable } from './usePagedTable'
 import './Authors.css'
@@ -167,17 +168,7 @@ function Books() {
         {!loading && items.length === 0 && <li className="authors-empty">No books match.</li>}
       </ul>
 
-      <footer className="authors-footer">
-        <button type="button" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
-          ← Prev
-        </button>
-        <span>
-          Page {page} of {totalPages} ({total} books)
-        </span>
-        <button type="button" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>
-          Next →
-        </button>
-      </footer>
+      <Pagination page={page} totalPages={totalPages} total={total} itemLabel="books" onPageChange={setPage} />
     </div>
   )
 }

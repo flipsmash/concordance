@@ -76,6 +76,7 @@ _WORD_SORT_COLUMNS = {
     "lemma": "w.lemma",
     "difficulty": "wd.difficulty",
     "part_of_speech": "w.part_of_speech",
+    "book_count": "book_count",  # the SELECT-list alias below, not a real column
 }
 
 _BOOK_SORT_COLUMNS = {
@@ -1512,6 +1513,7 @@ class BrowseWordRow(BaseModel):
     difficulty: float | None
     archaic: str | None
     quizzable: bool | None
+    book_count: int  # distinct books this word appears in -- see word_detail's "Sources (N)"
 
 
 class BrowseWordPage(BaseModel):
@@ -1541,7 +1543,7 @@ def browse_words(
     random: bool = False,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
-    sort: Literal["lemma", "difficulty", "part_of_speech"] = "lemma",
+    sort: Literal["lemma", "difficulty", "part_of_speech", "book_count"] = "lemma",
     dir: Literal["asc", "desc"] = "asc",
     _: dict = Depends(_main.require_viewer),
 ) -> BrowseWordPage:
@@ -1595,7 +1597,9 @@ def browse_words(
 
         cur.execute(
             f"""SELECT w.id, w.lemma, w.part_of_speech, w.definition,
-                       wd.difficulty, wd.archaic, wd.quizzable
+                       wd.difficulty, wd.archaic, wd.quizzable,
+                       (SELECT count(*) FROM {_main.SCHEMA}.word_book wb2
+                        WHERE wb2.word_id = w.id) AS book_count
                 FROM {_main.SCHEMA}.word w
                 LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
                 WHERE {where}
@@ -1607,7 +1611,7 @@ def browse_words(
 
     items = [
         BrowseWordRow(id=r[0], lemma=r[1], part_of_speech=r[2], definition=r[3],
-                      difficulty=r[4], archaic=r[5], quizzable=r[6])
+                      difficulty=r[4], archaic=r[5], quizzable=r[6], book_count=r[7])
         for r in rows
     ]
     return BrowseWordPage(items=items, total=total, page=page, page_size=page_size)
