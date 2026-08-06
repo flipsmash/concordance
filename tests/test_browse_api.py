@@ -401,6 +401,46 @@ def test_unique_word_bucket_filters_books_and_authors():
 
 
 @pg
+def test_unique_word_histogram_and_bucket_filter_agree_despite_placeholder_authors():
+    # Regression: the histogram's author-scope count and the click-through
+    # list's count fell out of sync in production ("close but not the
+    # same") because the histogram counted every distinct author, including
+    # PLACEHOLDER_AUTHORS values ("Various", "Unknown Author", ...), while
+    # browse_authors (the click-through target) already excludes those from
+    # its own listing. A placeholder-authored book's word landing in some
+    # bucket inflated that bucket's histogram count without a matching row
+    # ever showing up in the filtered list.
+    schema = "cc_test_browse_uw_placeholder"
+    client, conn, restore = _setup(schema)
+    try:
+        real = _insert_book(conn, schema, "Real Book", author="Real Author")
+        placeholder = _insert_book(conn, schema, "Anthology", author="Various")
+
+        real_word = _insert_word(conn, schema, "realword")
+        _link(conn, schema, real_word, real)
+
+        placeholder_word = _insert_word(conn, schema, "placeholderword")
+        _link(conn, schema, placeholder_word, placeholder)
+        conn.commit()
+
+        hist = {r["label"]: r["count"] for r in
+                client.get("/api/browse/unique-word-histogram", params={"scope": "author"}).json()}
+        # Only "Real Author" should ever be counted -- "Various" is a
+        # placeholder, not a real author, and must not inflate any bucket.
+        assert hist["1"] == 1
+
+        authors1 = [a["author"] for a in
+                    client.get("/api/browse/authors", params={"unique_word_bucket": "1"}).json()["items"]]
+        assert authors1 == ["Real Author"]
+
+        # The histogram's own count and the click-through list's length must
+        # agree, not just both happen to exclude Various independently.
+        assert hist["1"] == len(authors1)
+    finally:
+        restore()
+
+
+@pg
 def test_shared_word_does_not_cross_contaminate_author_or_book_filters():
     # Regression: browse_books(author=X) and browse_authors(book_id=Y) both
     # reused the word-anchored EXISTS filter meant for browse_words, which

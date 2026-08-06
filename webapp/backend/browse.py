@@ -326,20 +326,27 @@ def _unique_word_bucket_filter(scope: Literal["book", "author"], bucket_label: s
                           FROM {s}.word_book wb2
                           JOIN {s}.word w2 ON w2.id = wb2.word_id AND w2.active
                           GROUP BY wb2.word_id HAVING count(*) = 1"""
+        cte_params: list = []
         key_col = "b.id"
     else:
+        # PLACEHOLDER_AUTHORS ("Various", "Unknown Author", ...) excluded here
+        # too -- browse_authors (the click-through target) already excludes
+        # them from its own listing, so counting them here would make this
+        # bucket's count not match what that filtered list actually returns.
         single_cte = f"""SELECT wb2.word_id, min(b2.author) AS key
                           FROM {s}.word_book wb2
                           JOIN {s}.book b2 ON b2.id = wb2.book_id
                               AND b2.author IS NOT NULL AND b2.author != ''
+                              AND b2.author != ALL(%s)
                           JOIN {s}.word w2 ON w2.id = wb2.word_id AND w2.active
                           GROUP BY wb2.word_id HAVING count(DISTINCT b2.author) = 1"""
+        cte_params = [list(PLACEHOLDER_AUTHORS)]
         key_col = "b.author"
 
     if lo == 0 and hi == 0:
-        return f"NOT EXISTS (SELECT 1 FROM ({single_cte}) sw WHERE sw.key = {key_col})", []
+        return f"NOT EXISTS (SELECT 1 FROM ({single_cte}) sw WHERE sw.key = {key_col})", cte_params
     hi_clause = "" if hi is None else "AND count(*) <= %s"
-    params = [lo] if hi is None else [lo, hi]
+    params = cte_params + ([lo] if hi is None else [lo, hi])
     return (
         f"""{key_col} IN (
             SELECT sw.key FROM ({single_cte}) sw
@@ -1851,20 +1858,29 @@ def browse_unique_word_histogram(
                     GROUP BY b.id"""
             )
         else:
+            # PLACEHOLDER_AUTHORS excluded on both sides -- from the "which
+            # authors get a row" list AND from counting as a co-occurrence
+            # that would disqualify some other real author's exclusivity --
+            # so this matches browse_authors, which already excludes them
+            # from its own listing (see _unique_word_bucket_filter's same
+            # exclusion for why the click-through count has to agree).
+            placeholders = list(PLACEHOLDER_AUTHORS)
             cur.execute(
                 f"""WITH single_author_words AS (
                         SELECT wb.word_id, min(b.author) AS author
                         FROM {s}.word_book wb
-                        JOIN {s}.book b ON b.id = wb.book_id AND b.author IS NOT NULL AND b.author != ''
+                        JOIN {s}.book b ON b.id = wb.book_id AND b.author IS NOT NULL
+                            AND b.author != '' AND b.author != ALL(%s)
                         JOIN {s}.word w ON w.id = wb.word_id AND w.active
                         GROUP BY wb.word_id
                         HAVING count(DISTINCT b.author) = 1
                     )
                     SELECT a.author, count(saw.word_id)
                     FROM (SELECT DISTINCT author FROM {s}.book
-                          WHERE author IS NOT NULL AND author != '') a
+                          WHERE author IS NOT NULL AND author != '' AND author != ALL(%s)) a
                     LEFT JOIN single_author_words saw ON saw.author = a.author
-                    GROUP BY a.author"""
+                    GROUP BY a.author""",
+                (placeholders, placeholders),
             )
         counts = Counter(_unique_word_bucket_label(row[1]) for row in cur.fetchall())
 
