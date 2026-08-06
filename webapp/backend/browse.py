@@ -273,6 +273,82 @@ def _build_word_filters(
     return filters, params
 
 
+# Fixed, named (not equal-width) buckets for "how many of this book's/
+# author's active words appear NOWHERE else in the corpus" -- confirmed live
+# against the real corpus: this distribution is heavily right-skewed (book
+# scope: median 0, p90 2, p99 11, max 251; author scope: median 1, p90 7,
+# p99 41, max 1752), so equal-width bins (as difficulty-bands uses, sensible
+# there since difficulty is bounded 0-100) would dump nearly everything into
+# one bucket and spread a handful of outliers across a mostly-empty axis.
+# These boundaries keep real detail in the low end where most of the corpus
+# actually sits, with a final open-ended overflow bucket for the long tail
+# (huge "Complete Works"-style compilations legitimately have dozens to
+# hundreds of words nothing else in the corpus uses). Shared by
+# /api/browse/unique-word-histogram (below) and the `unique_word_bucket`
+# click-through filter on /api/browse/books and /api/browse/authors.
+_UNIQUE_WORD_BUCKETS: list[tuple[int, int | None, str]] = [
+    (0, 0, "0"), (1, 1, "1"), (2, 2, "2"), (3, 5, "3-5"), (6, 10, "6-10"),
+    (11, 25, "11-25"), (26, 50, "26-50"), (51, 100, "51-100"), (101, None, "101+"),
+]
+
+
+def _unique_word_bucket_label(n: int) -> str:
+    for lo, hi, label in _UNIQUE_WORD_BUCKETS:
+        if hi is None or n <= hi:
+            return label
+    return _UNIQUE_WORD_BUCKETS[-1][2]  # unreachable (last bucket's hi is None)
+
+
+def _unique_word_bucket_filter(scope: Literal["book", "author"], bucket_label: str) -> tuple[str, list]:
+    """A WHERE-clause fragment (append to `filters`) + its params, restricting
+    to books (scope='book', tests b.id) or to books BY an author (scope=
+    'author', tests b.author) whose exclusive-word count falls in the named
+    bucket -- same word_book-exclusivity semantics /api/browse/words?
+    exclusive=true and /api/browse/unique-word-histogram both use, just
+    aggregated per book/author here instead of per word. Both browse_books
+    and browse_authors already alias the book table `b`, so this composes
+    directly into either endpoint's existing `filters` list.
+
+    The "0" bucket is handled separately (NOT EXISTS rather than a HAVING
+    count(*) BETWEEN): a book/author with zero exclusive words has no rows
+    at all in the single-book/author-words aggregate, so a `HAVING count(*)
+    >= 0` over an inner join would never match it -- there's no row to
+    match in the first place."""
+    for lo, hi, label in _UNIQUE_WORD_BUCKETS:
+        if label == bucket_label:
+            break
+    else:
+        raise HTTPException(404, f"unknown unique-word bucket {bucket_label!r}")
+
+    s = _main.SCHEMA
+    if scope == "book":
+        single_cte = f"""SELECT wb2.word_id, min(wb2.book_id) AS key
+                          FROM {s}.word_book wb2
+                          JOIN {s}.word w2 ON w2.id = wb2.word_id AND w2.active
+                          GROUP BY wb2.word_id HAVING count(*) = 1"""
+        key_col = "b.id"
+    else:
+        single_cte = f"""SELECT wb2.word_id, min(b2.author) AS key
+                          FROM {s}.word_book wb2
+                          JOIN {s}.book b2 ON b2.id = wb2.book_id
+                              AND b2.author IS NOT NULL AND b2.author != ''
+                          JOIN {s}.word w2 ON w2.id = wb2.word_id AND w2.active
+                          GROUP BY wb2.word_id HAVING count(DISTINCT b2.author) = 1"""
+        key_col = "b.author"
+
+    if lo == 0 and hi == 0:
+        return f"NOT EXISTS (SELECT 1 FROM ({single_cte}) sw WHERE sw.key = {key_col})", []
+    hi_clause = "" if hi is None else "AND count(*) <= %s"
+    params = [lo] if hi is None else [lo, hi]
+    return (
+        f"""{key_col} IN (
+            SELECT sw.key FROM ({single_cte}) sw
+            GROUP BY sw.key HAVING count(*) >= %s {hi_clause}
+        )""",
+        params,
+    )
+
+
 # --- /api/browse/authors -------------------------------------------------------
 
 class AuthorRow(BaseModel):
@@ -313,6 +389,7 @@ def browse_authors(
     archaic: list[str] = Query([]),
     pos: list[str] = Query([]),
     quizzable_only: bool = False,
+    unique_word_bucket: str | None = None,
     letter: str | None = Query(None, min_length=1, max_length=1),
     random: bool = False,
     page: int = Query(1, ge=1),
@@ -355,6 +432,10 @@ def browse_authors(
     if q:
         filters.append("b.author ILIKE %s")
         params.append(f"%{q}%")
+    if unique_word_bucket:
+        clause, bucket_params = _unique_word_bucket_filter("author", unique_word_bucket)
+        filters.append(clause)
+        params.extend(bucket_params)
     where = " AND ".join(filters)
 
     # fame_score lives on author_fame, joined separately below (at the point
@@ -562,6 +643,7 @@ def browse_books(
     archaic: list[str] = Query([]),
     pos: list[str] = Query([]),
     quizzable_only: bool = False,
+    unique_word_bucket: str | None = None,
     letter: str | None = Query(None, min_length=1, max_length=1),
     random: bool = False,
     page: int = Query(1, ge=1),
@@ -605,6 +687,10 @@ def browse_books(
     if fame_max is not None:
         filters.append("bf.fame_score <= %s")
         params.append(fame_max)
+    if unique_word_bucket:
+        clause, bucket_params = _unique_word_bucket_filter("book", unique_word_bucket)
+        filters.append(clause)
+        params.extend(bucket_params)
     where = " AND ".join(filters)
     if random:
         order_by = "random()"
@@ -1719,6 +1805,70 @@ def browse_difficulty_bands(
         results.append(DifficultyBandCount(band_min=None, band_max=None, label="Not yet scored",
                                             word_count=unscored))
     return results
+
+
+# --- /api/browse/unique-word-histogram --------------------------------------------
+# _UNIQUE_WORD_BUCKETS / _unique_word_bucket_label live up near
+# _build_word_filters (shared with the unique_word_bucket click-through
+# filter on /api/browse/books and /api/browse/authors).
+
+class UniqueWordBucket(BaseModel):
+    label: str
+    count: int  # number of books (or authors) whose exclusive-word count falls in this bucket
+
+
+@router.get("/api/browse/unique-word-histogram", response_model=list[UniqueWordBucket])
+def browse_unique_word_histogram(
+    scope: Literal["book", "author"] = "book",
+    _: dict = Depends(_main.require_viewer),
+) -> list[UniqueWordBucket]:
+    """Distribution of "how many of this book's (or author's) active words
+    appear NOWHERE else in the corpus" -- the same exclusivity semantics
+    /api/browse/words?exclusive=true uses for one book/author at a time,
+    computed here for every book/author at once via a single aggregate
+    query (a per-row NOT EXISTS, workable for one book, would mean 20k+
+    separate correlated subqueries at this scale). A word with exactly one
+    word_book row is exclusive to that row's book; "exclusive to an author"
+    groups by author instead of book_id first, same MIN-collapse trick.
+    Every bucket in _UNIQUE_WORD_BUCKETS is always present (count=0 rather
+    than omitted) so the frontend's x-axis never reflows between scopes."""
+    from collections import Counter
+    s = _main.SCHEMA
+
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        if scope == "book":
+            cur.execute(
+                f"""WITH single_book_words AS (
+                        SELECT wb.word_id, min(wb.book_id) AS book_id
+                        FROM {s}.word_book wb
+                        JOIN {s}.word w ON w.id = wb.word_id AND w.active
+                        GROUP BY wb.word_id
+                        HAVING count(*) = 1
+                    )
+                    SELECT b.id, count(sbw.word_id)
+                    FROM {s}.book b
+                    LEFT JOIN single_book_words sbw ON sbw.book_id = b.id
+                    GROUP BY b.id"""
+            )
+        else:
+            cur.execute(
+                f"""WITH single_author_words AS (
+                        SELECT wb.word_id, min(b.author) AS author
+                        FROM {s}.word_book wb
+                        JOIN {s}.book b ON b.id = wb.book_id AND b.author IS NOT NULL AND b.author != ''
+                        JOIN {s}.word w ON w.id = wb.word_id AND w.active
+                        GROUP BY wb.word_id
+                        HAVING count(DISTINCT b.author) = 1
+                    )
+                    SELECT a.author, count(saw.word_id)
+                    FROM (SELECT DISTINCT author FROM {s}.book
+                          WHERE author IS NOT NULL AND author != '') a
+                    LEFT JOIN single_author_words saw ON saw.author = a.author
+                    GROUP BY a.author"""
+            )
+        counts = Counter(_unique_word_bucket_label(row[1]) for row in cur.fetchall())
+
+    return [UniqueWordBucket(label=label, count=counts.get(label, 0)) for _, _, label in _UNIQUE_WORD_BUCKETS]
 
 
 # --- /api/browse/pos-values ------------------------------------------------------

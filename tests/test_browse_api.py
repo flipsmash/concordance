@@ -299,6 +299,108 @@ def test_exclusive_shrinks_domain_summary_and_difficulty_bands_totals():
 
 
 @pg
+def test_unique_word_histogram_buckets_book_and_author_scopes():
+    schema = "cc_test_browse_uw_hist"
+    client, conn, restore = _setup(schema)
+    try:
+        b1 = _insert_book(conn, schema, "Book A", author="Author One")
+        b2 = _insert_book(conn, schema, "Book B", author="Author One")
+        b3 = _insert_book(conn, schema, "Book C", author="Author Two")
+
+        # Book A: 2 solo words -> book bucket "2". Author One: 3 words total
+        # exclusive to them (2 solo + 1 shared-with-own-other-book) -> "3-5".
+        solo1 = _insert_word(conn, schema, "solo1")
+        solo2 = _insert_word(conn, schema, "solo2")
+        _link(conn, schema, solo1, b1)
+        _link(conn, schema, solo2, b1)
+
+        same_author = _insert_word(conn, schema, "sameauthor")
+        _link(conn, schema, same_author, b1)
+        _link(conn, schema, same_author, b2)
+
+        # Book B on its own: 0 solo words (its only word is shared with A).
+        # Book C: 1 word, exclusive to both the book and Author Two.
+        cross = _insert_word(conn, schema, "crossauthorword")
+        _link(conn, schema, cross, b3)
+        conn.commit()
+
+        book_hist = {r["label"]: r["count"] for r in
+                     client.get("/api/browse/unique-word-histogram", params={"scope": "book"}).json()}
+        assert book_hist["2"] == 1     # Book A: solo1 + solo2
+        assert book_hist["0"] == 1     # Book B: its only word (sameauthor) isn't exclusive to it alone
+        assert book_hist["1"] == 1     # Book C: crossauthorword
+
+        author_hist = {r["label"]: r["count"] for r in
+                       client.get("/api/browse/unique-word-histogram", params={"scope": "author"}).json()}
+        assert author_hist["3-5"] == 1  # Author One: solo1+solo2+sameauthor = 3
+        assert author_hist["1"] == 1    # Author Two: crossauthorword
+
+        # Every named bucket is always present, even when empty.
+        assert {r["label"] for r in
+                client.get("/api/browse/unique-word-histogram", params={"scope": "book"}).json()} == \
+               {"0", "1", "2", "3-5", "6-10", "11-25", "26-50", "51-100", "101+"}
+    finally:
+        restore()
+
+
+@pg
+def test_unique_word_bucket_filters_books_and_authors():
+    # Same fixture as test_unique_word_histogram_buckets_book_and_author_scopes
+    # (Book A: 2 solo words -> bucket "2"; Book B: 0 solo words -> bucket "0";
+    # Book C: 1 solo word -> bucket "1"; Author One: 3 words total -> "3-5";
+    # Author Two: 1 word -> "1"), but exercising the click-through filter on
+    # /api/browse/books and /api/browse/authors instead of the histogram
+    # endpoint -- the "0" bucket is the one that needs its own NOT EXISTS
+    # branch (a book with zero exclusive words has no row at all in the
+    # underlying aggregate, so a naive `HAVING count(*) >= 0` would never
+    # match it).
+    schema = "cc_test_browse_uw_filter"
+    client, conn, restore = _setup(schema)
+    try:
+        b1 = _insert_book(conn, schema, "Book A", author="Author One")
+        b2 = _insert_book(conn, schema, "Book B", author="Author One")
+        b3 = _insert_book(conn, schema, "Book C", author="Author Two")
+
+        solo1 = _insert_word(conn, schema, "solo1")
+        solo2 = _insert_word(conn, schema, "solo2")
+        _link(conn, schema, solo1, b1)
+        _link(conn, schema, solo2, b1)
+
+        same_author = _insert_word(conn, schema, "sameauthor")
+        _link(conn, schema, same_author, b1)
+        _link(conn, schema, same_author, b2)
+
+        cross = _insert_word(conn, schema, "crossauthorword")
+        _link(conn, schema, cross, b3)
+        conn.commit()
+
+        titles = [b["title"] for b in
+                  client.get("/api/browse/books", params={"unique_word_bucket": "2"}).json()["items"]]
+        assert titles == ["Book A"]
+
+        titles0 = [b["title"] for b in
+                   client.get("/api/browse/books", params={"unique_word_bucket": "0"}).json()["items"]]
+        assert titles0 == ["Book B"]
+
+        titles1 = [b["title"] for b in
+                   client.get("/api/browse/books", params={"unique_word_bucket": "1"}).json()["items"]]
+        assert titles1 == ["Book C"]
+
+        authors35 = [a["author"] for a in
+                     client.get("/api/browse/authors", params={"unique_word_bucket": "3-5"}).json()["items"]]
+        assert authors35 == ["Author One"]
+
+        authors1 = [a["author"] for a in
+                    client.get("/api/browse/authors", params={"unique_word_bucket": "1"}).json()["items"]]
+        assert authors1 == ["Author Two"]
+
+        res = client.get("/api/browse/books", params={"unique_word_bucket": "not-a-real-bucket"})
+        assert res.status_code == 404
+    finally:
+        restore()
+
+
+@pg
 def test_shared_word_does_not_cross_contaminate_author_or_book_filters():
     # Regression: browse_books(author=X) and browse_authors(book_id=Y) both
     # reused the word-anchored EXISTS filter meant for browse_words, which

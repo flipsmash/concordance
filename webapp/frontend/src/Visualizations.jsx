@@ -1,9 +1,12 @@
-import { Suspense, lazy } from 'react'
+import { Suspense, lazy, useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import AuthorSelect from './AuthorSelect'
 import BookSelect from './BookSelect'
+import DifficultyHistogram from './DifficultyHistogram'
 import './Browse.css'
 import './Visualizations.css'
+
+const API_BASE = ''
 
 // Lazy for the same reason App.jsx already lazy-loads GraphView: pulls in
 // react-force-graph-2d's canvas/d3-force bundle only once this page is
@@ -17,8 +20,31 @@ const GraphView = lazy(() => import('./GraphView'))
 // full search), books by vocabulary overlap (pick one, land on its ego
 // graph), authors by vocabulary overlap (pick one OR see all of them at
 // once).
+// UniqueWordBucket ({label, count}) -> DifficultyHistogram's generic
+// {band_min, band_max, label, word_count} bar shape. band_min/max only
+// matter for DifficultyHistogram's click-to-filter highlighting and its
+// "unscored" styling special-case (band_min === null) -- neither applies
+// here (these bars aren't clickable filters), so any non-null placeholder
+// works.
+function toHistBands(buckets) {
+  return buckets.map((b) => ({ band_min: 0, band_max: 0, label: b.label, word_count: b.count }))
+}
+
 function Visualizations() {
   const navigate = useNavigate()
+  const [bookHist, setBookHist] = useState([])
+  const [authorHist, setAuthorHist] = useState([])
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/browse/unique-word-histogram?scope=book`)
+      .then((res) => res.json())
+      .then((data) => setBookHist(toHistBands(data)))
+      .catch(() => {})
+    fetch(`${API_BASE}/api/browse/unique-word-histogram?scope=author`)
+      .then((res) => res.json())
+      .then((data) => setAuthorHist(toHistBands(data)))
+      .catch(() => {})
+  }, [])
 
   return (
     <div className="browse-page">
@@ -58,6 +84,34 @@ function Visualizations() {
             See the top authors at once →
           </Link>
         </div>
+      </section>
+
+      <section className="browse-facets viz-section">
+        <h2 className="viz-heading">Words unique to each book</h2>
+        <p className="viz-description">
+          How many books contribute vocabulary nothing else in the corpus does, and how many of
+          their words that amounts to -- most books share nearly everything they use with at
+          least one other book, but a few contribute dozens or more words all their own.
+        </p>
+        <DifficultyHistogram
+          bands={bookHist}
+          selectedBand={null}
+          onSelect={(b) => navigate(`/app/books?unique_word_bucket=${encodeURIComponent(b.label)}`)}
+        />
+      </section>
+
+      <section className="browse-facets viz-section">
+        <h2 className="viz-heading">Words unique to each author</h2>
+        <p className="viz-description">
+          Same question, aggregated across an author's whole body of work -- a word counts as
+          theirs alone even if it appears in two of their own books, as long as no other author's
+          book uses it.
+        </p>
+        <DifficultyHistogram
+          bands={authorHist}
+          selectedBand={null}
+          onSelect={(b) => navigate(`/app/authors?unique_word_bucket=${encodeURIComponent(b.label)}`)}
+        />
       </section>
 
       <section className="browse-facets viz-section">

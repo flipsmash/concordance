@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import AlphabetStrip from './AlphabetStrip'
 import SortControl from './SortControl'
 import { usePagedTable } from './usePagedTable'
 import './Authors.css'
+import './Browse.css'
 
 const API_BASE = ''
 const PAGE_SIZE = 30
@@ -36,11 +37,17 @@ function overallDifficultyLabel(overall) {
 // path (author -> work -> words) rather than a flat filter bag.
 function Authors() {
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [query, setQuery] = useState('')
   const [debounced, setDebounced] = useState('')
   const [letter, setLetter] = useState(null)
   const [fameMin, setFameMin] = useState('')
   const [fameMax, setFameMax] = useState('')
+  // Deep-linked from the Visualizations page's "words unique to each author"
+  // histogram (?unique_word_bucket=<label>) -- read once at mount, not kept
+  // in sync with the URL afterward, same one-way-in pattern as every other
+  // filter here.
+  const uniqueWordBucket = searchParams.get('unique_word_bucket')
 
   useEffect(() => {
     const handle = setTimeout(() => setDebounced(query.trim()), 200)
@@ -52,11 +59,20 @@ function Authors() {
     pageSize: PAGE_SIZE,
     defaultSort: 'author',
     defaultDir: 'asc',
-    extraParams: { q: debounced, letter, fame_min: fameMin, fame_max: fameMax },
+    extraParams: { q: debounced, letter, fame_min: fameMin, fame_max: fameMax, unique_word_bucket: uniqueWordBucket },
   })
 
   function changeLetter(l) {
     setLetter(l)
+    setPage(1)
+  }
+
+  function clearUniqueWordBucket() {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      next.delete('unique_word_bucket')
+      return next
+    })
     setPage(1)
   }
 
@@ -117,6 +133,14 @@ function Authors() {
         </label>
         <SortControl fields={SORT_FIELDS} sort={sort} dir={dir} onSort={handleSort} />
       </div>
+
+      {uniqueWordBucket && (
+        <div className="browse-shelf">
+          <button type="button" className="browse-chip" onClick={clearUniqueWordBucket}>
+            Unique words: {uniqueWordBucket} ×
+          </button>
+        </div>
+      )}
 
       {error && <div className="error-banner">{error}</div>}
 
