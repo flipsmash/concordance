@@ -30,9 +30,13 @@ function AuthorWorks() {
   const [authorRow, setAuthorRow] = useState(null) // this author's own aggregate row (book_count, fame, ...)
   const [domainSummary, setDomainSummary] = useState(null)
   const [bands, setBands] = useState([])
+  const [exclusiveCount, setExclusiveCount] = useState(null) // words appearing nowhere else in the corpus
 
-  const { selectedDomain, selectedBand, toggleDomain, toggleBand, clear, wordParams, domainSummaryParams, bandsParams } =
-    useWordFilters()
+  const {
+    selectedDomain, selectedBand, exclusiveOnly,
+    toggleDomain, toggleBand, toggleExclusive, clear,
+    wordParams, domainSummaryParams, bandsParams,
+  } = useWordFilters()
 
   const { items, total, page, setPage, loading, error, totalPages } = usePagedTable({
     endpoint: '/api/browse/books',
@@ -73,6 +77,18 @@ function AuthorWorks() {
       .then(setBands)
       .catch(() => {})
   }, [author, JSON.stringify(bandsParams)]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Deliberately author + exclusive only -- never wordParams -- so this
+  // answers "how many words are unique to this author, period," not
+  // "...among the currently-selected domain/difficulty." Same
+  // /api/browse/words code path the list below uses, so the two numbers
+  // can never diverge.
+  useEffect(() => {
+    fetch(`${API_BASE}/api/browse/words?author=${encodeURIComponent(author)}&exclusive=true&page_size=1`)
+      .then((res) => res.json())
+      .then((data) => setExclusiveCount(data.total))
+      .catch(() => {})
+  }, [author])
 
   function selectDomain(bucket) {
     toggleDomain(bucket)
@@ -239,7 +255,7 @@ function AuthorWorks() {
         </button>
       </footer>
 
-      {(selectedDomainName || selectedBandLabel) && (
+      {(selectedDomainName || selectedBandLabel || exclusiveOnly) && (
         <div className="browse-shelf">
           {selectedDomainName && (
             <button type="button" className="browse-chip" onClick={() => selectDomain(selectedDomain)}>
@@ -261,6 +277,11 @@ function AuthorWorks() {
               {selectedBandLabel} ×
             </button>
           )}
+          {exclusiveOnly && (
+            <button type="button" className="browse-chip" onClick={toggleExclusive}>
+              Unique to this author ×
+            </button>
+          )}
           <button type="button" className="browse-clear-all" onClick={clearFilters}>
             Clear filters
           </button>
@@ -268,6 +289,20 @@ function AuthorWorks() {
       )}
 
       {wordsError && <div className="error-banner">{wordsError}</div>}
+
+      {exclusiveCount !== null && (
+        <button
+          type="button"
+          className={`work-detail-exclusive-tile${exclusiveOnly ? ' active' : ''}`}
+          onClick={() => {
+            toggleExclusive()
+            setWordPage(1)
+          }}
+        >
+          <span className="work-detail-exclusive-value">{exclusiveCount}</span>
+          <span className="work-detail-exclusive-label">words unique to this author</span>
+        </button>
+      )}
 
       <h2 className="work-detail-heading">Words ({wordTotal})</h2>
       <ul className="browse-results">

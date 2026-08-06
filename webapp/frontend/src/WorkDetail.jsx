@@ -31,9 +31,13 @@ function WorkDetail() {
   const [bands, setBands] = useState([])
   const [related, setRelated] = useState(null) // null = not loaded yet, [] = loaded, none found
   const [compareBook, setCompareBook] = useState(null) // the related book currently being compared, or null
+  const [exclusiveCount, setExclusiveCount] = useState(null) // words appearing nowhere else in the corpus
 
-  const { selectedDomain, selectedBand, toggleDomain, toggleBand, clear, wordParams, domainSummaryParams, bandsParams } =
-    useWordFilters()
+  const {
+    selectedDomain, selectedBand, exclusiveOnly,
+    toggleDomain, toggleBand, toggleExclusive, clear,
+    wordParams, domainSummaryParams, bandsParams,
+  } = useWordFilters()
 
   useEffect(() => {
     fetch(`${API_BASE}/api/browse/books?book_id=${bookId}`)
@@ -57,6 +61,17 @@ function WorkDetail() {
       .then(setBands)
       .catch(() => {})
   }, [bookId, JSON.stringify(bandsParams)]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Deliberately book_id + exclusive only -- never wordParams -- so this
+  // answers "how many words are unique to this book, period," not "...among
+  // the currently-selected domain/difficulty." Same /api/browse/words code
+  // path the list below uses, so the two numbers can never diverge.
+  useEffect(() => {
+    fetch(`${API_BASE}/api/browse/words?book_id=${bookId}&exclusive=true&page_size=1`)
+      .then((res) => res.json())
+      .then((data) => setExclusiveCount(data.total))
+      .catch(() => {})
+  }, [bookId])
 
   function surpriseMe() {
     fetch(`${API_BASE}/api/browse/books?random=true`)
@@ -213,7 +228,7 @@ function WorkDetail() {
 
       {error && <div className="error-banner">{error}</div>}
 
-      {(selectedDomainName || selectedBandLabel) && (
+      {(selectedDomainName || selectedBandLabel || exclusiveOnly) && (
         <div className="browse-shelf">
           {selectedDomainName && (
             <button type="button" className="browse-chip" onClick={() => selectDomain(selectedDomain)}>
@@ -235,10 +250,29 @@ function WorkDetail() {
               {selectedBandLabel} ×
             </button>
           )}
+          {exclusiveOnly && (
+            <button type="button" className="browse-chip" onClick={toggleExclusive}>
+              Unique to this book ×
+            </button>
+          )}
           <button type="button" className="browse-clear-all" onClick={clearFilters}>
             Clear filters
           </button>
         </div>
+      )}
+
+      {exclusiveCount !== null && (
+        <button
+          type="button"
+          className={`work-detail-exclusive-tile${exclusiveOnly ? ' active' : ''}`}
+          onClick={() => {
+            toggleExclusive()
+            setPage(1)
+          }}
+        >
+          <span className="work-detail-exclusive-value">{exclusiveCount}</span>
+          <span className="work-detail-exclusive-label">words unique to this book</span>
+        </button>
       )}
 
       <h2 className="work-detail-heading">Words ({total})</h2>

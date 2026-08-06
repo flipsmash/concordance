@@ -31,3 +31,46 @@
   color: var(--text-h);
   margin: 0;
 }
+
+/* "N words unique to this book/author" -- a clickable stat tile (visual
+   language borrowed from Progress.jsx's progress-stat-tile) that doubles as
+   the exclusive-words filter toggle, same click-to-filter interaction as a
+   domain bar or difficulty band. */
+.work-detail-exclusive-tile {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 20px;
+  background: none;
+  cursor: pointer;
+  width: fit-content;
+}
+
+.work-detail-exclusive-tile:hover {
+  border-color: var(--accent);
+}
+
+.work-detail-exclusive-tile.active {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.work-detail-exclusive-tile.active .work-detail-exclusive-value,
+.work-detail-exclusive-tile.active .work-detail-exclusive-label {
+  color: white;
+}
+
+.work-detail-exclusive-value {
+  font-family: var(--mono);
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--text-h);
+}
+
+.work-detail-exclusive-label {
+  font-size: 12px;
+  color: var(--text);
+}

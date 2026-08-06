@@ -143,6 +143,7 @@ def _build_word_filters(
     all_top_code: list[str] = [],
     uncategorized: bool = False,
     unscored_only: bool = False,
+    exclusive: bool = False,
 ) -> tuple[list[str], list]:
     """The combinable-facet WHERE clause every endpoint below shares, each
     facet independently optional -- author and book_id can both be set at
@@ -179,7 +180,19 @@ def _build_word_filters(
     same as `top_code`'s own validation living in its endpoint. `unscored_only`
     only means anything against a LEFT JOIN word_difficulty; a caller that
     INNER JOINs word_difficulty (as browse_difficulty_bands's own band loop
-    does) must never pass it."""
+    does) must never pass it.
+
+    `exclusive` answers "does every word_book row for this word point back
+    to book_id (or, lacking that, to a book by `author`)" -- i.e. this word
+    appears NOWHERE else in the corpus. Meaningless without book_id or
+    author already narrowing the scope, so it's a silent no-op if neither is
+    set rather than a validation error (mirrors this helper's existing
+    "compose whatever it's given" philosophy). book_id takes precedence if
+    both are somehow set at once -- never happens from the current UI, which
+    always passes exactly one of the two. `!= ALL(%s)` (not `NOT (... = ANY
+    (%s))`) so this reads directly as "a word_book row pointing outside this
+    set exists" -- generalizes correctly to a multi-book book_id even though
+    every current caller only ever passes one."""
     filters = ["w.active"]
     params: list = []
 
@@ -194,6 +207,19 @@ def _build_word_filters(
             f"""EXISTS (SELECT 1 FROM {_main.SCHEMA}.word_book wb
                         JOIN {_main.SCHEMA}.book b ON b.id = wb.book_id
                         WHERE wb.word_id = w.id AND b.author = %s)"""
+        )
+        params.append(author)
+    if exclusive and book_id:
+        filters.append(
+            f"""NOT EXISTS (SELECT 1 FROM {_main.SCHEMA}.word_book wb2
+                            WHERE wb2.word_id = w.id AND wb2.book_id != ALL(%s))"""
+        )
+        params.append(book_id)
+    elif exclusive and author:
+        filters.append(
+            f"""NOT EXISTS (SELECT 1 FROM {_main.SCHEMA}.word_book wb2
+                            JOIN {_main.SCHEMA}.book b2 ON b2.id = wb2.book_id
+                            WHERE wb2.word_id = w.id AND b2.author IS DISTINCT FROM %s)"""
         )
         params.append(author)
     if domain:
@@ -1416,6 +1442,7 @@ def browse_words(
     archaic: list[str] = Query([]),
     pos: list[str] = Query([]),
     quizzable_only: bool = False,
+    exclusive: bool = False,
     q: str | None = None,
     letter: str | None = Query(None, min_length=1, max_length=1),
     random: bool = False,
@@ -1438,6 +1465,7 @@ def browse_words(
     filters, params = _build_word_filters(
         author, book_id, domain, difficulty_min, difficulty_max, archaic, pos, quizzable_only,
         top_code=top_code, all_top_code=all_top_code, uncategorized=uncategorized, unscored_only=unscored_only,
+        exclusive=exclusive,
     )
     if letter:
         filters.append("w.lemma_lc LIKE %s")
@@ -1567,6 +1595,7 @@ def browse_domain_summary(
     archaic: list[str] = Query([]),
     pos: list[str] = Query([]),
     quizzable_only: bool = False,
+    exclusive: bool = False,
     _: dict = Depends(_main.require_viewer),
 ) -> DomainSummary:
     """Like /api/browse/domains, but wrapped with `total_words` and an
@@ -1581,12 +1610,12 @@ def browse_domain_summary(
 
     No `domain`/`uncategorized` param here -- the bucket breakdown (including
     the uncategorized count below) IS this endpoint's output, so it can't
-    also be an input filter; `unscored_only` (like `difficulty_min/max`) is
-    fair game since it narrows which words get bucketed, not which bucket a
-    word lands in."""
+    also be an input filter; `unscored_only`/`exclusive` (like
+    `difficulty_min/max`) are fair game since they narrow which words get
+    bucketed, not which bucket a word lands in."""
     base_filters, base_params = _build_word_filters(
         author, book_id, [], difficulty_min, difficulty_max, archaic, pos, quizzable_only,
-        unscored_only=unscored_only,
+        unscored_only=unscored_only, exclusive=exclusive,
     )
     where = " AND ".join(base_filters)
 
@@ -1595,7 +1624,7 @@ def browse_domain_summary(
 
         uncat_filters, uncat_params = _build_word_filters(
             author, book_id, [], difficulty_min, difficulty_max, archaic, pos, quizzable_only,
-            uncategorized=True, unscored_only=unscored_only,
+            uncategorized=True, unscored_only=unscored_only, exclusive=exclusive,
         )
         uncat_where = " AND ".join(uncat_filters)
         cur.execute(
@@ -1636,6 +1665,7 @@ def browse_difficulty_bands(
     archaic: list[str] = Query([]),
     pos: list[str] = Query([]),
     quizzable_only: bool = False,
+    exclusive: bool = False,
     band_width: int = Query(20, ge=5, le=50),
     _: dict = Depends(_main.require_viewer),
 ) -> list[DifficultyBandCount]:
@@ -1645,12 +1675,12 @@ def browse_difficulty_bands(
     rather than silently vanishing once a difficulty filter narrows it.
 
     No `difficulty_min/max`/`unscored_only` here -- the band breakdown IS
-    this endpoint's output; `domain`/`uncategorized` (like the other facets)
-    are fair game since they narrow which words get banded, not which band a
-    word lands in."""
+    this endpoint's output; `domain`/`uncategorized`/`exclusive` (like the
+    other facets) are fair game since they narrow which words get banded,
+    not which band a word lands in."""
     base_filters, base_params = _build_word_filters(
         author, book_id, domain, None, None, archaic, pos, quizzable_only,
-        uncategorized=uncategorized,
+        uncategorized=uncategorized, exclusive=exclusive,
     )
     where = " AND ".join(base_filters)
 
@@ -1676,7 +1706,7 @@ def browse_difficulty_bands(
 
         unscored_filters, unscored_params = _build_word_filters(
             author, book_id, domain, None, None, archaic, pos, quizzable_only,
-            uncategorized=uncategorized, unscored_only=True,
+            uncategorized=uncategorized, unscored_only=True, exclusive=exclusive,
         )
         unscored_where = " AND ".join(unscored_filters)
         cur.execute(

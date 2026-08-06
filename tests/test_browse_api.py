@@ -181,6 +181,124 @@ def test_word_in_multiple_books_dedupes_and_does_not_inflate_total():
 
 
 @pg
+def test_exclusive_filter_book_vs_author_semantics():
+    # "Exclusive to book X" means every word_book row for the word points to
+    # X; "exclusive to author X" means every one points to a book BY X --
+    # a stricter test for a book than an author, since a word appearing in
+    # two books by the SAME author is exclusive to the author but not to
+    # either individual book.
+    schema = "cc_test_browse_exclusive"
+    client, conn, restore = _setup(schema)
+    try:
+        b1 = _insert_book(conn, schema, "Book A", author="Author One")
+        b2 = _insert_book(conn, schema, "Book B", author="Author One")
+        b3 = _insert_book(conn, schema, "Book C", author="Author Two")
+
+        solo = _insert_word(conn, schema, "solo")  # only ever in Book A
+        _link(conn, schema, solo, b1)
+
+        same_author = _insert_word(conn, schema, "sameauthor")  # A and B, both Author One
+        _link(conn, schema, same_author, b1)
+        _link(conn, schema, same_author, b2)
+
+        cross_author = _insert_word(conn, schema, "crossauthor")  # A and C, different authors
+        _link(conn, schema, cross_author, b1)
+        _link(conn, schema, cross_author, b3)
+        conn.commit()
+
+        # Exclusive to Book A alone: only "solo" qualifies -- the other two
+        # both appear in at least one other book.
+        res = client.get("/api/browse/words", params={"book_id": [b1], "exclusive": True})
+        assert sorted(w["lemma"] for w in res.json()["items"]) == ["solo"]
+
+        # Exclusive to Author One: "solo" AND "sameauthor" both qualify --
+        # every book either appears in is by Author One -- but "crossauthor"
+        # doesn't, since Book C is by Author Two.
+        res2 = client.get("/api/browse/words", params={"author": "Author One", "exclusive": True})
+        assert sorted(w["lemma"] for w in res2.json()["items"]) == ["sameauthor", "solo"]
+
+        # Without exclusive=true, book_id=[b1] returns all three (the
+        # baseline this filter narrows from).
+        res3 = client.get("/api/browse/words", params={"book_id": [b1]})
+        assert sorted(w["lemma"] for w in res3.json()["items"]) == ["crossauthor", "sameauthor", "solo"]
+    finally:
+        restore()
+
+
+@pg
+def test_exclusive_filter_composes_with_domain_filter():
+    schema = "cc_test_browse_exclusive_domain"
+    client, conn, restore = _setup(schema)
+    try:
+        b1 = _insert_book(conn, schema, "Solo Book", author="Solo Author")
+        b2 = _insert_book(conn, schema, "Other Book", author="Other Author")
+        cat_science = _category(conn, schema, "F", "Nature Science Test")
+
+        # Exclusive to b1 AND tagged -- matches both filters.
+        target = _insert_word(conn, schema, "target")
+        _link(conn, schema, target, b1)
+        _tag_domain(conn, schema, target, cat_science)
+
+        # Exclusive to b1 but untagged -- fails the domain filter alone.
+        untagged = _insert_word(conn, schema, "untagged")
+        _link(conn, schema, untagged, b1)
+
+        # Tagged AND linked to b1, but ALSO in b2 -- fails exclusivity alone.
+        # Without the exclusive filter actually being applied, this decoy
+        # would incorrectly appear alongside "target" (domain+book_id alone
+        # both match it), which is exactly what a silently-ignored `exclusive`
+        # query param (e.g. an unrecognized FastAPI param) would let through.
+        shared_but_tagged = _insert_word(conn, schema, "sharedbuttagged")
+        _link(conn, schema, shared_but_tagged, b1)
+        _link(conn, schema, shared_but_tagged, b2)
+        _tag_domain(conn, schema, shared_but_tagged, cat_science)
+        conn.commit()
+
+        res = client.get(
+            "/api/browse/words",
+            params={"book_id": [b1], "exclusive": True, "domain": ["nature_science"]},
+        )
+        assert [w["lemma"] for w in res.json()["items"]] == ["target"]
+    finally:
+        restore()
+
+
+@pg
+def test_exclusive_shrinks_domain_summary_and_difficulty_bands_totals():
+    schema = "cc_test_browse_exclusive_charts"
+    client, conn, restore = _setup(schema)
+    try:
+        b1 = _insert_book(conn, schema, "Book A", author="Author One")
+        b2 = _insert_book(conn, schema, "Book B", author="Author One")
+
+        solo = _insert_word(conn, schema, "solo", difficulty=50.0)
+        _link(conn, schema, solo, b1)
+
+        shared = _insert_word(conn, schema, "shared", difficulty=50.0)
+        _link(conn, schema, shared, b1)
+        _link(conn, schema, shared, b2)
+        conn.commit()
+
+        summary_all = client.get("/api/browse/domain-summary", params={"book_id": [b1]}).json()
+        assert summary_all["total_words"] == 2
+
+        summary_exclusive = client.get(
+            "/api/browse/domain-summary", params={"book_id": [b1], "exclusive": True}
+        ).json()
+        assert summary_exclusive["total_words"] == 1
+
+        bands_all = client.get("/api/browse/difficulty-bands", params={"book_id": [b1]}).json()
+        assert sum(b["word_count"] for b in bands_all) == 2
+
+        bands_exclusive = client.get(
+            "/api/browse/difficulty-bands", params={"book_id": [b1], "exclusive": True}
+        ).json()
+        assert sum(b["word_count"] for b in bands_exclusive) == 1
+    finally:
+        restore()
+
+
+@pg
 def test_shared_word_does_not_cross_contaminate_author_or_book_filters():
     # Regression: browse_books(author=X) and browse_authors(book_id=Y) both
     # reused the word-anchored EXISTS filter meant for browse_words, which
