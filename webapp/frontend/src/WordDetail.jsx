@@ -327,7 +327,10 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
       )}
 
       <section className="word-detail-section">
-        <h2>Source</h2>
+        <h2>
+          {word.books.length === 1 ? 'Source' : 'Sources'}
+          {word.books.length > 0 && ` (${word.books.length})`}
+        </h2>
         {word.books.length > 0 ? (
           <>
             <ul className="source-books-list">
