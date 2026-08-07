@@ -1,9 +1,17 @@
 import { useState } from 'react'
 import './Pagination.css'
 
-// 1 … (current-2..current+2) … totalPages, collapsing the ellipsis away
-// when there's no real gap to hide. delta=2 keeps a little context around
-// the current page without the strip getting unwieldy.
+// 1 … (current-2..current+2) … X, collapsing the ellipsis away when there's
+// no real gap to hide. delta=2 keeps a little context around the current
+// page without the strip getting unwieldy.
+//
+// X is normally the last page, but a numbered button that just lands on
+// the same page "Last »" already reaches is dead weight -- once the gap is
+// big enough to matter, X becomes the page halfway through the remaining
+// distance instead (still a real jump forward, and clicking it again keeps
+// halving the distance to the end). A small gap (<=2 pages) just shows the
+// real last page as before -- there's no meaningful "remaining distance"
+// to offer a shortcut through.
 function buildPageList(current, total) {
   const delta = 2
   const start = Math.max(2, current - delta)
@@ -11,8 +19,12 @@ function buildPageList(current, total) {
   const pages = [1]
   if (start > 2) pages.push('…')
   for (let i = start; i <= end; i++) pages.push(i)
-  if (end < total - 1) pages.push('…')
-  if (total > 1) pages.push(total)
+  if (end < total - 1) {
+    pages.push('…')
+    pages.push(total - end > 2 ? Math.round((end + total) / 2) : total)
+  } else if (total > 1) {
+    pages.push(total)
+  }
   return pages
 }
 
