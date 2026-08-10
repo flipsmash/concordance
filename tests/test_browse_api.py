@@ -502,6 +502,44 @@ def test_browse_words_sorts_by_book_count():
 
 
 @pg
+def test_browse_books_and_authors_sort_by_unique_word_count():
+    schema = "cc_test_browse_uwc_sort"
+    client, conn, restore = _setup(schema)
+    try:
+        b1 = _insert_book(conn, schema, "Book One", author="Author One")
+        b2 = _insert_book(conn, schema, "Book Two", author="Author One")
+        b3 = _insert_book(conn, schema, "Book Three", author="Author Two")
+
+        w1 = _insert_word(conn, schema, "w1")
+        w2 = _insert_word(conn, schema, "w2")
+        w3 = _insert_word(conn, schema, "w3")
+        w4 = _insert_word(conn, schema, "w4")
+        shared = _insert_word(conn, schema, "sharedword")  # b1 (Author One) AND b3 (Author Two)
+
+        for w in (w1, w2, w3):
+            _link(conn, schema, w, b1)
+        _link(conn, schema, w4, b2)
+        _link(conn, schema, shared, b1)
+        _link(conn, schema, shared, b3)
+        conn.commit()
+
+        books = client.get("/api/browse/books", params={"sort": "unique_word_count", "dir": "desc"}).json()["items"]
+        assert [(b["title"], b["unique_word_count"]) for b in books] == [
+            ("Book One", 3),   # w1, w2, w3 -- "sharedword" also lives on b1 but isn't exclusive to it
+            ("Book Two", 1),   # w4
+            ("Book Three", 0), # its only word ("sharedword") is shared with Book One
+        ]
+
+        authors = client.get("/api/browse/authors", params={"sort": "unique_word_count", "dir": "desc"}).json()["items"]
+        assert [(a["author"], a["unique_word_count"]) for a in authors] == [
+            ("Author One", 4),  # w1, w2, w3, w4 -- "sharedword" also crosses to Author Two, so excluded
+            ("Author Two", 0),
+        ]
+    finally:
+        restore()
+
+
+@pg
 def test_combined_facets_intersect_regardless_of_which_is_set_first():
     schema = "cc_test_browse_combined"
     client, conn, restore = _setup(schema)

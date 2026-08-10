@@ -14,6 +14,7 @@ const PAGE_SIZE = 30
 const SORT_FIELDS = [
   { key: 'title', label: 'Title (A–Z)' },
   { key: 'word_count', label: 'Word count' },
+  { key: 'unique_word_count', label: 'Unique words contributed' },
   { key: 'difficulty', label: 'Avg. difficulty' },
   { key: 'density', label: 'Vocabulary density' },
   { key: 'overall_difficulty', label: 'Overall difficulty' },
@@ -156,6 +157,11 @@ function Books() {
                 </span>
                 {density && <span className="work-density">{density}</span>}
                 {overall && <span className="work-overall">{overall}</span>}
+                {sort === 'unique_word_count' && (
+                  <span className="work-unique-count">
+                    {b.unique_word_count} unique {b.unique_word_count === 1 ? 'word' : 'words'}
+                  </span>
+                )}
                 {b.fame_score != null && (
                   <span className="authors-fame-tag" title={b.fame_reasoning || ''}>
                     ⭐ {b.fame_score.toFixed(1)}

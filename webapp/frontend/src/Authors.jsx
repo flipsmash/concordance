@@ -14,6 +14,7 @@ const SORT_FIELDS = [
   { key: 'author', label: 'Name (A–Z)' },
   { key: 'book_count', label: 'Work count' },
   { key: 'word_count', label: 'Word count' },
+  { key: 'unique_word_count', label: 'Unique words contributed' },
   { key: 'difficulty', label: 'Avg. difficulty' },
   { key: 'density', label: 'Vocabulary density' },
   { key: 'overall_difficulty', label: 'Overall difficulty' },
@@ -162,6 +163,12 @@ function Authors() {
                 {a.mean_difficulty != null && <span> · {a.mean_difficulty.toFixed(1)} avg. difficulty</span>}
                 {density && <span> · {density}</span>}
                 {overall && <span> · {overall}</span>}
+                {sort === 'unique_word_count' && (
+                  <span>
+                    {' '}
+                    · {a.unique_word_count} unique {a.unique_word_count === 1 ? 'word' : 'words'}
+                  </span>
+                )}
                 {a.fame_score != null && (
                   <span title={a.fame_reasoning || ''}> · ⭐ {a.fame_score.toFixed(1)}</span>
                 )}

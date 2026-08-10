@@ -86,6 +86,7 @@ _BOOK_SORT_COLUMNS = {
     "density": "density",
     "overall_difficulty": "overall_difficulty",
     "fame": "fame_score",
+    "unique_word_count": "unique_word_count",
 }
 _AUTHOR_SORT_COLUMNS = {
     "author": "author",
@@ -95,6 +96,7 @@ _AUTHOR_SORT_COLUMNS = {
     "density": "density",
     "overall_difficulty": "overall_difficulty",
     "fame": "fame_score",
+    "unique_word_count": "unique_word_count",
 }
 # difficulty/density/overall_difficulty/fame are all sparse (a book with no
 # scored words, or no distinct_nonstop_word_count from archive_metadata.py,
@@ -375,6 +377,8 @@ class AuthorRow(BaseModel):
     overall_difficulty: float | None  # see BookRow.overall_difficulty
     fame_score: float | None      # 1-10, LLM-judged -- see concordance/fame.py
     fame_reasoning: str | None
+    unique_word_count: int  # see BookRow.unique_word_count -- same semantics,
+                             # aggregated across this author's whole body of work
 
 
 class AuthorPage(BaseModel):
@@ -402,7 +406,8 @@ def browse_authors(
     random: bool = False,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
-    sort: Literal["author", "book_count", "word_count", "difficulty", "density", "overall_difficulty", "fame"] = "word_count",
+    sort: Literal["author", "book_count", "word_count", "difficulty", "density", "overall_difficulty",
+                  "fame", "unique_word_count"] = "word_count",
     dir: Literal["asc", "desc"] = "desc",
     _: dict = Depends(_main.require_viewer),
 ) -> AuthorPage:
@@ -511,7 +516,27 @@ def browse_authors(
         # reasoning, computed here over authors instead of books.
         cur.execute(
             f"""
-            WITH book_word_counts AS (
+            WITH single_author_words AS (
+                -- Same exclusivity semantics as _unique_word_bucket_filter's
+                -- author branch/browse_unique_word_histogram (every word_book
+                -- row for this word points to a book by the SAME author,
+                -- globally -- not scoped to `where` below, since exclusivity
+                -- is a corpus-wide fact). PLACEHOLDER_AUTHORS excluded so an
+                -- author's unique_word_count here can't be inflated by
+                -- co-occurrence with an "Various"/"Unknown Author" anthology.
+                SELECT wb2.word_id, min(b2.author) AS author
+                FROM {_main.SCHEMA}.word_book wb2
+                JOIN {_main.SCHEMA}.book b2 ON b2.id = wb2.book_id
+                    AND b2.author IS NOT NULL AND b2.author != '' AND b2.author != ALL(%s)
+                JOIN {_main.SCHEMA}.word w2 ON w2.id = wb2.word_id AND w2.active
+                GROUP BY wb2.word_id HAVING count(DISTINCT b2.author) = 1
+            ),
+            author_unique_counts AS (
+                SELECT author, count(*) AS unique_word_count
+                FROM single_author_words
+                GROUP BY author
+            ),
+            book_word_counts AS (
                 SELECT b.author, b.id AS book_id, b.distinct_nonstop_word_count,
                        count(DISTINCT w.id) AS book_word_count
                 FROM {_main.SCHEMA}.book b
@@ -556,10 +581,12 @@ def browse_authors(
             ),
             author_base AS (
                 SELECT aws.author, ab.book_count, aws.word_count, aws.scored_word_count,
-                       aws.mean_difficulty, aws.stddev_difficulty, ad.density
+                       aws.mean_difficulty, aws.stddev_difficulty, ad.density,
+                       coalesce(auc.unique_word_count, 0) AS unique_word_count
                 FROM author_word_stats aws
                 JOIN author_books ab ON ab.author = aws.author
                 LEFT JOIN author_density ad ON ad.author = aws.author
+                LEFT JOIN author_unique_counts auc ON auc.author = aws.author
             ),
             diff_rank AS (
                 SELECT author, percent_rank() OVER (ORDER BY mean_difficulty) AS diff_pct
@@ -574,7 +601,7 @@ def browse_authors(
                    CASE WHEN dr.diff_pct IS NOT NULL AND de.dens_pct IS NOT NULL
                         THEN round((((dr.diff_pct + de.dens_pct) / 2) * 100)::numeric, 1)
                    END AS overall_difficulty,
-                   af.fame_score, af.fame_reasoning
+                   af.fame_score, af.fame_reasoning, ab2.unique_word_count
             FROM author_base ab2
             LEFT JOIN diff_rank dr ON dr.author = ab2.author
             LEFT JOIN dens_rank de ON de.author = ab2.author
@@ -582,14 +609,14 @@ def browse_authors(
             WHERE true{fame_where}
             ORDER BY {order_by}
             LIMIT %s OFFSET %s""",
-            (*params, *params, *fame_params, limit, offset),
+            (list(PLACEHOLDER_AUTHORS), *params, *params, *fame_params, limit, offset),
         )
         rows = cur.fetchall()
 
     items = [
         AuthorRow(author=r[0], book_count=r[1], word_count=r[2], scored_word_count=r[3],
                   mean_difficulty=r[4], stddev_difficulty=r[5], density=r[6], overall_difficulty=r[7],
-                  fame_score=r[8], fame_reasoning=r[9])
+                  fame_score=r[8], fame_reasoning=r[9], unique_word_count=r[10])
         for r in rows
     ]
     return AuthorPage(items=items, total=total, page=page, page_size=page_size)
@@ -629,6 +656,10 @@ class BookRow(BaseModel):
     # doesn't get pushed to an arbitrary end by NULL-ordering -- it's simply
     # excluded from that one ranking, and overall_difficulty itself is only
     # populated when both are available.
+    unique_word_count: int  # words appearing NOWHERE else in the corpus -- same
+                             # exclusivity semantics as ?exclusive=true and the
+                             # unique-word-histogram, always a real count (never
+                             # null -- a book contributing zero is still 0, not absent)
 
 
 class BookPage(BaseModel):
@@ -656,7 +687,8 @@ def browse_books(
     random: bool = False,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
-    sort: Literal["title", "word_count", "difficulty", "density", "overall_difficulty", "fame"] = "title",
+    sort: Literal["title", "word_count", "difficulty", "density", "overall_difficulty",
+                  "fame", "unique_word_count"] = "title",
     dir: Literal["asc", "desc"] = "asc",
     _: dict = Depends(_main.require_viewer),
 ) -> BookPage:
@@ -731,7 +763,29 @@ def browse_books(
         # are computed the way they are (percent_rank blend, not z-scores).
         cur.execute(
             f"""
-            WITH book_base AS (
+            WITH single_book_words AS (
+                -- Same exclusivity semantics as _unique_word_bucket_filter/
+                -- browse_unique_word_histogram (word_book row count = 1 for
+                -- this word, globally -- not scoped to `where` below, since
+                -- a word's exclusivity is a corpus-wide fact independent of
+                -- which books this particular page of results is filtered to).
+                SELECT wb2.word_id, min(wb2.book_id) AS book_id
+                FROM {_main.SCHEMA}.word_book wb2
+                JOIN {_main.SCHEMA}.word w2 ON w2.id = wb2.word_id AND w2.active
+                GROUP BY wb2.word_id HAVING count(*) = 1
+            ),
+            book_unique_counts AS (
+                -- Pre-aggregated once, then LEFT JOINed by id below -- a
+                -- correlated subquery here instead (WHERE sbw.book_id = b.id
+                -- per book_base row) measured at 73s against the real corpus:
+                -- single_book_words has no index Postgres can use for that
+                -- per-row lookup, so it re-scans the whole CTE result once
+                -- per book (~20.8k times). This GROUP BY runs once, total.
+                SELECT book_id, count(*) AS unique_word_count
+                FROM single_book_words
+                GROUP BY book_id
+            ),
+            book_base AS (
                 SELECT b.id, b.title, b.author, b.archive_path, b.distinct_nonstop_word_count,
                        count(DISTINCT w.id) AS word_count,
                        count(wd.difficulty) AS scored_word_count,
@@ -740,15 +794,17 @@ def browse_books(
                        CASE WHEN b.distinct_nonstop_word_count > 0
                             THEN count(DISTINCT w.id)::float / b.distinct_nonstop_word_count END AS density,
                        bf.fame_score, bf.fame_reasoning,
-                       {_SORT_TITLE_EXPR} AS sort_title
+                       {_SORT_TITLE_EXPR} AS sort_title,
+                       coalesce(buc.unique_word_count, 0) AS unique_word_count
                 FROM {_main.SCHEMA}.book b
                 JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
                 JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id
                 LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
                 LEFT JOIN {_main.SCHEMA}.book_fame bf ON bf.book_id = b.id
+                LEFT JOIN book_unique_counts buc ON buc.book_id = b.id
                 WHERE {where}
                 GROUP BY b.id, b.title, b.author, b.archive_path, b.distinct_nonstop_word_count,
-                         bf.fame_score, bf.fame_reasoning
+                         bf.fame_score, bf.fame_reasoning, buc.unique_word_count
             ),
             diff_rank AS (
                 SELECT id, percent_rank() OVER (ORDER BY mean_difficulty) AS diff_pct
@@ -763,7 +819,7 @@ def browse_books(
                    CASE WHEN dr.diff_pct IS NOT NULL AND de.dens_pct IS NOT NULL
                         THEN round((((dr.diff_pct + de.dens_pct) / 2) * 100)::numeric, 1)
                    END AS overall_difficulty,
-                   bb.fame_score, bb.fame_reasoning
+                   bb.fame_score, bb.fame_reasoning, bb.unique_word_count
             FROM book_base bb
             LEFT JOIN diff_rank dr ON dr.id = bb.id
             LEFT JOIN dens_rank de ON de.id = bb.id
@@ -777,7 +833,7 @@ def browse_books(
         BookRow(id=r[0], title=r[1], author=r[2], word_count=r[3],
                 scored_word_count=r[4], mean_difficulty=r[5], stddev_difficulty=r[6],
                 density=r[7], archive_path=r[8], overall_difficulty=r[9],
-                fame_score=r[10], fame_reasoning=r[11])
+                fame_score=r[10], fame_reasoning=r[11], unique_word_count=r[12])
         for r in rows
     ]
     return BookPage(items=items, total=total, page=page, page_size=page_size)

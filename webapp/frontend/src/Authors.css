@@ -167,7 +167,8 @@
 
 .work-count,
 .work-density,
-.work-overall {
+.work-overall,
+.work-unique-count {
   font-variant-numeric: tabular-nums;
 }
 
