@@ -874,6 +874,16 @@ def backfill_analogies(conn, schema: str, cfg, limit: int = 0, batch_size: int =
         print(f"[backfill-analogies] chunk {chunk_num}/{len(chunks)} written "
               f"({verified_count} verified, {rejected_count} rejected so far)")
 
+    # Deterministic release, not left to implicit GC timing -- this is the
+    # LAST maintain step, but backfill-analogies is also runnable on its own
+    # (--limit / real full-corpus runs, per its own CLI docstring, "should
+    # not be started while `concordance maintain` is already in flight" --
+    # i.e. the two are expected to run back-to-back on the same box), and a
+    # standalone rerun right after should still get a clean GPU. See
+    # fill_definitions' matching comment for the live crash this pattern
+    # is fixing.
+    if llm is not None:
+        llm.close()
     return {
         "terms_scanned": len(to_scan),
         "edges_found": total_edges_found,

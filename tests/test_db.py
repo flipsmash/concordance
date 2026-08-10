@@ -533,7 +533,14 @@ def test_fill_definitions_web_tier_is_no_longer_gated_on_validity(monkeypatch, t
     from concordance.model import Candidate
     from concordance.validity_score import ValidityEstimate
 
-    monkeypatch.setattr(llama_cpp, "Llama", lambda *a, **k: object())
+    class _FakeLlm:
+        # fill_definitions calls .close() on whatever it loaded once the web
+        # tier is done -- see its own docstring comment on why that's now
+        # explicit rather than left to implicit GC timing.
+        def close(self):
+            pass
+
+    monkeypatch.setattr(llama_cpp, "Llama", lambda *a, **k: _FakeLlm())
     model_path = tmp_path / "fake.gguf"
     model_path.write_bytes(b"")
 

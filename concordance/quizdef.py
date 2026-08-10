@@ -125,6 +125,12 @@ class Rewriter:
         self.llm = Llama(model_path=mp, n_gpu_layers=cfg.n_gpu_layers, n_ctx=cfg.n_ctx, verbose=False)
         self.batch = 10
 
+    def close(self) -> None:
+        """Deterministically frees the model's GPU memory -- see
+        classify.Classifier.close's matching comment for why this can't
+        just be left to whenever Python garbage-collects the object."""
+        self.llm.close()
+
     def rewrite(self, items: list[dict]) -> dict[str, tuple[str, str]]:
         """items: {word, definition} (leakers only). Returns word -> (quiz_def, source)."""
         result: dict[str, tuple[str, str]] = {}

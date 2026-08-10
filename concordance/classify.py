@@ -66,6 +66,12 @@ class Classifier:
         self.llm = Llama(model_path=mp, n_gpu_layers=cfg.n_gpu_layers, n_ctx=cfg.n_ctx, verbose=False)
         self.batch = 15
 
+    def close(self) -> None:
+        """Deterministically frees the model's GPU memory -- see
+        classify_and_store's call site for why this can't just be left to
+        whenever Python garbage-collects the object."""
+        self.llm.close()
+
     def classify(self, items: list[dict]) -> dict[str, list[str]]:
         """word(lower) -> list of validated USAS codes."""
         result: dict[str, list[str]] = {}
@@ -256,4 +262,10 @@ def classify_and_store(conn, schema: str, cfg: Config | None = None, limit: int 
         conn.commit()
         print(f"  ...{min(start + commit_every, len(items))}/{len(items)} words classified "
               f"({stats['classified']} tagged, {stats['vanished']} vanished mid-run)")
+    # Deterministic release, not left to implicit GC timing -- `maintain`
+    # chains straight into the next GPU-loading step (normalize-pos is
+    # cheap, but quizdef further down loads its own fresh multi-GB model)
+    # immediately after this returns. See fill_definitions' matching comment
+    # for the live crash this pattern is fixing.
+    clf.close()
     return stats

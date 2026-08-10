@@ -1273,6 +1273,14 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
             if i % 25 == 0:
                 print(f"  ...{i}/{len(rows)} words attempted "
                       f"({stats['defined']} defined, {stats['still_undefined']} still undefined)")
+    # Explicit, deterministic close rather than leaving it to whenever
+    # Python happens to collect `llm` after this function returns -- found
+    # live: `maintain` chains straight into classify's own fresh ~9GB model
+    # load immediately after this step, and relying on implicit cleanup
+    # timing let a `Failed to load model from file` crash slip through when
+    # the previous instance's GPU memory hadn't actually been released yet.
+    if llm is not None:
+        llm.close()
     return stats
 
 
@@ -2256,6 +2264,11 @@ def compute_quiz_definitions(conn, schema: str = DEFAULT_SCHEMA, cfg=None,
                             (qd, src, wid))
                 stats[src] += 1
         conn.commit()
+        # Deterministic release, not left to implicit GC timing -- see
+        # fill_definitions' matching comment for the live crash this
+        # pattern is fixing (a fresh model load right after this step
+        # returns, racing the previous instance's GPU memory release).
+        rw.close()
     return {"words": len(rows), "clean": stats["clean"],
             "rewritten": stats["rewritten"], "redacted": stats["redacted"]}
 
@@ -3498,6 +3511,20 @@ def compute_definition_embeddings(conn, schema: str = DEFAULT_SCHEMA, only_missi
                 stats["embedded"] += 1
             conn.commit()
             print(f"  ...{stats['embedded']}/{len(resolved)} embedded")
+    # Deterministic release, not left to implicit GC timing -- same reasoning
+    # as fill_definitions' matching comment, but for sentence-transformers'
+    # torch-backed model instead of a llama-cpp one: dropping the reference
+    # alone doesn't return its CUDA memory pool to the driver, empty_cache()
+    # does. compute_fasttext_embeddings (the step right after this one in
+    # `maintain`) is CPU-only (fasttext has no GPU support at all), so this
+    # is really about not leaving VRAM held for whatever runs after that.
+    del embedder
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
     return stats
 
 

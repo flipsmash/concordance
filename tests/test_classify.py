@@ -75,10 +75,14 @@ class _FakeClassifier:
     def __init__(self, cfg=None):
         self.batch = 15
         self.seen_chunks: list[list[str]] = []
+        self.closed = False
 
     def classify(self, items):
         self.seen_chunks.append([it["word"] for it in items])
         return {it["word"].lower(): ["A1"] for it in items}
+
+    def close(self):
+        self.closed = True
 
 
 def _seed_classify_schema(conn, schema, n_words):
@@ -119,6 +123,12 @@ def test_classify_and_store_commits_in_chunks_not_once_at_the_end(monkeypatch):
     # call to Classifier.classify -- not one call over all 25 the way the
     # old single-commit implementation made.
     assert [len(c) for c in fake.seen_chunks] == [10, 10, 5]
+
+    # Regression: classify_and_store must release the model's GPU memory
+    # before returning, not leave it to whenever Python happens to garbage
+    # collect `clf` -- `maintain` chains straight into the next GPU-loading
+    # step immediately after this returns.
+    assert fake.closed
 
     with conn.cursor() as cur:
         cur.execute(f"select count(*) from {schema}.word_category")
