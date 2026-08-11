@@ -344,6 +344,45 @@ def test_unique_word_histogram_buckets_book_and_author_scopes():
 
 
 @pg
+def test_fame_histogram_buckets_by_integer_score_and_counts_unscored():
+    schema = "cc_test_browse_fame_hist"
+    client, conn, restore = _setup(schema)
+    try:
+        b1 = _insert_book(conn, schema, "Famous Book", author="Bard, William")
+        b2 = _insert_book(conn, schema, "Also Famous", author="Bard, William")
+        b3 = _insert_book(conn, schema, "Obscure Book", author="Unknown Author")
+        with conn.cursor() as cur:
+            cur.execute(f"INSERT INTO {schema}.book_fame (book_id, fame_score) VALUES (%s, %s)", (b1, 9.0))
+            cur.execute(f"INSERT INTO {schema}.book_fame (book_id, fame_score) VALUES (%s, %s)", (b2, 9.0))
+            cur.execute(
+                f"INSERT INTO {schema}.author_fame (author, fame_score) VALUES (%s, %s)", ("Bard, William", 9.0)
+            )
+        # b3 (author "Unknown Author", a PLACEHOLDER_AUTHORS entry) is left
+        # unscored on both sides -- also proves placeholders are excluded
+        # from the author scope entirely, not just left in the unscored bucket.
+        conn.commit()
+
+        book_hist = {r["label"]: r["count"] for r in
+                     client.get("/api/browse/fame-histogram", params={"scope": "book"}).json()}
+        assert book_hist["9"] == 2
+        assert book_hist["Not yet scored"] == 1  # Obscure Book
+
+        author_hist = {r["label"]: r["count"] for r in
+                       client.get("/api/browse/fame-histogram", params={"scope": "author"}).json()}
+        assert author_hist["9"] == 1
+        # "Unknown Author" is a placeholder, never counted as a real author
+        # at all -- so it contributes nothing to author scope, scored or not.
+        assert author_hist["Not yet scored"] == 0
+
+        # Every score 1-10 is always present, even when empty.
+        assert {r["label"] for r in
+                client.get("/api/browse/fame-histogram", params={"scope": "book"}).json()} == \
+               {str(i) for i in range(1, 11)} | {"Not yet scored"}
+    finally:
+        restore()
+
+
+@pg
 def test_unique_word_bucket_filters_books_and_authors():
     # Same fixture as test_unique_word_histogram_buckets_book_and_author_scopes
     # (Book A: 2 solo words -> bucket "2"; Book B: 0 solo words -> bucket "0";

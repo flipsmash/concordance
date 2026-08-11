@@ -1954,6 +1954,59 @@ def browse_unique_word_histogram(
     return [UniqueWordBucket(label=label, count=counts.get(label, 0)) for _, _, label in _UNIQUE_WORD_BUCKETS]
 
 
+# --- /api/browse/fame-histogram ----------------------------------------------
+# Reuses UniqueWordBucket's {label, count} shape -- same reason the frontend
+# reuses DifficultyHistogram to render this: one generic bar-chart shape,
+# not a new component per histogram.
+
+_FAME_SCORE_LABELS = [str(i) for i in range(1, 11)]
+_FAME_UNSCORED_LABEL = "Not yet scored"
+
+
+@router.get("/api/browse/fame-histogram", response_model=list[UniqueWordBucket])
+def browse_fame_histogram(
+    scope: Literal["book", "author"] = "book",
+    _: dict = Depends(_main.require_viewer),
+) -> list[UniqueWordBucket]:
+    """Distribution of book_fame/author_fame scores (an absolute 1-10 scale,
+    see concordance/fame.py's own module docstring for what it measures and
+    why most scores sit low) across every book, or every real author. Fame
+    is computed by a separate, manually-run CLI command (`book-fame`/
+    `author-fame`), deliberately excluded from `maintain` -- so "not yet
+    scored" being the largest bar is expected, not a bug. Every score 1-10
+    is always present (count=0 rather than omitted) so the x-axis never
+    reflows; "Not yet scored" is appended last, matching
+    /api/browse/difficulty-bands' own convention for its unscored pseudo-band."""
+    from collections import Counter
+    s = _main.SCHEMA
+
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        if scope == "book":
+            cur.execute(
+                f"""SELECT bf.fame_score
+                    FROM {s}.book b
+                    LEFT JOIN {s}.book_fame bf ON bf.book_id = b.id"""
+            )
+        else:
+            placeholders = list(PLACEHOLDER_AUTHORS)
+            cur.execute(
+                f"""SELECT af.fame_score
+                    FROM (SELECT DISTINCT author FROM {s}.book
+                          WHERE author IS NOT NULL AND author != '' AND author != ALL(%s)) a
+                    LEFT JOIN {s}.author_fame af ON af.author = a.author""",
+                (placeholders,),
+            )
+        scores = [row[0] for row in cur.fetchall()]
+
+    # round(), not floor/truncate -- fame_score is a double but the LLM
+    # judge is always prompted for an integer 1-10 (see fame.py's own
+    # prompt), so this is purely defensive against float drift, never
+    # expected to actually change a value.
+    counts = Counter(_FAME_UNSCORED_LABEL if score is None else str(round(score)) for score in scores)
+    labels = _FAME_SCORE_LABELS + [_FAME_UNSCORED_LABEL]
+    return [UniqueWordBucket(label=label, count=counts.get(label, 0)) for label in labels]
+
+
 # --- /api/browse/pos-values ------------------------------------------------------
 
 @router.get("/api/browse/pos-values", response_model=list[str])

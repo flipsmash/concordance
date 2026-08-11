@@ -30,10 +30,25 @@ function toHistBands(buckets) {
   return buckets.map((b) => ({ band_min: 0, band_max: 0, label: b.label, word_count: b.count }))
 }
 
+// Same adapter as toHistBands, except the "Not yet scored" bucket keeps
+// band_min === null -- that's what triggers DifficultyHistogram's distinct
+// (greyed-out) styling for an unscored column, which toHistBands' buckets
+// never have a use for since none of them carry an "unscored" concept.
+function toFameHistBands(buckets) {
+  return buckets.map((b) => ({
+    band_min: b.label === 'Not yet scored' ? null : 0,
+    band_max: 0,
+    label: b.label,
+    word_count: b.count,
+  }))
+}
+
 function Visualizations() {
   const navigate = useNavigate()
   const [bookHist, setBookHist] = useState([])
   const [authorHist, setAuthorHist] = useState([])
+  const [bookFameHist, setBookFameHist] = useState([])
+  const [authorFameHist, setAuthorFameHist] = useState([])
 
   useEffect(() => {
     fetch(`${API_BASE}/api/browse/unique-word-histogram?scope=book`)
@@ -43,6 +58,14 @@ function Visualizations() {
     fetch(`${API_BASE}/api/browse/unique-word-histogram?scope=author`)
       .then((res) => res.json())
       .then((data) => setAuthorHist(toHistBands(data)))
+      .catch(() => {})
+    fetch(`${API_BASE}/api/browse/fame-histogram?scope=book`)
+      .then((res) => res.json())
+      .then((data) => setBookFameHist(toFameHistBands(data)))
+      .catch(() => {})
+    fetch(`${API_BASE}/api/browse/fame-histogram?scope=author`)
+      .then((res) => res.json())
+      .then((data) => setAuthorFameHist(toFameHistBands(data)))
       .catch(() => {})
   }, [])
 
@@ -112,6 +135,25 @@ function Visualizations() {
           selectedBand={null}
           onSelect={(b) => navigate(`/app/authors?unique_word_bucket=${encodeURIComponent(b.label)}`)}
         />
+      </section>
+
+      <section className="browse-facets viz-section">
+        <h2 className="viz-heading">Book fame distribution</h2>
+        <p className="viz-description">
+          Historical/cultural importance, an absolute 1–10 scale (not a percentile) where most
+          scores sit low by design — only genuinely famous books score high, so a tall bar at 8–10
+          means something. Fame is scored by a separate, manually-run process, not part of routine
+          maintenance, so a large "Not yet scored" bar reflects that backlog, not missing data.
+        </p>
+        <DifficultyHistogram bands={bookFameHist} selectedBand={null} onSelect={() => {}} />
+      </section>
+
+      <section className="browse-facets viz-section">
+        <h2 className="viz-heading">Author fame distribution</h2>
+        <p className="viz-description">
+          Same absolute 1–10 scale, aggregated per author rather than per book.
+        </p>
+        <DifficultyHistogram bands={authorFameHist} selectedBand={null} onSelect={() => {}} />
       </section>
 
       <section className="browse-facets viz-section">
