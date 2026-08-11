@@ -783,6 +783,15 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS rescued_from_reject boolean NOT NULL DEFAULT false")
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS rescued_at timestamptz")
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS rescued_reason text")
+        # tracks a word an admin added directly via the "suggest a new word"
+        # flow (webapp/backend/suggest_word.py) rather than one the ingest
+        # pipeline discovered in a book — purely provenance/audit (a badge on
+        # WordDetail, a future filter), NOT load-bearing for judge-skip
+        # behavior: fetch_known_verdicts already treats ANY active=true word
+        # as a cached "keep" for future books, admin-suggested or not.
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS admin_suggested boolean NOT NULL DEFAULT false")
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS admin_suggested_by text")
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS admin_suggested_at timestamptz")
         # persistent audit marker: this word was ever accepted with no dictionary
         # able to define it (a weaker validity signal than a normal keep — worth
         # a human glance). Sticky by design: never cleared even if `refill`

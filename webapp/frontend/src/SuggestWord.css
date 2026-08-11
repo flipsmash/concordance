@@ -1,0 +1,137 @@
+.suggest-word {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px 0;
+  max-width: 640px;
+}
+
+.suggest-word-search {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.suggest-word-search input[type='text'] {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 14px;
+  min-width: 240px;
+}
+
+.suggest-word-hint {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.suggest-word-exists {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.suggest-word-candidates {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.suggest-word-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.suggest-word-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.suggest-word-card-source {
+  font-weight: 600;
+  color: var(--text-h);
+}
+
+.suggest-word-card-pos {
+  font-size: 12px;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.suggest-word-card-definition {
+  margin: 0;
+  color: var(--text-h);
+}
+
+.suggest-word-card-meta {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.suggest-word-card-warning {
+  margin: 0;
+  font-size: 13px;
+  color: var(--danger);
+}
+
+.suggest-word-scratch-btn {
+  align-self: flex-start;
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  padding: 8px 14px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.suggest-word-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.suggest-word-edit h3 {
+  margin: 0;
+  color: var(--text-h);
+}
+
+.suggest-word-edit label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.suggest-word-edit input,
+.suggest-word-edit select,
+.suggest-word-edit textarea {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--text-h);
+  background: var(--bg);
+}
+
+.suggest-word-edit-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}

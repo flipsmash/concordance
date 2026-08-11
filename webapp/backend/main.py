@@ -1094,6 +1094,10 @@ app.include_router(_home.router)
 from webapp.backend import oed as _oed  # noqa: E402
 app.include_router(_oed.router)
 
+# Same ordering requirement, same reason.
+from webapp.backend import suggest_word as _suggest_word  # noqa: E402
+app.include_router(_suggest_word.router)
+
 # Serves the built frontend (webapp/frontend/dist, from `npm run build`) so a
 # single port can be exposed publicly. Registered last so it never shadows an
 # /api/* route above; absent in plain local dev, where the Vite dev server is

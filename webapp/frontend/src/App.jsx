@@ -11,6 +11,7 @@ import RejectedView from './RejectedView'
 import RequestInvite from './RequestInvite'
 import RequireAdmin from './RequireAdmin'
 import RequireAuth from './RequireAuth'
+import SuggestWord from './SuggestWord'
 
 // Lazy-loaded: pulls in react-force-graph-2d's canvas/d3-force bundle only
 // when the Graph tab is actually opened, so Accepted/Rejected stay unaffected.
@@ -65,6 +66,9 @@ function Layout() {
           </NavLink>
           <NavLink to="rejected" className={tabClass}>
             Rejected
+          </NavLink>
+          <NavLink to="suggest-word" className={tabClass}>
+            Suggest Word
           </NavLink>
           <NavLink to="graph" className={tabClass}>
             Graph
@@ -336,6 +340,7 @@ function App() {
                 <Route index element={<AcceptedView />} />
                 <Route path="accepted" element={<AcceptedView />} />
                 <Route path="rejected" element={<RejectedView />} />
+                <Route path="suggest-word" element={<SuggestWord />} />
                 <Route path="settings" element={<AdminSettings />} />
                 <Route
                   path="graph"
