@@ -185,7 +185,7 @@ def get_set(set_id: int, user: dict = Depends(_main.require_user)) -> SetDetail:
                 FROM {_main.SCHEMA}.word_set_item i
                 JOIN {_main.SCHEMA}.word w ON w.id = i.word_id
                 WHERE i.set_id = %s
-                ORDER BY w.lemma ASC""",
+                ORDER BY w.lemma_lc ASC""",
             (set_id,),
         )
         items = [SetItem(word_id=r[0], lemma=r[1], definition=r[2], mastered=r[3]) for r in cur.fetchall()]

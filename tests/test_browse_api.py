@@ -502,6 +502,28 @@ def test_browse_words_sorts_by_book_count():
 
 
 @pg
+def test_browse_words_alphabetical_sort_is_case_insensitive():
+    """This DB's collation (C.UTF-8) sorts every uppercase letter before
+    every lowercase one -- ORDER BY on the raw (case-preserving) lemma
+    column put a capitalized word like "Hellenomania" first in an A-Z
+    listing, ahead of every ordinary lowercase word. Confirmed live: a real
+    word with exactly this problem. lemma_lc (already the unique-constraint
+    column) sorts case-insensitively and must be used instead."""
+    schema = "cc_test_browse_words_case_sort"
+    client, conn, restore = _setup(schema)
+    try:
+        _insert_word(conn, schema, "Zoology")  # capitalized but alphabetically last
+        _insert_word(conn, schema, "aardvark")
+        _insert_word(conn, schema, "middle")
+        conn.commit()
+
+        res = client.get("/api/browse/words", params={"sort": "lemma", "dir": "asc"})
+        assert [w["lemma"] for w in res.json()["items"]] == ["aardvark", "middle", "Zoology"]
+    finally:
+        restore()
+
+
+@pg
 def test_browse_books_and_authors_sort_by_unique_word_count():
     schema = "cc_test_browse_uwc_sort"
     client, conn, restore = _setup(schema)

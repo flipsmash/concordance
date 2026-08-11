@@ -73,7 +73,14 @@ _ALL_CODES = {c["code"] for c in usas.categories()}
 _ARCHIVE_ROOT = Path(__file__).resolve().parents[2] / "archive"
 
 _WORD_SORT_COLUMNS = {
-    "lemma": "w.lemma",
+    # lemma_lc, not the raw (case-preserving) lemma column -- this DB's
+    # collation (C.UTF-8) sorts every uppercase letter before every
+    # lowercase one, so "Hellenomania" (capitalized, per dictionary
+    # convention for a demonym-derived word) would otherwise land first in
+    # an A-Z listing, ahead of "aardvark" -- confirmed live, this exact word
+    # is what surfaced the bug. lemma_lc is the already-indexed generated
+    # column every other lemma-uniqueness/lookup path in this codebase uses.
+    "lemma": "w.lemma_lc",
     "difficulty": "wd.difficulty",
     "part_of_speech": "w.part_of_speech",
     "book_count": "book_count",  # the SELECT-list alias below, not a real column
@@ -1647,7 +1654,7 @@ def browse_words(
             limit = page_size
         else:
             order_col = _WORD_SORT_COLUMNS[sort]
-            order_by = f"{order_col} {'ASC' if dir == 'asc' else 'DESC'} NULLS LAST, w.lemma ASC"
+            order_by = f"{order_col} {'ASC' if dir == 'asc' else 'DESC'} NULLS LAST, w.lemma_lc ASC"
             limit = page_size
         offset = 0 if random else (page - 1) * page_size
 

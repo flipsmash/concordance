@@ -33,7 +33,14 @@ app = FastAPI(title="Concordance Review API")
 
 SCHEMA = cdb.DEFAULT_SCHEMA
 SORT_COLUMNS = {
-    "lemma": "w.lemma",
+    # lemma_lc, not the raw (case-preserving) lemma column -- this DB's
+    # collation (C.UTF-8) sorts every uppercase letter before every
+    # lowercase one, so a capitalized word (e.g. "Hellenomania," capitalized
+    # per dictionary convention for a demonym-derived word) would otherwise
+    # sort as the very first result in an A-Z listing, ahead of every
+    # ordinary lowercase word -- confirmed live, this exact word is what
+    # surfaced the bug (see browse.py's matching fix/comment).
+    "lemma": "w.lemma_lc",
     "part_of_speech": "w.part_of_speech",
     "definition": "w.definition",
     "difficulty": "d.difficulty",
@@ -291,7 +298,7 @@ def list_words(
                 FROM {SCHEMA}.word w
                 LEFT JOIN {SCHEMA}.word_difficulty d ON d.word_id = w.id
                 WHERE w.active{where_extra}
-                ORDER BY {order_col} {order_dir} NULLS LAST, w.lemma ASC
+                ORDER BY {order_col} {order_dir} NULLS LAST, w.lemma_lc ASC
                 LIMIT %s OFFSET %s""",
             (*params, page_size, offset),
         )
@@ -384,7 +391,10 @@ def update_definition(
 
 
 REJECTED_SORT_COLUMNS = {
-    "lemma": "lemma",
+    # lemma_lc, not the raw (case-preserving) lemma -- same C.UTF-8-collation
+    # bug as SORT_COLUMNS above (see its comment): a capitalized rejected
+    # lemma would otherwise sort first, ahead of every lowercase one.
+    "lemma": "lemma_lc",
     "book_count": "book_count",
     "reason": "reasons",
     "count": "total_count",
@@ -474,7 +484,7 @@ def list_rejected(
             f"""SELECT rli.rep_id, rli.lemma, rli.book_count, rli.reasons, rli.total_count, rli.zipf
                 FROM {SCHEMA}.rejected_lemma_index rli
                 WHERE true{where_extra}
-                ORDER BY {order_col} {order_dir} NULLS LAST, rli.lemma ASC
+                ORDER BY {order_col} {order_dir} NULLS LAST, rli.lemma_lc ASC
                 LIMIT %s OFFSET %s""",
             (*params, page_size, offset),
         )
@@ -741,7 +751,7 @@ def word_detail(word_id: int, _: dict = Depends(require_viewer)) -> WordDetail:
                 FROM {SCHEMA}.word_definition_link wdl
                 JOIN {SCHEMA}.word w2 ON w2.id = wdl.target_word_id
                 WHERE wdl.source_word_id = %s AND w2.active
-                ORDER BY w2.lemma ASC""",
+                ORDER BY w2.lemma_lc ASC""",
             (word_id,),
         )
         # w2.active guards against a link whose target was pruned/deactivated
