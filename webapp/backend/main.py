@@ -277,13 +277,7 @@ def list_words(
     if q:
         # Same trigram threshold as /api/words/search and browse.py's own
         # `q` filter -- one "what does typing X match" behavior everywhere
-        # in the app, not a second, differently-tuned search. Deliberately
-        # NOT reordering by relevance here (unlike browse.py's `elif q:`
-        # branch): this is a curation table where a clicked sort column
-        # shouldn't flip out from under you just because you typed
-        # something, and skipping it avoids browse.py's own footgun of a
-        # second `%s` for the ORDER BY needing `params` re-extended AFTER
-        # the count query already consumed the plain filter params.
+        # in the app, not a second, differently-tuned search.
         filters.append("similarity(w.lemma, %s) > 0.1")
         params.append(q)
     where_extra = "".join(f" AND {f}" for f in filters)
@@ -292,15 +286,34 @@ def list_words(
         cur.execute(f"SELECT count(*) FROM {SCHEMA}.word w WHERE w.active{where_extra}", params)
         total = cur.fetchone()[0]
 
+        # Best text match wins over the requested sort column while actively
+        # searching -- same reasoning and pattern as browse.py's own `elif
+        # q:` branch: "search within these filters" and "alphabetical/
+        # difficulty order" aren't reconcilable in one ORDER BY, and search
+        # intent dominates. Found live: a curator searching an exact lemma
+        # got back hundreds of loosely-related trigram matches still sorted
+        # by difficulty, with the actual word 7 pages deep -- indistinguishable
+        # from "not found." Clearing the search box resumes the chosen sort
+        # column, so it never silently changes except while a search is active.
+        # A dedicated select_params tuple, not `params` itself, since q's own
+        # bind value is needed a SECOND time here (WHERE filter above, ORDER
+        # BY here) and the count query just above must not see that extra param.
+        if q:
+            order_by = "similarity(w.lemma, %s) DESC"
+            select_params = (*params, q, page_size, offset)
+        else:
+            order_by = f"{order_col} {order_dir} NULLS LAST, w.lemma_lc ASC"
+            select_params = (*params, page_size, offset)
+
         cur.execute(
             f"""SELECT w.id, w.lemma, w.part_of_speech, w.definition, d.difficulty, w.rescued_from_reject,
                        w.validity_score, w.validity_label, w.validity_notes
                 FROM {SCHEMA}.word w
                 LEFT JOIN {SCHEMA}.word_difficulty d ON d.word_id = w.id
                 WHERE w.active{where_extra}
-                ORDER BY {order_col} {order_dir} NULLS LAST, w.lemma_lc ASC
+                ORDER BY {order_by}
                 LIMIT %s OFFSET %s""",
-            (*params, page_size, offset),
+            select_params,
         )
         rows = cur.fetchall()
 
