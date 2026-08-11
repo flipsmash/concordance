@@ -792,6 +792,18 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS admin_suggested boolean NOT NULL DEFAULT false")
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS admin_suggested_by text")
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS admin_suggested_at timestamptz")
+        # audit trail for an admin hand-editing `definition` directly (PATCH
+        # /api/words/{id}/definition) -- edited_by/edited_at note WHO and
+        # WHEN, previous_definition holds the value it replaced. Deliberately
+        # only the immediately-prior value, not a full history table: the
+        # feature request asked for "the former definition," singular, and a
+        # second edit simply overwrites this with what was live just before
+        # it. Never surfaced on the frontend by design -- the edit itself
+        # isn't indicated anywhere a reader would see it, only queryable
+        # directly against the DB for admin review.
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS previous_definition text")
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS definition_edited_by text")
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS definition_edited_at timestamptz")
         # persistent audit marker: this word was ever accepted with no dictionary
         # able to define it (a weaker validity signal than a normal keep — worth
         # a human glance). Sticky by design: never cleared even if `refill`

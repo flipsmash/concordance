@@ -121,6 +121,44 @@
   margin: 0;
 }
 
+.word-detail-edit-definition {
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  margin-left: 8px;
+  padding: 0;
+}
+
+.word-detail-edit-definition:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.word-detail-definition-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.word-detail-definition-edit textarea {
+  font-size: 16px;
+  font-family: inherit;
+  color: var(--text-h);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  resize: vertical;
+}
+
+.word-detail-definition-edit-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
 .definition-link {
   color: var(--accent);
   text-decoration: underline;

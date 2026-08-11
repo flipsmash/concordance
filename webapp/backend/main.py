@@ -17,7 +17,7 @@ from typing import Literal
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 from starlette.types import Scope
@@ -326,6 +326,61 @@ def prune_word(word_id: int, _: dict = Depends(require_admin)) -> None:
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="word not found")
         conn.commit()
+
+
+class DefinitionUpdateRequest(BaseModel):
+    definition: str = Field(..., min_length=1)
+
+
+class DefinitionUpdateResult(BaseModel):
+    id: int
+    lemma: str
+    definition: str
+
+
+@app.patch("/api/words/{word_id}/definition", response_model=DefinitionUpdateResult)
+def update_definition(
+    word_id: int, body: DefinitionUpdateRequest, user: dict = Depends(require_admin),
+) -> DefinitionUpdateResult:
+    """Admin hand-edit of a word's definition. Notes the edit (who/when) and
+    keeps the value it replaced (word.previous_definition/definition_edited_by/
+    definition_edited_at -- see apply_schema's own comment on these columns)
+    but is otherwise silent: no flag anywhere a reader-facing view would
+    show "this was manually edited," per the feature request.
+
+    Also clears this word's OWN word_definition_link rows (computed by
+    `concordance link-definitions` against the old text): LinkedDefinition
+    matches a link's stale `surface` string against whatever text is live
+    NOW, so leaving them in place risks hyperlinking a substring of the
+    admin's new prose to an unrelated word purely by coincidental overlap
+    with the old wording -- not just "the old link is gone," but "a wrong
+    link can appear." Recomputed fresh on the next `link-definitions` run,
+    same as any newly-added word; failing to no links in the meantime is
+    safe, a stale/misplaced link is not."""
+    new_definition = body.definition.strip()
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"SELECT lemma, definition FROM {SCHEMA}.word WHERE id = %s", (word_id,))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="word not found")
+        lemma, old_definition = row
+
+        if new_definition == (old_definition or ""):
+            return DefinitionUpdateResult(id=word_id, lemma=lemma, definition=new_definition)
+
+        username = user.get("username") or "admin"
+        cur.execute(
+            f"""UPDATE {SCHEMA}.word SET
+                    definition = %s, previous_definition = %s,
+                    definition_edited_by = %s, definition_edited_at = now(),
+                    updated_at = now()
+                WHERE id = %s""",
+            (new_definition, old_definition, username, word_id),
+        )
+        cur.execute(f"DELETE FROM {SCHEMA}.word_definition_link WHERE source_word_id = %s", (word_id,))
+        conn.commit()
+
+    return DefinitionUpdateResult(id=word_id, lemma=lemma, definition=new_definition)
 
 
 REJECTED_SORT_COLUMNS = {

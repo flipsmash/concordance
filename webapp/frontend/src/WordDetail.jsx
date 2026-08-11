@@ -36,6 +36,10 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
   const [surpriseLoading, setSurpriseLoading] = useState(false)
   const [booksExpanded, setBooksExpanded] = useState(false)
   const [progressHistory, setProgressHistory] = useState(null) // null = not loaded / unavailable, object = loaded
+  const [editingDefinition, setEditingDefinition] = useState(false)
+  const [definitionDraft, setDefinitionDraft] = useState('')
+  const [savingDefinition, setSavingDefinition] = useState(false)
+  const [definitionError, setDefinitionError] = useState('')
 
   // Same host-route family as this page's own -- /app/words/:id keeps
   // navigating within /app (so `backTo="/app"` keeps working after repeat
@@ -71,6 +75,48 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
         setError(err.message || 'failed to delete word')
         setDeleting(false)
       })
+  }
+
+  // Admin-only. Server notes the edit (previous value + who/when) but
+  // nothing about that is surfaced here -- the definition just updates in
+  // place like any other field, same as every other admin action on this
+  // page (delete, prune) leaves no "edited" marker of its own either.
+  function startEditingDefinition() {
+    setDefinitionDraft(word.definition || '')
+    setDefinitionError('')
+    setEditingDefinition(true)
+  }
+
+  function cancelEditingDefinition() {
+    setEditingDefinition(false)
+    setDefinitionError('')
+  }
+
+  function saveDefinition() {
+    const trimmed = definitionDraft.trim()
+    if (!trimmed) {
+      setDefinitionError('definition cannot be empty')
+      return
+    }
+    setSavingDefinition(true)
+    setDefinitionError('')
+    fetch(`${API_BASE}/api/words/${id}/definition`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ definition: trimmed }),
+    })
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`failed to save (${res.status})`))))
+      .then((data) => {
+        // definition_links cleared client-side too -- the backend just
+        // deleted this word's stale word_definition_link rows (computed
+        // against the OLD text; matching them against the new text risks a
+        // coincidental-substring link to the wrong word). Recomputed fresh
+        // on the next `concordance link-definitions` run.
+        setWord((prev) => ({ ...prev, definition: data.definition, definition_links: [] }))
+        setEditingDefinition(false)
+      })
+      .catch((err) => setDefinitionError(err.message || 'failed to save definition'))
+      .finally(() => setSavingDefinition(false))
   }
 
   useEffect(() => {
@@ -170,9 +216,35 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
       </div>
 
       <section className="word-detail-section">
-        <p className="word-detail-definition">
-          {word.definition ? <LinkedDefinition text={word.definition} links={word.definition_links} /> : '—'}
-        </p>
+        {editingDefinition ? (
+          <div className="word-detail-definition-edit">
+            <textarea
+              value={definitionDraft}
+              onChange={(e) => setDefinitionDraft(e.target.value)}
+              rows={3}
+              disabled={savingDefinition}
+              autoFocus
+            />
+            {definitionError && <div className="error-banner">{definitionError}</div>}
+            <div className="word-detail-definition-edit-actions">
+              <button type="button" onClick={cancelEditingDefinition} disabled={savingDefinition}>
+                Cancel
+              </button>
+              <button type="button" className="accept-btn" onClick={saveDefinition} disabled={savingDefinition}>
+                {savingDefinition ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <p className="word-detail-definition">
+            {word.definition ? <LinkedDefinition text={word.definition} links={word.definition_links} /> : '—'}
+            {user?.is_admin && (
+              <button type="button" className="word-detail-edit-definition" onClick={startEditingDefinition}>
+                ✎ Edit
+              </button>
+            )}
+          </p>
+        )}
         {word.etymology && <p className="word-detail-etymology">{word.etymology}</p>}
         {word.synonyms.length > 0 && (
           <div className="word-detail-synonyms">
