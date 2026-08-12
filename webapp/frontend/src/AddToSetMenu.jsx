@@ -3,11 +3,20 @@ import './AddToSetMenu.css'
 
 const API_BASE = ''
 
-// Shared "add word(s) to a set" dropdown -- used both by Browse's bulk-select
-// bar (wordIds = every checked row) and WordDetail's single-word button
-// (wordIds = [that one id]). Modeled on AuthorSelect/Browse's own
-// outside-click-close + debounce-free fetch-on-open pattern, not a new one.
-function AddToSetMenu({ wordIds, label = 'Add to set' }) {
+// Shared "add word(s) to a set" dropdown -- the bulk-select bar (wordIds =
+// every checked row), WordDetail's own single-word button, and every other
+// per-row word list in the app (wordIds = [that one id] there too) all use
+// this same component. Modeled on AuthorSelect/Browse's own outside-click-
+// close + debounce-free fetch-on-open pattern, not a new one.
+//
+// `title` is a separate prop from `label`, not derived from it -- a
+// per-row instance in a dense list passes a short/icon `label` ("+") to
+// stay compact, but that alone reads as nothing to a screen reader, so
+// callers doing that must pass a real `title` too (used as both the native
+// tooltip and aria-label). Defaults to `label` itself, which is already
+// descriptive full text ("Add to set") wherever a caller doesn't override it.
+function AddToSetMenu({ wordIds, label = 'Add to set', title }) {
+  const buttonTitle = title ?? label
   const [open, setOpen] = useState(false)
   const [sets, setSets] = useState(null) // null = not loaded yet
   const [newName, setNewName] = useState('')
@@ -94,6 +103,8 @@ function AddToSetMenu({ wordIds, label = 'Add to set' }) {
         className="add-to-set-btn"
         onClick={() => setOpen((o) => !o)}
         disabled={!wordIds.length}
+        title={buttonTitle}
+        aria-label={buttonTitle}
       >
         {justAdded ? 'Added ✓' : label}
       </button>

@@ -127,6 +127,11 @@
 .set-detail-lemma {
   font-weight: 600;
   color: var(--text-h);
+  text-decoration: none;
+}
+
+.set-detail-lemma:hover {
+  text-decoration: underline;
 }
 
 .set-detail-def {

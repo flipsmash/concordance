@@ -8,7 +8,6 @@ import Pagination from './Pagination'
 import SortControl from './SortControl'
 import { useAuth } from './AuthContext'
 import { colorForBucket } from './domainColors'
-import { useGuideWords } from './GuideWordContext'
 import { usePagedTable } from './usePagedTable'
 import './Browse.css'
 
@@ -73,6 +72,12 @@ function Browse() {
   const archaic = searchParams.getAll('archaic')
   const quizzableOnly = searchParams.get('quizzable_only') === 'true'
   const letter = searchParams.get('letter')
+  // Deep-link only, no facet-row control of its own here -- same
+  // "shelf-only" treatment as top_code/all_top_code above (see their own
+  // comments): only ever arrives from the shell's header definition-search
+  // box on Enter (see HeaderSearch.jsx), never set from a control on this
+  // page itself.
+  const definitionContains = searchParams.get('definition_contains') || ''
 
   function updateParams(mutator) {
     const next = new URLSearchParams(searchParams)
@@ -132,6 +137,10 @@ function Browse() {
     })
   }
 
+  function clearDefinitionContains() {
+    updateParams((next) => next.delete('definition_contains'))
+  }
+
   function setDifficultyRange(min, max) {
     updateParams((next) => {
       if (min !== '' && min != null) next.set('difficulty_min', min)
@@ -171,7 +180,7 @@ function Browse() {
   const activeFacetCount =
     (author ? 1 : 0) + bookIds.length + domains.length + topCodes.length + allTopCodes.length +
     (difficultyMin || difficultyMax ? 1 : 0) + archaic.length +
-    (quizzableOnly ? 1 : 0) + (letter ? 1 : 0)
+    (quizzableOnly ? 1 : 0) + (letter ? 1 : 0) + (definitionContains ? 1 : 0)
 
   // Every dependent fetch below (books, domain counts, difficulty bands) is
   // fully derived from `searchParams` -- using its own string form as the
@@ -304,21 +313,9 @@ function Browse() {
         archaic,
         quizzable_only: quizzableOnly,
         letter: letter || '',
+        definition_contains: definitionContains,
       },
     })
-
-  // Feeds the shell's guide-word header real first/last-on-screen text --
-  // only meaningful when the list is actually lemma-ascending (a dictionary
-  // page's running head shows the alphabetical range on screen); sorting by
-  // difficulty/POS/source count breaks that premise, so the header falls
-  // back to the same 'a'/'z' it already uses while loading or on an empty
-  // result rather than showing a non-alphabetical "range."
-  const lemmaOrdered = sort === 'lemma'
-  useGuideWords(
-    (lemmaOrdered && items[0]?.lemma) || 'a',
-    'browse',
-    (lemmaOrdered && items.at(-1)?.lemma) || 'z',
-  )
 
   return (
     <div className="browse-page">
@@ -477,6 +474,11 @@ function Browse() {
                 Starts with "{letter.toUpperCase()}" ×
               </button>
             )}
+            {definitionContains && (
+              <button type="button" className="browse-chip" onClick={clearDefinitionContains}>
+                Definition contains "{definitionContains}" ×
+              </button>
+            )}
             {activeFacetCount > 1 && (
               <button type="button" className="browse-clear-all" onClick={clearAll}>
                 Clear all
@@ -520,6 +522,11 @@ function Browse() {
                 </span>
               )}
             </span>
+            {!selectMode && (
+              <span className="browse-result-add-to-set" onClick={(e) => e.stopPropagation()}>
+                <AddToSetMenu wordIds={[w.id]} label="+" title="Add to set" />
+              </span>
+            )}
             {user?.is_admin && (
               <button
                 type="button"

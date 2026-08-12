@@ -246,27 +246,11 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 16px;
   padding: 13px 26px;
   border-bottom: 1px solid var(--rule);
   font-family: var(--font-data);
   background: var(--paper);
-}
-
-.guide-word {
-  font-size: 12px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--ink-soft);
-}
-
-.guide-word-left::before {
-  content: "\25c2 ";
-  opacity: 0.5;
-}
-
-.guide-word-right::after {
-  content: " \25b8";
-  opacity: 0.5;
 }
 
 .guide-brand {
@@ -274,6 +258,93 @@
   align-items: center;
   color: var(--rail-accent);
   text-decoration: none;
+  flex-shrink: 0;
+}
+
+/* The two live word/definition search boxes occupying the guide-header's
+   left/right slots (see AppShell.jsx's GuideHeaderBar and HeaderSearch.jsx)
+   -- same running-head position the header's old static/dynamic guide
+   words used to sit in, now doing real work instead of decoration. Each
+   side gets equal, flexible width so the brand mark stays centered. */
+.header-search {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: 320px;
+}
+
+.header-search-input {
+  width: 100%;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 7px 12px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--paper-raised);
+}
+
+.header-search-input:focus {
+  outline: none;
+  border-color: var(--rail-accent-soft);
+  background: var(--paper);
+}
+
+.header-search-input::placeholder {
+  color: var(--ink-soft);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+
+.header-search-list {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 4px);
+  min-width: 100%;
+  max-width: 360px;
+  max-height: 320px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--paper);
+  box-shadow: 0 10px 28px var(--shadow);
+  font-family: var(--font-ui);
+}
+
+/* Right-hand box's dropdown would otherwise overflow past the viewport
+   edge if left-aligned like the left box's -- anchor it to the input's
+   right edge instead. */
+.header-search-box-definition .header-search-list {
+  right: 0;
+}
+
+.header-search-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 12px;
+  cursor: pointer;
+}
+
+.header-search-list li:hover {
+  background: var(--paper-raised);
+}
+
+.header-search-result-lemma {
+  font-family: var(--font-data);
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.header-search-result-definition {
+  font-size: 12px;
+  color: var(--ink-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .app-shell-outlet {

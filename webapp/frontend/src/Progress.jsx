@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
+import AddToSetMenu from './AddToSetMenu'
 import './Progress.css'
 import SingleHueBarChart from './SingleHueBarChart'
 import SparkTrendLine from './SparkTrendLine'
@@ -92,6 +93,7 @@ function StrugglingTable({ words }) {
           <SortHeader label="Miss rate" sortKey="miss_rate" sort={sort} dir={dir} onSort={toggleSort} />
           <SortHeader label="Streak" sortKey="streak" sort={sort} dir={dir} onSort={toggleSort} />
           <SortHeader label="Last seen" sortKey="last_seen_at" sort={sort} dir={dir} onSort={toggleSort} />
+          <th></th>
         </tr>
       </thead>
       <tbody>
@@ -101,6 +103,9 @@ function StrugglingTable({ words }) {
             <td>{(w.miss_rate * 100).toFixed(0)}%</td>
             <td>{w.streak}</td>
             <td>{w.last_seen_at ? new Date(w.last_seen_at).toLocaleDateString() : '—'}</td>
+            <td className="actions">
+              <AddToSetMenu wordIds={[w.word_id]} label="+ Set" title="Add to set" />
+            </td>
           </tr>
         ))}
       </tbody>

@@ -615,6 +615,67 @@ def test_browse_words_alphabetical_sort_is_case_insensitive():
 
 
 @pg
+def test_browse_words_definition_q_searches_definitions_not_lemmas():
+    """definition_q (the header's right-hand search box, see HeaderSearch.jsx)
+    matches on word_similarity against w.definition, NOT lemma text -- a
+    query that appears in a definition but nowhere in the matching word's
+    own spelling (or any other word's spelling) must still find it, and a
+    query that only coincidentally resembles some OTHER word's spelling
+    must not surface that word just because of the lemma. Also confirms q
+    and definition_q are mutually exclusive (400, not silently picking one)."""
+    schema = "cc_test_browse_words_definition_q"
+    client, conn, restore = _setup(schema)
+    try:
+        _insert_word(conn, schema, "pigheaded", definition="Obstinate and stubborn to the point of stupidity.")
+        _insert_word(conn, schema, "glucklich", definition="happy and lucky")
+        _insert_word(conn, schema, "unrelatedword", definition="a plain unrelated entry")
+        conn.commit()
+
+        res = client.get("/api/browse/words", params={"definition_q": "stubborn"})
+        assert res.status_code == 200, res.text
+        lemmas = [w["lemma"] for w in res.json()["items"]]
+        assert lemmas == ["pigheaded"]
+
+        res = client.get("/api/browse/words", params={"q": "x", "definition_q": "y"})
+        assert res.status_code == 400
+    finally:
+        restore()
+
+
+@pg
+def test_browse_words_definition_contains_lists_every_literal_match():
+    """definition_contains (the header definition-search box's Enter
+    behavior, landing on /app/words -- see HeaderSearch.jsx and Browse.jsx's
+    own deep-link-only facet) is a literal substring filter, NOT the fuzzy
+    word_similarity definition_q uses for the live dropdown -- it must
+    return EVERY word whose definition contains the exact text, not just a
+    top-N fuzzy preview, and must NOT match a word whose definition is only
+    a fuzzy/typo-adjacent match. Also confirms it's mutually exclusive with
+    q/definition_q (400, not silently picking one) and respects the
+    requested sort rather than forcing a relevance order the way q/
+    definition_q do."""
+    schema = "cc_test_browse_words_definition_contains"
+    client, conn, restore = _setup(schema)
+    try:
+        _insert_word(conn, schema, "zzz_first", definition="a stubborn old mule")
+        _insert_word(conn, schema, "aaa_second", definition="stubborn as a mule, most would say")
+        _insert_word(conn, schema, "notmatching", definition="stubbrn")  # fuzzy-close, not a literal substring
+        conn.commit()
+
+        res = client.get("/api/browse/words", params={"definition_contains": "stubborn", "sort": "lemma", "dir": "asc"})
+        assert res.status_code == 200, res.text
+        lemmas = [w["lemma"] for w in res.json()["items"]]
+        assert lemmas == ["aaa_second", "zzz_first"]  # every match, in the requested (not relevance) order
+
+        res = client.get("/api/browse/words", params={"q": "x", "definition_contains": "y"})
+        assert res.status_code == 400
+        res = client.get("/api/browse/words", params={"definition_q": "x", "definition_contains": "y"})
+        assert res.status_code == 400
+    finally:
+        restore()
+
+
+@pg
 def test_browse_books_and_authors_sort_by_unique_word_count():
     schema = "cc_test_browse_uwc_sort"
     client, conn, restore = _setup(schema)

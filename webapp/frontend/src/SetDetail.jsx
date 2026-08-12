@@ -135,7 +135,7 @@ function SetDetail() {
               />
             </label>
             <div className="set-detail-word">
-              <span className="set-detail-lemma">{item.lemma}</span>
+              <Link to={`/app/words/${item.word_id}`} className="set-detail-lemma">{item.lemma}</Link>
               <span className="set-detail-def">{item.definition || '—'}</span>
             </div>
             <button type="button" className="set-detail-remove-btn" onClick={() => removeWord(item.word_id)}>

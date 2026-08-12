@@ -1690,6 +1690,8 @@ def browse_words(
     quizzable_only: bool = False,
     exclusive: bool = False,
     q: str | None = None,
+    definition_q: str | None = None,
+    definition_contains: str | None = None,
     letter: str | None = Query(None, min_length=1, max_length=1),
     random: bool = False,
     page: int = Query(1, ge=1),
@@ -1708,6 +1710,10 @@ def browse_words(
         raise HTTPException(400, "uncategorized is mutually exclusive with domain/top_code/all_top_code")
     if unscored_only and (difficulty_min is not None or difficulty_max is not None):
         raise HTTPException(400, "unscored_only is mutually exclusive with difficulty_min/difficulty_max")
+    if q and definition_q:
+        raise HTTPException(400, "q and definition_q are mutually exclusive")
+    if definition_contains and (q or definition_q):
+        raise HTTPException(400, "definition_contains is mutually exclusive with q/definition_q")
     filters, params = _build_word_filters(
         author, book_id, domain, difficulty_min, difficulty_max, archaic, pos, quizzable_only,
         top_code=top_code, all_top_code=all_top_code, uncategorized=uncategorized, unscored_only=unscored_only,
@@ -1719,6 +1725,29 @@ def browse_words(
     if q:
         filters.append("similarity(w.lemma, %s) > 0.1")
         params.append(q)
+    if definition_q:
+        # word_similarity, not similarity() -- similarity() compares the
+        # WHOLE definition string against the query, which scores a short
+        # search term against a full sentence terribly; word_similarity
+        # instead asks "does some word-length span of the definition match
+        # this query well," the right question for "does this term appear
+        # meaningfully in the definition." Same pg_trgm extension q already
+        # uses above, just the other one of its two comparison functions.
+        filters.append("w.definition IS NOT NULL AND word_similarity(%s, w.definition) > 0.3")
+        params.append(definition_q)
+    if definition_contains:
+        # Plain substring containment, not fuzzy -- the header definition
+        # search's Enter behavior (see HeaderSearch.jsx): "show me every
+        # word whose definition contains this exact text," landing here on
+        # /app/words as a real, sortable, fully-paginated browsable list
+        # (unlike the header's own live dropdown, which stays fuzzy/top-8
+        # via definition_q above -- a good typo-tolerant preview, but not
+        # the right tool for "show me everything"). No relevance ORDER BY
+        # override below, unlike q/definition_q -- containment has no
+        # notion of a "better" match, so the requested sort just applies
+        # normally, same as any other filter.
+        filters.append("w.definition ILIKE %s")
+        params.append(f"%{definition_contains}%")
     where = " AND ".join(filters)
 
     with _main.get_conn() as conn, conn.cursor() as cur:
@@ -1739,6 +1768,10 @@ def browse_words(
             # reconcilable in one ORDER BY, and search intent dominates.
             order_by = "similarity(w.lemma, %s) DESC"
             params = params + [q]
+            limit = page_size
+        elif definition_q:
+            order_by = "word_similarity(%s, w.definition) DESC"
+            params = params + [definition_q]
             limit = page_size
         else:
             order_col = _WORD_SORT_COLUMNS[sort]

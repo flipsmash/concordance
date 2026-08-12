@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
+import AddToSetMenu from './AddToSetMenu'
 import DifficultyHistogram from './DifficultyHistogram'
 import DomainDistribution from './DomainDistribution'
 import Pagination from './Pagination'
@@ -290,6 +291,9 @@ function WorkDetail() {
             <span className="browse-result-badges">
               {w.difficulty != null && <span className="browse-difficulty-pill">{Math.round(w.difficulty)}</span>}
               {w.archaic && w.archaic !== 'current' && <span className="browse-archaic-tag">{w.archaic}</span>}
+            </span>
+            <span className="browse-result-add-to-set" onClick={(e) => e.stopPropagation()}>
+              <AddToSetMenu wordIds={[w.id]} label="+" title="Add to set" />
             </span>
           </li>
         ))}

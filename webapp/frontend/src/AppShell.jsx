@@ -1,7 +1,8 @@
 import { Link, NavLink, Outlet } from 'react-router-dom'
 import './AppShell.css'
 import { useAuth } from './AuthContext'
-import { GuideWordProvider, useGuideHeader } from './GuideWordContext'
+import { useGuideCenter } from './GuideWordContext'
+import HeaderSearch from './HeaderSearch'
 import { LogoIcon, LogoMark } from './Logo'
 
 // The destinations a reader can always reach, one click away, from anywhere
@@ -58,14 +59,14 @@ function ThumbRail() {
 }
 
 function GuideHeaderBar() {
-  const { left, center, right } = useGuideHeader()
+  const center = useGuideCenter()
   return (
     <div className="guide-header">
-      <span className="guide-word guide-word-left">{left}</span>
+      <HeaderSearch mode="lemma" placeholder="Search words…" />
       <Link to="/app" className="guide-brand" role="img" aria-label={`concordance — ${center}`}>
         <LogoMark width={120} />
       </Link>
-      <span className="guide-word guide-word-right">{right}</span>
+      <HeaderSearch mode="definition" placeholder="Search definitions…" />
     </div>
   )
 }
@@ -74,22 +75,20 @@ function GuideHeaderBar() {
  * (styled after the die-cut alphabet tabs on a dictionary's fore-edge) as
  * the one, single, always-visible way to reach every section a reader is
  * allowed into, plus a guide-word header (a dictionary spread's running
- * head) repurposed as live wayfinding. Existing pages keep their own
- * internal layout/content unchanged -- this only supplies the chrome
- * around them. */
+ * head) repurposed as a live word/definition search. Existing pages keep
+ * their own internal layout/content unchanged -- this only supplies the
+ * chrome around them. */
 function AppShell() {
   return (
-    <GuideWordProvider>
-      <div className="app-shell">
-        <ThumbRail />
-        <div className="app-shell-content">
-          <GuideHeaderBar />
-          <div className="app-shell-outlet">
-            <Outlet />
-          </div>
+    <div className="app-shell">
+      <ThumbRail />
+      <div className="app-shell-content">
+        <GuideHeaderBar />
+        <div className="app-shell-outlet">
+          <Outlet />
         </div>
       </div>
-    </GuideWordProvider>
+    </div>
   )
 }
 

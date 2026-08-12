@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
+import AddToSetMenu from './AddToSetMenu'
 import InviteButton from './InviteButton'
 import { usePagedTable } from './usePagedTable'
 import './Browse.css' // .browse-az-strip/.browse-az-letter -- reused here as-is
@@ -174,6 +175,7 @@ function AcceptedView() {
                 <td className="validity-label">{w.validity_label || '—'}</td>
                 <td className="validity-notes">{w.validity_notes || '—'}</td>
                 <td className="actions">
+                  <AddToSetMenu wordIds={[w.id]} label="+ Set" title="Add to set" />
                   <button type="button" className="delete-btn" onClick={() => handleDelete(w.id)}>
                     Delete
                   </button>

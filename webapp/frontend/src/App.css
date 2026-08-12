@@ -244,6 +244,14 @@ header {
 
 .table-wrap {
   overflow-x: auto;
+  /* Explicit, not left to default: setting only overflow-x forces the
+     browser to compute overflow-y as auto too (CSS Overflow spec), which
+     would clip AddToSetMenu's dropdown (position: absolute, opens below
+     its button) whenever a row near the table's bottom edge opens one --
+     the dropdown isn't part of the table's own normal-flow height, so it
+     extends past this box's already-computed bounds. Horizontal scroll is
+     the only axis this wrapper actually needs to constrain. */
+  overflow-y: visible;
   border: 1px solid var(--border);
   border-radius: 8px;
 }
@@ -363,6 +371,10 @@ td.validity-notes {
 td.actions {
   white-space: nowrap;
   text-align: right;
+}
+
+td.actions > .add-to-set-menu {
+  margin-right: 8px;
 }
 
 td.empty {

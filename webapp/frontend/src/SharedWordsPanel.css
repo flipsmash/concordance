@@ -71,6 +71,17 @@
   font-size: 13px;
 }
 
+.shared-words-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.shared-words-text {
+  min-width: 0;
+}
+
 .shared-words-lemma {
   font-weight: 600;
   color: var(--text-h);

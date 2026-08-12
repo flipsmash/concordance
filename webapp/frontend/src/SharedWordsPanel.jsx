@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import AddToSetMenu from './AddToSetMenu'
 import './SharedWordsPanel.css'
 
 const API_BASE = ''
@@ -55,9 +56,12 @@ function SharedWordsPanel({ fetchUrl, titleA, titleB, onClose }) {
             <p className="muted">{words.length} shared words, rarest first</p>
             <ul className="shared-words-list">
               {words.map((w) => (
-                <li key={w.id}>
-                  <span className="shared-words-lemma">{w.lemma}</span>
-                  {w.definition && <span className="shared-words-def"> — {w.definition}</span>}
+                <li key={w.id} className="shared-words-row">
+                  <span className="shared-words-text">
+                    <span className="shared-words-lemma">{w.lemma}</span>
+                    {w.definition && <span className="shared-words-def"> — {w.definition}</span>}
+                  </span>
+                  <AddToSetMenu wordIds={[w.id]} label="+" title="Add to set" />
                 </li>
               ))}
             </ul>
