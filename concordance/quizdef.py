@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+from difflib import SequenceMatcher
 
 from nltk.stem import SnowballStemmer
 
@@ -26,8 +27,24 @@ from .validity_score import _PREFIXES
 
 _st = SnowballStemmer("english")
 
+# Near-duplicate spelling threshold for _shared_root's SequenceMatcher check
+# below -- calibrated against real corpus data (see the commit that added
+# this: a full scan of every word marked quizzable with a "clean" quiz_
+# definition). Every genuine near-duplicate found (typos, obsolete/dialectal
+# spellings, straightforward compounds like "cocreate"/"create") scored
+# >= 0.857; coincidental matches between UNRELATED words sharing a common
+# Greco-Latin combining form ("micrograph"/"photograph", both just using
+# "-graph"; "automorphism"/"isomorphism", both using "-morphism") topped out
+# at 0.783 -- comfortable margin either side of 0.85.
+_NEAR_DUP_RATIO = 0.85
 
-# --- leak detection (no model) --------------------------------------------
+# Below this length, a single inserted/deleted/substituted letter alone
+# already clears _NEAR_DUP_RATIO (e.g. "eat"/"seat" scores 0.857) with no
+# regard for whether the words are actually related -- short words need a
+# real edit-distance signal, not a bare ratio, and this module doesn't have
+# one; simplest fix is to not apply the ratio check below this floor at all.
+_NEAR_DUP_MIN_LEN = 5
+
 
 def _shared_root(a: str, b: str) -> bool:
     n = 0
@@ -51,6 +68,21 @@ def _shared_root(a: str, b: str) -> bool:
         for p in _PREFIXES:
             if word.startswith(p) and word[len(p):] == other and len(other) >= 4:
                 return True
+    # Near-duplicate spelling that the leading-character alignment above
+    # misses because the difference isn't anchored at the very start of the
+    # word -- "santer"/"saunter" (an inserted letter mid-word), "vastiness"/
+    # "vastness" (an inserted letter near the end), "codpiece"/"codpieced"
+    # (a trailing suffix). Found live: "codpieced" stayed marked quizzable
+    # with a "clean" (unmodified) quiz_definition that read "Wearing, or
+    # fitted with, a codpiece" -- the answer was sitting right there,
+    # untouched, because neither check above catches a difference that
+    # isn't at the string's start. SequenceMatcher's ratio (2*matches /
+    # total length) aligns matching runs wherever they fall, not just from
+    # the left edge, so it catches this shape of near-duplicate that the
+    # other two rules structurally can't.
+    if (min(len(a), len(b)) >= _NEAR_DUP_MIN_LEN
+            and SequenceMatcher(None, a, b).ratio() >= _NEAR_DUP_RATIO):
+        return True
     return False
 
 
@@ -308,18 +340,39 @@ def redaction_too_sparse(quiz_definition: str, threshold: int = 3) -> bool:
 # leaks the root, i.e. gate on `has_leak(word, definition)` in addition to the
 # morphology+zipf match. That keeps semantically-drifted derivatives quizzable
 # (their gloss won't contain the root) while still dropping the truly
-# transparent ones (reveller -> "one who revels"). Needs the surface word passed
-# in, which compute_quizzable already has.
+# transparent ones (reveller -> "one who revels"). `word` is now a real
+# parameter below (added for the near-duplicate-leak safety net, a separate
+# fix) -- this TODO's own proposed change is now a small, mechanical edit to
+# the morph_root branch, still not done.
 def quizzable(definition: str, morph_root: str | None = None,
               root_zipf: float | None = None, quiz_definition: str | None = None,
-              quiz_def_source: str | None = None) -> tuple[bool, str]:
+              quiz_def_source: str | None = None, word: str | None = None) -> tuple[bool, str]:
     """(quizzable, reason). False when the answer is trivially inferable, OR
     (quiz_definition, quiz_def_source) shows redaction destroyed too much of
-    the definition's actual content to serve as a usable clue."""
+    the definition's actual content to serve as a usable clue.
+
+    `word` is optional (omitted everywhere in this module's own test suite,
+    which exercises the other rules directly) but should always be passed
+    in production -- it gates a final has_leak() check against whatever
+    text actually gets shown in a quiz (quiz_definition if set, else the
+    raw definition). This exists as a safety net independent of the other
+    checks above: compute_quiz_definitions decides quiz_definition/
+    quiz_def_source once, upstream, using has_leak() as it stood at THAT
+    time; if has_leak() later gains a new detection rule (as it did for
+    near-duplicate spelling -- see _shared_root), every word already marked
+    "clean" needs that rule re-applied to catch up, and re-running
+    compute_quiz_definitions against the whole corpus means real LLM-rewrite
+    cost for every leaker. Re-running compute_quizzable alone is free (no
+    model calls) and, with this check, sufficient -- found live: "codpieced"
+    stayed quizzable with an unmodified "clean" quiz_definition literally
+    reading "Wearing, or fitted with, a codpiece" until this existed."""
     if _VARIANT_RE.search(definition or ""):
         return False, "grammatical/variant form"
     if morph_root and root_zipf is not None and root_zipf >= _COMMON_ROOT_ZIPF:
         return False, f"transparent derivative of common root '{morph_root}'"
     if quiz_def_source == "redacted" and redaction_too_sparse(quiz_definition or ""):
         return False, "redaction destroyed too much definitional content"
+    served = quiz_definition if quiz_definition is not None else definition
+    if word and has_leak(word, served):
+        return False, "definition leaks a near-identical word"
     return True, ""

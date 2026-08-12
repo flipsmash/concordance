@@ -49,6 +49,44 @@ def test_redact_blanks_leaking_tokens_only():
     assert "border" not in out.lower() and "person" in out
 
 
+def test_shared_root_detects_near_duplicate_spelling_variant():
+    # Regression: "codpieced" stayed marked quizzable with an untouched
+    # "clean" quiz_definition reading "Wearing, or fitted with, a
+    # codpiece." -- neither the leading-character-alignment check nor the
+    # prefix-glue check catches a difference that isn't anchored at the
+    # word's start, since "codpiece" is a straight PREFIX of "codpieced"
+    # sharing 8 of 9 characters, but neither existing rule looks past the
+    # first mismatch to notice that.
+    assert quizdef._shared_root("codpieced", "codpiece")
+    # An inserted letter mid-word ("santer" -> "saunter") and near the end
+    # ("vastness" -> "vastiness") -- same shape of miss, different position.
+    assert quizdef._shared_root("santer", "saunter")
+    assert quizdef._shared_root("vastness", "vastiness")
+
+
+def test_shared_root_does_not_false_positive_on_shared_combining_form():
+    # "micrograph"/"photograph" and "automorphism"/"isomorphism" are
+    # UNRELATED words that only coincidentally both use a common Greco-
+    # Latin combining form ("-graph", "-morphism") -- real corpus data
+    # showed these score up to 0.783 by the same similarity ratio the
+    # near-duplicate check above uses (real near-duplicates scored >=
+    # 0.857), so 0.85 is a deliberately calibrated cutoff, not an
+    # arbitrary one -- must stay well clear of this pair.
+    assert not quizdef._shared_root("micrograph", "photograph")
+    assert not quizdef._shared_root("automorphism", "isomorphism")
+    assert not quizdef._shared_root("horsepistol", "hospital")
+
+
+def test_shared_root_near_duplicate_check_ignores_short_words():
+    # A single inserted letter in a 3-letter word already clears the
+    # near-duplicate ratio (0.857 for "eat"/"seat") regardless of whether
+    # the words are actually related at all -- short words need a real
+    # edit-distance signal this check doesn't have, so it must not apply
+    # below the length floor.
+    assert not quizdef._shared_root("eat", "seat")
+    assert not quizdef._shared_root("cat", "cats")
+
+
 # --- quiz suitability -----------------------------------------------------
 
 def test_quizzable_excludes_variant_forms():
@@ -89,6 +127,39 @@ def test_quizzable_handles_empty_definition():
 def test_quizzable_no_exclusion_when_root_below_threshold():
     # root present but uncommon (zipf < 3.0) -> still quizzable
     ok, reason = quizdef.quizzable("The act of gnarring.", morph_root="gnar", root_zipf=1.2)
+    assert ok and reason == ""
+
+
+def test_quizzable_excludes_near_duplicate_leak_in_served_definition():
+    # Regression, found live: "codpieced" was marked quizzable with an
+    # untouched "clean" quiz_definition reading "Wearing, or fitted with, a
+    # codpiece." -- none of quizzable()'s other checks (variant-form regex,
+    # common-root-zipf, redaction sparsity) had any way to catch this;
+    # `word` gates a final has_leak() check against whatever's actually
+    # served (quiz_definition here, since it's set), independent of the
+    # other rules.
+    ok, reason = quizdef.quizzable(
+        "Wearing, or fitted with, a codpiece.",
+        quiz_definition="Wearing, or fitted with, a codpiece.",
+        quiz_def_source="clean",
+        word="codpieced",
+    )
+    assert not ok and "near-identical" in reason
+
+
+def test_quizzable_word_check_falls_back_to_raw_definition_when_unset():
+    # No quiz_definition/quiz_def_source supplied (a word compute_quiz_
+    # definitions hasn't reached yet) -- the leak check must still fall
+    # back to checking the raw `definition` rather than skipping entirely.
+    ok, reason = quizdef.quizzable("Wearing, or fitted with, a codpiece.", word="codpieced")
+    assert not ok and "near-identical" in reason
+
+
+def test_quizzable_omitting_word_skips_the_near_duplicate_check():
+    # Backward compatibility: every other test in this file calls
+    # quizzable() without `word` at all -- that must keep working exactly
+    # as before (this check simply never fires without a word to check).
+    ok, reason = quizdef.quizzable("Wearing, or fitted with, a codpiece.")
     assert ok and reason == ""
 
 

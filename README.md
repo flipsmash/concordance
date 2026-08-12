@@ -454,9 +454,18 @@ concordance calibrate-difficulty  # per-user difficulty nudge from quiz response
   separate `quiz_definition` per word — passed through as-is if already clean,
   LLM-paraphrased (then machine-verified leak-free) if not, redacted as a last
   resort.
-- **`quizzable`** — flags words whose only difference from an already-known
-  base form is grammatical (plurals, inflections) or a transparently inferable
-  derivative, so quizzing doesn't waste a card on something not actually new.
+- **`quizzable`** — flags a word unquizzable for any of three reasons: its
+  only difference from an already-known base form is grammatical (plurals,
+  inflections); it's a transparently inferable derivative of a common root
+  ("reveller" ← "revel"); or the definition actually served (`quiz_definition`
+  if set, else the raw definition) still leaks a near-identical word even
+  after `quizdef`'s own pass — a stem match, a known-prefix derivative, or a
+  close spelling variant like "codpieced" defined via "codpiece" — so quizzing
+  never hands the answer away or wastes a card on something not actually new.
+  Always recomputes every word on every run (no `--only-missing`), which
+  matters here specifically: it's what lets a new detection rule apply
+  retroactively to the whole corpus for free, without re-running `quizdef`'s
+  costly LLM rewrite pass.
 - **`calibrate-difficulty`** — a per-`(user, word)` nudge to the ex-ante
   `difficulty` score, from that user's own **first** quiz exposure to the
   word (`concordance/calibration.py`): a fixed-guessing-floor Rasch-style

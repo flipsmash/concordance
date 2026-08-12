@@ -2362,7 +2362,7 @@ def compute_quizzable(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> dic
         for wid, lemma, defn, quiz_defn, quiz_def_source in rows:
             root = _morph_root(lemma)
             rz = zipf_frequency(root, "en") if root else None
-            ok, reason = quizdef.quizzable(defn, root, rz, quiz_defn, quiz_def_source)
+            ok, reason = quizdef.quizzable(defn, root, rz, quiz_defn, quiz_def_source, word=lemma)
             dist["quizzable" if ok else "excluded"] += 1
             cur.execute(
                 f"""INSERT INTO {s}.word_difficulty (word_id, quizzable, quizzable_reason, updated_at)
