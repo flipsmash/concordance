@@ -306,6 +306,19 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
             </span>
           )}
         </div>
+        {/* Admin-only: the quizzable verdict above is judged against
+            quiz_definition (what a quiz actually shows), NOT the plain
+            `definition` displayed at the top of this page -- those two can
+            read very differently (a leaking raw definition, safely
+            rewritten for quizzing) with nothing else on this page to make
+            that visible. Found live: an admin flagged "codpieced" as a bug
+            because its definition still says "codpiece", with no way to
+            see that quiz_definition had already been rewritten leak-free. */}
+        {user?.is_admin && word.quiz_definition && (
+          <p className="muted word-detail-quiz-definition">
+            Quiz definition ({word.quiz_def_source}): {word.quiz_definition}
+          </p>
+        )}
         {factors && (
           <div className="difficulty-factors-grid">
             <span>zipf</span>

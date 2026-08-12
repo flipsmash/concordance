@@ -271,6 +271,11 @@
   color: var(--danger);
 }
 
+.word-detail-quiz-definition {
+  font-size: 13px;
+  margin-top: 6px;
+}
+
 .difficulty-factors-grid {
   display: grid;
   grid-template-columns: max-content max-content;

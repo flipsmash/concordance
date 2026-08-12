@@ -286,3 +286,56 @@ def test_edit_definition_rejects_empty():
         assert res.status_code == 422
     finally:
         main.SCHEMA = old_schema
+
+
+@pg
+def test_word_detail_exposes_quiz_definition_and_source():
+    """Regression: an admin flagged "codpieced" as wrongly quizzable because
+    its plain `definition` still said "codpiece" -- quizzable is actually
+    judged against `quiz_definition` (what a quiz really shows), which had
+    already been safely rewritten, but nothing in the word detail response
+    exposed that field to let an admin see the two disagree. Word detail is
+    require_viewer (not admin-gated) at the API layer -- the frontend hides
+    this field for non-admins, but the API itself must always return it."""
+    from starlette.testclient import TestClient
+
+    from webapp.backend import main
+
+    schema = "cc_test_def_edit_quiz_definition"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"INSERT INTO {schema}.users (username, password_hash, is_admin) VALUES ('adminuser', %s, true)",
+            (auth.hash_password("password123"),),
+        )
+        cur.execute(
+            f"""INSERT INTO {schema}.word (lemma, definition, quiz_definition, quiz_def_source, active)
+                VALUES ('codpieced', 'Wearing, or fitted with, a codpiece.',
+                        'Wearing a covering for the genitals', 'rewritten', true)
+                RETURNING id""",
+        )
+        word_id = cur.fetchone()[0]
+        cur.execute(
+            f"""INSERT INTO {schema}.word_difficulty (word_id, quizzable) VALUES (%s, true)""",
+            (word_id,),
+        )
+    conn.commit()
+    conn.close()
+
+    old_schema = main.SCHEMA
+    main.SCHEMA = schema
+    try:
+        client = TestClient(main.app, base_url="https://testserver")
+        client.post("/api/auth/login", json={"username": "adminuser", "password": "password123"})
+
+        detail = client.get(f"/api/words/{word_id}").json()
+        assert detail["definition"] == "Wearing, or fitted with, a codpiece."
+        assert detail["quiz_definition"] == "Wearing a covering for the genitals"
+        assert detail["quiz_def_source"] == "rewritten"
+        assert detail["quizzable"] is True
+    finally:
+        main.SCHEMA = old_schema

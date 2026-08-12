@@ -682,6 +682,14 @@ class WordDetail(BaseModel):
     archaic_confidence: float | None
     quizzable: bool | None
     quizzable_reason: str | None
+    quiz_definition: str | None  # the text actually served in a quiz -- see
+                                  # concordance/quizdef.py's own module
+                                  # docstring. Admin-only in the frontend:
+                                  # `definition` above can still look
+                                  # "leaky" on its own even when this word is
+                                  # correctly quizzable, since quizzable is
+                                  # judged against THIS field, not that one.
+    quiz_def_source: str | None  # 'clean' | 'rewritten' | 'redacted' | None
 
     ngram_peak: float | None
     ngram_recent: float | None
@@ -715,6 +723,7 @@ def word_detail(word_id: int, _: dict = Depends(require_viewer)) -> WordDetail:
                        w.synonyms, w.etymology, w.definition_source, w.first_added,
                        d.archaic, d.archaic_evidence, d.archaic_confidence,
                        d.difficulty, d.difficulty_factors, d.quizzable, d.quizzable_reason,
+                       w.quiz_definition, w.quiz_def_source,
                        n.peak, n.recent, n.recency_ratio, n.peak_year,
                        a.source
                 FROM {SCHEMA}.word w
@@ -729,7 +738,8 @@ def word_detail(word_id: int, _: dict = Depends(require_viewer)) -> WordDetail:
             raise HTTPException(status_code=404, detail="word not found")
         (lemma, pos, definition, ipa, sentence, chapter, synonyms, etymology, definition_source,
          first_added, archaic, archaic_evidence, archaic_confidence, difficulty, difficulty_factors,
-         quizzable, quizzable_reason, ngram_peak, ngram_recent, ngram_recency_ratio, ngram_peak_year,
+         quizzable, quizzable_reason, quiz_definition, quiz_def_source,
+         ngram_peak, ngram_recent, ngram_recency_ratio, ngram_peak_year,
          audio_source) = row
 
         cur.execute(
@@ -783,6 +793,7 @@ def word_detail(word_id: int, _: dict = Depends(require_viewer)) -> WordDetail:
         difficulty_factors=DifficultyFactors(**difficulty_factors) if difficulty_factors else None,
         archaic=archaic, archaic_evidence=archaic_evidence, archaic_confidence=archaic_confidence,
         quizzable=quizzable, quizzable_reason=quizzable_reason,
+        quiz_definition=quiz_definition, quiz_def_source=quiz_def_source,
         ngram_peak=ngram_peak, ngram_recent=ngram_recent, ngram_recency_ratio=ngram_recency_ratio,
         ngram_peak_year=ngram_peak_year, audio_source=audio_source,
         categories=categories, books=books, definition_links=definition_links,
