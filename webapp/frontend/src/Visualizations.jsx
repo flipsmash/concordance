@@ -43,6 +43,16 @@ function toFameHistBands(buckets) {
   }))
 }
 
+// A fame bar's own label ("1".."10", or "Not yet scored") is enough to
+// build the deep-link query on its own -- unlike band_min/band_max (both
+// forced to 0/null above purely for DifficultyHistogram's styling hook),
+// the label is the one field that still carries the real score.
+function fameHistQuery(label) {
+  return label === 'Not yet scored'
+    ? { fame_unscored_only: 'true' }
+    : { fame_min: label, fame_max: label }
+}
+
 function Visualizations() {
   const navigate = useNavigate()
   const [bookHist, setBookHist] = useState([])
@@ -145,7 +155,11 @@ function Visualizations() {
           means something. Fame is scored by a separate, manually-run process, not part of routine
           maintenance, so a large "Not yet scored" bar reflects that backlog, not missing data.
         </p>
-        <DifficultyHistogram bands={bookFameHist} selectedBand={null} onSelect={() => {}} />
+        <DifficultyHistogram
+          bands={bookFameHist}
+          selectedBand={null}
+          onSelect={(b) => navigate(`/app/books?${new URLSearchParams(fameHistQuery(b.label))}`)}
+        />
       </section>
 
       <section className="browse-facets viz-section">
@@ -153,7 +167,11 @@ function Visualizations() {
         <p className="viz-description">
           Same absolute 1–10 scale, aggregated per author rather than per book.
         </p>
-        <DifficultyHistogram bands={authorFameHist} selectedBand={null} onSelect={() => {}} />
+        <DifficultyHistogram
+          bands={authorFameHist}
+          selectedBand={null}
+          onSelect={(b) => navigate(`/app/authors?${new URLSearchParams(fameHistQuery(b.label))}`)}
+        />
       </section>
 
       <section className="browse-facets viz-section">

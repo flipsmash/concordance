@@ -17,7 +17,7 @@ const BOTTOM_PADDING = 30
 // (see BookDendrogramNode in browse.py) rather than one string, since a
 // book needs id for identity/navigation and title for display -- unlike an
 // author, where the name serves both jobs.
-function BookDendrogram({ onBookClick, highlightBookId }) {
+function BookDendrogram({ onBookClick, highlightBookId, scope = 'volume' }) {
   const [tree, setTree] = useState(null)
   const [leafOrder, setLeafOrder] = useState([])
   const [clusterByBookId, setClusterByBookId] = useState({})
@@ -45,7 +45,8 @@ function BookDendrogram({ onBookClick, highlightBookId }) {
   const activeBookId = hoveredBookId ?? highlightBookId ?? null
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/browse/books/dendrogram`)
+    setTree(null)
+    fetch(`${API_BASE}/api/browse/books/dendrogram?scope=${scope}`)
       .then((res) => {
         if (!res.ok) throw new Error(`request failed (${res.status})`)
         return res.json()
@@ -56,14 +57,14 @@ function BookDendrogram({ onBookClick, highlightBookId }) {
       })
       .catch((err) => setError(err.message || 'failed to load dendrogram'))
 
-    fetch(`${API_BASE}/api/browse/books/map`)
+    fetch(`${API_BASE}/api/browse/books/map?scope=${scope}`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (!data) return
         setClusterByBookId(Object.fromEntries(data.nodes.map((n) => [n.id, n.cluster_id])))
       })
       .catch(() => {})
-  }, [])
+  }, [scope])
 
   const layout = useMemo(() => {
     if (!tree || leafOrder.length === 0) return null
@@ -106,7 +107,9 @@ function BookDendrogram({ onBookClick, highlightBookId }) {
       {error && <div className="graph-error">{error}</div>}
       {tree === null && !error && <div className="graph-loading">Loading…</div>}
       {tree !== null && leafOrder.length === 0 && (
-        <div className="graph-empty">No clustering data yet — run `concordance book-clustering`.</div>
+        <div className="graph-empty">
+          No clustering data yet — run `concordance book-clustering{scope === 'fame' ? ' --min-fame 8' : ''}`.
+        </div>
       )}
       {layout && (
         <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} className="book-dendrogram-svg" role="img" aria-label="Book dendrogram">

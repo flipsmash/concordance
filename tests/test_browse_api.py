@@ -383,6 +383,58 @@ def test_fame_histogram_buckets_by_integer_score_and_counts_unscored():
 
 
 @pg
+def test_fame_min_max_and_unscored_only_filter_books_and_authors():
+    """Click-through from the Visualizations page's fame-distribution bars:
+    a single-score bar (fame_min=fame_max=<n>) and the "Not yet scored" bar
+    (fame_unscored_only=true) must each isolate exactly that slice, and the
+    two are mutually exclusive (a combined request is a 400, not silently
+    resolved one way or the other)."""
+    schema = "cc_test_browse_fame_filter"
+    client, conn, restore = _setup(schema)
+    try:
+        b9 = _insert_book(conn, schema, "Famous Book", author="Bard, William")
+        b_unscored = _insert_book(conn, schema, "Obscure Book", author="Bard, William")
+        w1 = _insert_word(conn, schema, "wordone")
+        w2 = _insert_word(conn, schema, "wordtwo")
+        _link(conn, schema, w1, b9)
+        _link(conn, schema, w2, b_unscored)
+        with conn.cursor() as cur:
+            cur.execute(f"INSERT INTO {schema}.book_fame (book_id, fame_score) VALUES (%s, 9.0)", (b9,))
+            cur.execute(
+                f"INSERT INTO {schema}.author_fame (author, fame_score) VALUES (%s, 9.0)", ("Bard, William",)
+            )
+        conn.commit()
+
+        res = client.get("/api/browse/books", params={"fame_min": 9, "fame_max": 9})
+        assert [r["title"] for r in res.json()["items"]] == ["Famous Book"]
+
+        res = client.get("/api/browse/books", params={"fame_unscored_only": "true"})
+        assert [r["title"] for r in res.json()["items"]] == ["Obscure Book"]
+
+        # Author "Bard, William" has one 9-scored book and one unscored book,
+        # but a SINGLE author_fame row (9.0) -- the author-scope filter reads
+        # author_fame, not any per-book aggregate, so unscored_only finds no
+        # match at the author level even though this same author has an
+        # unscored book.
+        res = client.get("/api/browse/authors", params={"fame_min": 9, "fame_max": 9})
+        assert [r["author"] for r in res.json()["items"]] == ["Bard, William"]
+
+        res = client.get("/api/browse/authors", params={"fame_unscored_only": "true"})
+        assert res.json()["items"] == []
+
+        res = client.get(
+            "/api/browse/books", params={"fame_min": 9, "fame_unscored_only": "true"}
+        )
+        assert res.status_code == 400
+        res = client.get(
+            "/api/browse/authors", params={"fame_max": 9, "fame_unscored_only": "true"}
+        )
+        assert res.status_code == 400
+    finally:
+        restore()
+
+
+@pg
 def test_unique_word_bucket_filters_books_and_authors():
     # Same fixture as test_unique_word_histogram_buckets_book_and_author_scopes
     # (Book A: 2 solo words -> bucket "2"; Book B: 0 solo words -> bucket "0";
@@ -1350,6 +1402,71 @@ def test_authors_relatedness_global_graph_dedupes_mutual_edges():
 
 
 @pg
+def test_authors_and_books_relatedness_scope_fame_restricts_to_the_fame_cluster_set():
+    """The force-directed Graph tab's ?scope=fame must restrict its node
+    set to the SAME authors/books author_cluster_fame/book_cluster_fame
+    holds (bug: it used to ignore scope entirely and always show the
+    top-by-volume set, so switching the Volume/Fame toggle while on the
+    Graph tab visibly did nothing) -- edges still come from author_
+    similarity/book_similarity directly, just filtered to pairs where both
+    ends are in the scoped set."""
+    schema = "cc_test_relatedness_scope_fame"
+    client, conn, restore = _setup(schema)
+    try:
+        book_a = _insert_book(conn, schema, "Book A", author="Author A")
+        book_b = _insert_book(conn, schema, "Book B", author="Author B")
+        book_c = _insert_book(conn, schema, "Book C", author="Author C")
+        # A third fame-scored author/book (E, isolated -- no shared vocab
+        # with anyone) purely to clear compute_author/book_clustering's own
+        # "< 3 qualifying entities -> empty run" guard; A and B alone would
+        # trip that guard and the fame run would come back empty regardless
+        # of whether scope filtering itself works.
+        book_e = _insert_book(conn, schema, "Book E", author="Author E")
+        for i in range(3):
+            w = _insert_word(conn, schema, f"shared{i}")
+            _link(conn, schema, w, book_a)
+            _link(conn, schema, w, book_b)
+        w_c = _insert_word(conn, schema, "onlyc")
+        _link(conn, schema, w_c, book_a)
+        _link(conn, schema, w_c, book_c)
+        for i in range(3):
+            _link(conn, schema, _insert_word(conn, schema, f"onlye{i}"), book_e)
+        with conn.cursor() as cur:
+            cur.execute(f"INSERT INTO {schema}.author_fame (author, fame_score) VALUES ('Author A', 9.0)")
+            cur.execute(f"INSERT INTO {schema}.author_fame (author, fame_score) VALUES ('Author B', 9.0)")
+            cur.execute(f"INSERT INTO {schema}.author_fame (author, fame_score) VALUES ('Author E', 9.0)")
+            cur.execute(f"INSERT INTO {schema}.book_fame (book_id, fame_score) VALUES (%s, 9.0)", (book_a,))
+            cur.execute(f"INSERT INTO {schema}.book_fame (book_id, fame_score) VALUES (%s, 9.0)", (book_b,))
+            cur.execute(f"INSERT INTO {schema}.book_fame (book_id, fame_score) VALUES (%s, 9.0)", (book_e,))
+        conn.commit()
+
+        from concordance import db as _db
+        _db.compute_author_similarity(conn, schema)
+        _db.compute_book_similarity(conn, schema)
+        _db.compute_author_clustering(conn, schema, min_fame=8.0, n_clusters=2)
+        _db.compute_book_clustering(conn, schema, min_fame=8.0, n_clusters=2)
+
+        default_resp = client.get("/api/browse/authors/relatedness").json()
+        assert {n["id"] for n in default_resp["nodes"]} == {"Author A", "Author B", "Author C", "Author E"}
+
+        fame_resp = client.get("/api/browse/authors/relatedness?scope=fame").json()
+        assert {n["id"] for n in fame_resp["nodes"]} == {"Author A", "Author B", "Author E"}
+        assert all(
+            e["source"] in {"Author A", "Author B", "Author E"} and e["target"] in {"Author A", "Author B", "Author E"}
+            for e in fame_resp["edges"]
+        )
+        assert len(fame_resp["edges"]) == 1  # the A<->B edge, deduped, C excluded entirely
+
+        default_books = client.get("/api/browse/books/relatedness").json()
+        assert {n["title"] for n in default_books["nodes"]} == {"Book A", "Book B", "Book C", "Book E"}
+
+        fame_books = client.get("/api/browse/books/relatedness?scope=fame").json()
+        assert {n["title"] for n in fame_books["nodes"]} == {"Book A", "Book B", "Book E"}
+    finally:
+        restore()
+
+
+@pg
 def test_authors_map_returns_precomputed_clusters():
     schema = "cc_test_authors_map"
     client, conn, restore = _setup(schema)
@@ -1431,6 +1548,73 @@ def test_authors_matrix_and_dendrogram_read_the_same_clustering_run():
         assert set(dendro["leaf_order"]) == set(matrix["authors"])
         assert dendro["tree"]["size"] == 10
         assert dendro["tree"]["left"] is not None and dendro["tree"]["right"] is not None
+    finally:
+        restore()
+
+
+@pg
+def test_cluster_map_matrix_dendrogram_scope_param_reads_the_fame_run():
+    """?scope=fame on authors/map, authors/matrix, authors/dendrogram, and
+    books/map must read the independently-computed author_cluster_fame*/
+    book_cluster_fame* tables (see compute_author_clustering's min_fame
+    docstring), not the default top_n-by-volume run -- and the default
+    (no scope, or scope=volume) must be completely unaffected by a fame run
+    existing alongside it."""
+    schema = "cc_test_cluster_scope_fame"
+    client, conn, restore = _setup(schema)
+    try:
+        from concordance import db as _db
+
+        # Volume-favored authors (many books, no fame score) vs. fame-favored
+        # authors (one book, but fame-scored) -- disjoint sets, so which
+        # table a scope reads is unambiguous from the response alone.
+        volume_words = [_insert_word(conn, schema, f"volumeword{i}") for i in range(10)]
+        for i in range(5):
+            book = _insert_book(conn, schema, f"Volume Book {i}", author=f"Volume{i}")
+            for w in volume_words:
+                _link(conn, schema, w, book)
+
+        fame_words = [_insert_word(conn, schema, f"fameword{i}") for i in range(10)]
+        fame_book_ids = []
+        for i in range(5):
+            book = _insert_book(conn, schema, f"Fame Book {i}", author=f"Fame{i}")
+            fame_book_ids.append(book)
+            for w in fame_words:
+                _link(conn, schema, w, book)
+        with conn.cursor() as cur:
+            for i in range(5):
+                cur.execute(f"INSERT INTO {schema}.author_fame (author, fame_score) VALUES (%s, 9.0)", (f"Fame{i}",))
+            for bid in fame_book_ids:
+                cur.execute(f"INSERT INTO {schema}.book_fame (book_id, fame_score) VALUES (%s, 9.0)", (bid,))
+        conn.commit()
+
+        _db.compute_author_clustering(conn, schema, top_n=200, n_clusters=2)
+        _db.compute_author_clustering(conn, schema, min_fame=8.0, n_clusters=2)
+        _db.compute_book_clustering(conn, schema, top_n=200, n_clusters=2)
+        _db.compute_book_clustering(conn, schema, min_fame=8.0, n_clusters=2)
+
+        # top_n=200 easily covers all 10 authors, so the default/volume run
+        # (unfiltered by fame) includes BOTH groups -- the discriminating
+        # check is that scope=fame reads a strictly smaller, DIFFERENT set
+        # (only the fame-scored group), not that it excludes the fame
+        # group from the volume run (top_n alone has no reason to).
+        default_authors = {n["author"] for n in client.get("/api/browse/authors/map").json()["nodes"]}
+        volume_authors = {n["author"] for n in client.get("/api/browse/authors/map?scope=volume").json()["nodes"]}
+        fame_authors = {n["author"] for n in client.get("/api/browse/authors/map?scope=fame").json()["nodes"]}
+        all_authors = {f"Volume{i}" for i in range(5)} | {f"Fame{i}" for i in range(5)}
+        assert default_authors == volume_authors == all_authors
+        assert fame_authors == {f"Fame{i}" for i in range(5)}
+        assert fame_authors != default_authors
+
+        assert set(client.get("/api/browse/authors/matrix?scope=fame").json()["authors"]) == fame_authors
+        assert set(client.get("/api/browse/authors/dendrogram?scope=fame").json()["leaf_order"]) == fame_authors
+
+        default_books = {n["title"] for n in client.get("/api/browse/books/map").json()["nodes"]}
+        fame_books = {n["title"] for n in client.get("/api/browse/books/map?scope=fame").json()["nodes"]}
+        all_books = {f"Volume Book {i}" for i in range(5)} | {f"Fame Book {i}" for i in range(5)}
+        assert default_books == all_books
+        assert fame_books == {f"Fame Book {i}" for i in range(5)}
+        assert fame_books != default_books
     finally:
         restore()
 

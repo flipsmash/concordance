@@ -18,7 +18,7 @@ const RADIUS_MAX = 14
 // static (no simulation to run), so SVG's native onClick/hover avoids
 // re-deriving RelatednessGraph's custom canvas hit-testing machinery for
 // a case that doesn't need it.
-function AuthorClusterMap({ onAuthorClick, highlightAuthor }) {
+function AuthorClusterMap({ onAuthorClick, highlightAuthor, scope = 'volume' }) {
   const [nodes, setNodes] = useState(null) // null = loading
   const [error, setError] = useState('')
   const [hovered, setHovered] = useState(null)
@@ -26,14 +26,15 @@ function AuthorClusterMap({ onAuthorClick, highlightAuthor }) {
   const containerRef = useRef(null)
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/browse/authors/map`)
+    setNodes(null)
+    fetch(`${API_BASE}/api/browse/authors/map?scope=${scope}`)
       .then((res) => {
         if (!res.ok) throw new Error(`request failed (${res.status})`)
         return res.json()
       })
       .then((data) => setNodes(data.nodes))
       .catch((err) => setError(err.message || 'failed to load cluster map'))
-  }, [])
+  }, [scope])
 
   useEffect(() => {
     function handleFullscreenChange() {
@@ -97,7 +98,9 @@ function AuthorClusterMap({ onAuthorClick, highlightAuthor }) {
       {error && <div className="graph-error">{error}</div>}
       {nodes === null && !error && <div className="graph-loading">Loading…</div>}
       {nodes !== null && nodes.length === 0 && !error && (
-        <div className="graph-empty">No cluster data yet -- run `concordance author-clustering`.</div>
+        <div className="graph-empty">
+          No cluster data yet -- run `concordance author-clustering{scope === 'fame' ? ' --min-fame 8' : ''}`.
+        </div>
       )}
       {points.length > 0 && (
         <svg viewBox={`0 0 ${VIEW} ${VIEW}`} className="cluster-map-svg" role="img" aria-label="Author cluster map">

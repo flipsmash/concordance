@@ -232,6 +232,55 @@ CREATE TABLE IF NOT EXISTS {s}.book_cluster_run (
     computed_at  timestamptz NOT NULL DEFAULT now()
 );
 
+-- Identical shape to author_cluster/author_cluster_run and
+-- book_cluster/book_cluster_run above, one selection criterion swapped:
+-- these hold a run selected by fame_score threshold (compute_author_
+-- clustering/compute_book_clustering called with min_fame set) instead of
+-- top-N by volume -- a second, independently-computed lens on the corpus
+-- ("the most historically important authors/books" rather than "the
+-- most-represented ones"), not a replacement. Separate tables rather than
+-- a scope column on the originals because both runs need to coexist and
+-- be read independently (the frontend's Volume/Fame toggle switches
+-- between them by fetching a different endpoint, not by filtering one
+-- shared table), and because the two runs are recomputed independently
+-- and on different schedules (see compute_author_clustering's min_fame
+-- docstring for why the fame variant isn't part of routine `maintain`).
+CREATE TABLE IF NOT EXISTS {s}.author_cluster_fame (
+    author       text PRIMARY KEY,
+    cluster_id   integer NOT NULL,
+    mds_x        double precision NOT NULL,
+    mds_y        double precision NOT NULL,
+    book_count   integer NOT NULL,
+    computed_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS {s}.author_cluster_fame_run (
+    id           integer PRIMARY KEY CHECK (id = 1),
+    leaf_order   text[] NOT NULL,
+    grid         jsonb NOT NULL,
+    tree_json    jsonb NOT NULL,
+    computed_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS {s}.book_cluster_fame (
+    book_id      integer PRIMARY KEY REFERENCES {s}.book(id) ON DELETE CASCADE,
+    title        text NOT NULL,
+    author       text,
+    cluster_id   integer NOT NULL,
+    mds_x        double precision NOT NULL,
+    mds_y        double precision NOT NULL,
+    word_count   integer NOT NULL,
+    computed_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS {s}.book_cluster_fame_run (
+    id           integer PRIMARY KEY CHECK (id = 1),
+    leaf_order   jsonb NOT NULL,
+    grid         jsonb NOT NULL,
+    tree_json    jsonb NOT NULL,
+    computed_at  timestamptz NOT NULL DEFAULT now()
+);
+
 -- Absolute (NOT corpus-relative) fame/historical-importance score, 1-10,
 -- LLM-judged against a fixed external rubric anchored on real reference
 -- figures (Shakespeare=10) -- see fame.py. author is plain text, same
@@ -3124,10 +3173,27 @@ def _linkage_to_tree(Z, leaf_data: list[dict]) -> dict:
 
 
 def compute_author_clustering(conn, schema: str = DEFAULT_SCHEMA, *, top_n: int = 200,
-                              max_df_fraction: float = 0.5, n_clusters: int = 12) -> dict:
+                              max_df_fraction: float = 0.5, n_clusters: int = 12,
+                              min_fame: float | None = None) -> dict:
     """`concordance author-clustering` / `maintain`'s clustering step: the
     data behind the cluster map, similarity matrix, and dendrogram views for
     the top `top_n` authors by book count.
+
+    min_fame switches the SELECTION criterion (and the destination tables)
+    entirely: instead of the top_n most-represented authors, every author
+    with author_fame.fame_score >= min_fame is included (top_n is ignored
+    in this mode -- there's no volume cap, since fame-scoring itself is a
+    slow, deliberately-manual process, see fame.py's own docstring, so this
+    set stays naturally small without an artificial limit). Writes to
+    author_cluster_fame/author_cluster_fame_run instead of author_cluster/
+    author_cluster_run, a second, independent lens on the corpus ("most
+    historically important" vs "most-represented") rather than a
+    replacement -- both runs coexist. Deliberately NOT wired into `maintain`
+    (unlike the top_n-by-volume run): fame scores change rarely and only via
+    a separate manually-run command (book-fame/author-fame), so recomputing
+    this on every maintain pass would be pure churn -- rerun it by hand
+    (`concordance author-clustering --min-fame 8`) after a fame-scoring run
+    actually changes the qualifying set.
 
     Reuses the exact corpus-wide author-df IDF setup compute_author_similarity
     uses (same n_authors/df/max_df_fraction computation over ALL authors,
@@ -3182,6 +3248,8 @@ def compute_author_clustering(conn, schema: str = DEFAULT_SCHEMA, *, top_n: int 
 
     s = _safe_schema(schema)
     placeholders = list(PLACEHOLDER_AUTHORS)
+    cluster_table = "author_cluster_fame" if min_fame is not None else "author_cluster"
+    cluster_run_table = "author_cluster_fame_run" if min_fame is not None else "author_cluster_run"
 
     with conn.cursor() as cur:
         cur.execute(f"""SELECT count(DISTINCT b.author) FROM {s}.word_book wb
@@ -3207,13 +3275,23 @@ def compute_author_clustering(conn, schema: str = DEFAULT_SCHEMA, *, top_n: int 
             conn.commit()
             return {"authors": 0, "clusters": 0}
 
-        cur.execute(f"""SELECT b.author, count(DISTINCT b.id) AS book_count
-                        FROM {s}.book b
-                        WHERE b.author IS NOT NULL AND b.author <> ''
-                          AND NOT (b.author = ANY(%s))
-                        GROUP BY b.author
-                        ORDER BY book_count DESC
-                        LIMIT %s""", (placeholders, top_n))
+        if min_fame is not None:
+            cur.execute(f"""SELECT b.author, count(DISTINCT b.id) AS book_count
+                            FROM {s}.book b
+                            JOIN {s}.author_fame af ON af.author = b.author
+                            WHERE b.author IS NOT NULL AND b.author <> ''
+                              AND NOT (b.author = ANY(%s))
+                              AND af.fame_score >= %s
+                            GROUP BY b.author, af.fame_score
+                            ORDER BY af.fame_score DESC, book_count DESC""", (placeholders, min_fame))
+        else:
+            cur.execute(f"""SELECT b.author, count(DISTINCT b.id) AS book_count
+                            FROM {s}.book b
+                            WHERE b.author IS NOT NULL AND b.author <> ''
+                              AND NOT (b.author = ANY(%s))
+                            GROUP BY b.author
+                            ORDER BY book_count DESC
+                            LIMIT %s""", (placeholders, top_n))
         top_authors = cur.fetchall()
         top_author_names = [r[0] for r in top_authors]
         book_count_by_author = {r[0]: r[1] for r in top_authors}
@@ -3294,16 +3372,16 @@ def compute_author_clustering(conn, schema: str = DEFAULT_SCHEMA, *, top_n: int 
     from psycopg.types.json import Json
 
     with conn.cursor() as cur:
-        cur.execute(f"TRUNCATE {s}.author_cluster")
+        cur.execute(f"TRUNCATE {s}.{cluster_table}")
         for i, author in enumerate(top_author_names):
             cur.execute(
-                f"""INSERT INTO {s}.author_cluster (author, cluster_id, mds_x, mds_y, book_count, computed_at)
+                f"""INSERT INTO {s}.{cluster_table} (author, cluster_id, mds_x, mds_y, book_count, computed_at)
                     VALUES (%s,%s,%s,%s,%s, now())""",
                 (author, int(cluster_ids[i]), float(coords[i, 0]), float(coords[i, 1]),
                  book_count_by_author[author]),
             )
         cur.execute(
-            f"""INSERT INTO {s}.author_cluster_run (id, leaf_order, grid, tree_json, computed_at)
+            f"""INSERT INTO {s}.{cluster_run_table} (id, leaf_order, grid, tree_json, computed_at)
                 VALUES (1, %s, %s, %s, now())
                 ON CONFLICT (id) DO UPDATE SET
                     leaf_order=EXCLUDED.leaf_order, grid=EXCLUDED.grid,
@@ -3315,7 +3393,8 @@ def compute_author_clustering(conn, schema: str = DEFAULT_SCHEMA, *, top_n: int 
 
 
 def compute_book_clustering(conn, schema: str = DEFAULT_SCHEMA, *, top_n: int = 200,
-                            max_df_fraction: float = 0.5, n_clusters: int = 12) -> dict:
+                            max_df_fraction: float = 0.5, n_clusters: int = 12,
+                            min_fame: float | None = None) -> dict:
     """`concordance book-clustering` / `maintain`'s clustering step, one
     level down from compute_author_clustering: the data behind the cluster
     map, similarity matrix, and dendrogram views for the top `top_n` books
@@ -3341,6 +3420,12 @@ def compute_book_clustering(conn, schema: str = DEFAULT_SCHEMA, *, top_n: int = 
     (identical qualifying word sets landing on the same point) -- all
     reused verbatim here, just keyed by book_id instead of author name.
 
+    min_fame: see compute_author_clustering's own min_fame docstring --
+    identical selection-and-destination-table swap (book_fame.fame_score
+    >= min_fame instead of top_n by word count; writes book_cluster_fame/
+    book_cluster_fame_run instead of book_cluster/book_cluster_run; not
+    wired into `maintain`), one level down.
+
     Writes book_cluster and the singleton book_cluster_run in one
     transaction at the end, same all-or-nothing reasoning as
     compute_author_clustering (top_n=200 is small enough that one clean
@@ -3355,6 +3440,8 @@ def compute_book_clustering(conn, schema: str = DEFAULT_SCHEMA, *, top_n: int = 
     from scipy.sparse import csr_matrix
 
     s = _safe_schema(schema)
+    cluster_table = "book_cluster_fame" if min_fame is not None else "book_cluster"
+    cluster_run_table = "book_cluster_fame_run" if min_fame is not None else "book_cluster_run"
 
     with conn.cursor() as cur:
         cur.execute(f"""SELECT count(DISTINCT wb.book_id) FROM {s}.word_book wb
@@ -3373,13 +3460,23 @@ def compute_book_clustering(conn, schema: str = DEFAULT_SCHEMA, *, top_n: int = 
             conn.commit()
             return {"books": 0, "clusters": 0}
 
-        cur.execute(f"""SELECT b.id, b.title, b.author, count(DISTINCT w.id) AS word_count
-                        FROM {s}.book b
-                        JOIN {s}.word_book wb ON wb.book_id = b.id
-                        JOIN {s}.word w ON w.id = wb.word_id AND w.active
-                        GROUP BY b.id, b.title, b.author
-                        ORDER BY word_count DESC
-                        LIMIT %s""", (top_n,))
+        if min_fame is not None:
+            cur.execute(f"""SELECT b.id, b.title, b.author, count(DISTINCT w.id) AS word_count
+                            FROM {s}.book b
+                            JOIN {s}.word_book wb ON wb.book_id = b.id
+                            JOIN {s}.word w ON w.id = wb.word_id AND w.active
+                            JOIN {s}.book_fame bf ON bf.book_id = b.id
+                            WHERE bf.fame_score >= %s
+                            GROUP BY b.id, b.title, b.author, bf.fame_score
+                            ORDER BY bf.fame_score DESC, word_count DESC""", (min_fame,))
+        else:
+            cur.execute(f"""SELECT b.id, b.title, b.author, count(DISTINCT w.id) AS word_count
+                            FROM {s}.book b
+                            JOIN {s}.word_book wb ON wb.book_id = b.id
+                            JOIN {s}.word w ON w.id = wb.word_id AND w.active
+                            GROUP BY b.id, b.title, b.author
+                            ORDER BY word_count DESC
+                            LIMIT %s""", (top_n,))
         top_books = cur.fetchall()
         top_book_ids = [r[0] for r in top_books]
         title_by_id = {r[0]: r[1] for r in top_books}
@@ -3464,17 +3561,17 @@ def compute_book_clustering(conn, schema: str = DEFAULT_SCHEMA, *, top_n: int = 
     from psycopg.types.json import Json
 
     with conn.cursor() as cur:
-        cur.execute(f"TRUNCATE {s}.book_cluster")
+        cur.execute(f"TRUNCATE {s}.{cluster_table}")
         for i, bid in enumerate(top_book_ids):
             cur.execute(
-                f"""INSERT INTO {s}.book_cluster (book_id, title, author, cluster_id, mds_x, mds_y,
+                f"""INSERT INTO {s}.{cluster_table} (book_id, title, author, cluster_id, mds_x, mds_y,
                                                     word_count, computed_at)
                     VALUES (%s,%s,%s,%s,%s,%s,%s, now())""",
                 (bid, title_by_id[bid], author_by_id[bid], int(cluster_ids[i]),
                  float(coords[i, 0]), float(coords[i, 1]), word_count_by_id[bid]),
             )
         cur.execute(
-            f"""INSERT INTO {s}.book_cluster_run (id, leaf_order, grid, tree_json, computed_at)
+            f"""INSERT INTO {s}.{cluster_run_table} (id, leaf_order, grid, tree_json, computed_at)
                 VALUES (1, %s, %s, %s, now())
                 ON CONFLICT (id) DO UPDATE SET
                     leaf_order=EXCLUDED.leaf_order, grid=EXCLUDED.grid,

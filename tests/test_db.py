@@ -1922,6 +1922,129 @@ def test_compute_author_clustering_separates_two_clear_clusters():
 
 
 @pg
+def test_compute_author_clustering_min_fame_selects_by_fame_and_writes_separate_tables():
+    """min_fame is a second, independent selection mode (see the function's
+    own docstring): instead of top_n by book count, every author with
+    author_fame.fame_score >= min_fame qualifies, written to
+    author_cluster_fame/author_cluster_fame_run -- author_cluster/
+    author_cluster_run (the default top_n-by-volume run) must be
+    untouched, since the two views are meant to coexist."""
+    from concordance.model import Candidate
+
+    schema = "cc_test_author_clustering_fame"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    def word(lemma):
+        c = Candidate(lemma=lemma, pos="NOUN")
+        c.definition = f"definition of {lemma}"
+        return c
+
+    alpha_words = [word(f"alphaword{i}") for i in range(10)]
+    beta_words = [word(f"betaword{i}") for i in range(10)]
+    # 5 famous ("Alpha") authors, 5 obscure ("Beta") -- min_fame=8 must
+    # select only the Alphas, regardless of book count (both groups have
+    # one book each, so volume alone can't distinguish them).
+    for i in range(5):
+        db.sync_book_results(conn, f"Alpha Book {i}", kept=alpha_words, rejected=[], schema=schema, author=f"Alpha{i}")
+    for i in range(5):
+        db.sync_book_results(conn, f"Beta Book {i}", kept=beta_words, rejected=[], schema=schema, author=f"Beta{i}")
+    with conn.cursor() as cur:
+        for i in range(5):
+            cur.execute(f"INSERT INTO {schema}.author_fame (author, fame_score) VALUES (%s, 9.0)", (f"Alpha{i}",))
+        for i in range(5):
+            cur.execute(f"INSERT INTO {schema}.author_fame (author, fame_score) VALUES (%s, 3.0)", (f"Beta{i}",))
+    conn.commit()
+
+    # A prior top_n-by-volume run -- must survive the min_fame run untouched.
+    db.compute_author_clustering(conn, schema, top_n=200, n_clusters=2)
+    with conn.cursor() as cur:
+        cur.execute(f"select count(*) from {schema}.author_cluster")
+        volume_count_before = cur.fetchone()[0]
+
+    stats = db.compute_author_clustering(conn, schema, min_fame=8.0, n_clusters=2)
+    assert stats["authors"] == 5
+
+    with conn.cursor() as cur:
+        cur.execute(f"select author from {schema}.author_cluster_fame order by author")
+        fame_authors = {r[0] for r in cur.fetchall()}
+        assert fame_authors == {f"Alpha{i}" for i in range(5)}
+
+        cur.execute(f"select count(*) from {schema}.author_cluster_fame_run")
+        assert cur.fetchone()[0] == 1
+
+        cur.execute(f"select count(*) from {schema}.author_cluster")
+        assert cur.fetchone()[0] == volume_count_before == 10
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_compute_book_clustering_min_fame_selects_by_fame_and_writes_separate_tables():
+    """Book-level counterpart to the author min_fame test above -- same
+    selection swap (book_fame.fame_score >= min_fame instead of top_n by
+    word count), same separate destination tables (book_cluster_fame/
+    book_cluster_fame_run), same untouched-original-run guarantee."""
+    from concordance.model import Candidate
+
+    schema = "cc_test_book_clustering_fame"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    def word(lemma):
+        c = Candidate(lemma=lemma, pos="NOUN")
+        c.definition = f"definition of {lemma}"
+        return c
+
+    alpha_words = [word(f"alphaword{i}") for i in range(10)]
+    beta_words = [word(f"betaword{i}") for i in range(10)]
+    alpha_ids, beta_ids = [], []
+    for i in range(5):
+        db.sync_book_results(conn, f"Alpha Book {i}", kept=alpha_words, rejected=[], schema=schema, author="Alpha")
+    for i in range(5):
+        db.sync_book_results(conn, f"Beta Book {i}", kept=beta_words, rejected=[], schema=schema, author="Beta")
+    with conn.cursor() as cur:
+        cur.execute(f"select id, title from {schema}.book")
+        for bid, title in cur.fetchall():
+            (alpha_ids if title.startswith("Alpha") else beta_ids).append(bid)
+        for bid in alpha_ids:
+            cur.execute(f"INSERT INTO {schema}.book_fame (book_id, fame_score) VALUES (%s, 9.0)", (bid,))
+        for bid in beta_ids:
+            cur.execute(f"INSERT INTO {schema}.book_fame (book_id, fame_score) VALUES (%s, 3.0)", (bid,))
+    conn.commit()
+
+    db.compute_book_clustering(conn, schema, top_n=200, n_clusters=2)
+    with conn.cursor() as cur:
+        cur.execute(f"select count(*) from {schema}.book_cluster")
+        volume_count_before = cur.fetchone()[0]
+
+    stats = db.compute_book_clustering(conn, schema, min_fame=8.0, n_clusters=2)
+    assert stats["books"] == 5
+
+    with conn.cursor() as cur:
+        cur.execute(f"select book_id from {schema}.book_cluster_fame")
+        assert {r[0] for r in cur.fetchall()} == set(alpha_ids)
+
+        cur.execute(f"select count(*) from {schema}.book_cluster_fame_run")
+        assert cur.fetchone()[0] == 1
+
+        cur.execute(f"select count(*) from {schema}.book_cluster")
+        assert cur.fetchone()[0] == volume_count_before == 10
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
 def test_compute_author_clustering_is_idempotent_and_deterministic():
     from concordance.model import Candidate
 

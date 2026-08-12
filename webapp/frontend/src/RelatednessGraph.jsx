@@ -4,7 +4,7 @@ import { ZOOM_MS, ZOOM_PADDING, cssVar } from './graphUtils'
 import SharedWordsPanel from './SharedWordsPanel'
 import './GraphView.css'
 
-const TOP_K_OPTIONS = [5, 8, 12, 20]
+const TOP_K_OPTIONS = [2, 3, 4, 5]
 const LINK_DISTANCE_MIN = 40
 const LINK_DISTANCE_MAX = 220
 const NODE_RADIUS_CENTER = 14
@@ -26,10 +26,10 @@ const RING_2_ALPHA = 0.45 // second-hop node/label fade, matching GraphView.jsx'
 // wants a *distance*, so it's inverted explicitly below rather than reusing
 // GraphView's assumption that the API's own number is already the right
 // one to hand the simulation.
-function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNavigate, sharedWordsUrl, highlightId }) {
+function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNavigate, sharedWordsUrl, highlightId, scope }) {
   const [center, setCenter] = useState(null)
   const [rawGraph, setRawGraph] = useState({ nodes: [], edges: [] })
-  const [topK, setTopK] = useState(8)
+  const [topK, setTopK] = useState(3)
   const [comparePair, setComparePair] = useState(null) // {sourceId, targetId, sourceLabel, targetLabel} | null
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -103,12 +103,21 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
             // expansion) or wastes time waiting past when it's needed.
             // onEngineStop's own zoomToFit (below) is the final correction
             // once the simulation naturally cools down.
+            //
+            // The budget below was tuned against the ~60-node volume-scope
+            // graph -- the fame-scope Graph tab (~220 nodes, ~1,000 edges,
+            // no volume-style cap) simply takes longer per tick to settle,
+            // so a fixed 4s chase gave up mid-expansion and looked frozen
+            // (found live: switching top-K under the Fame toggle appeared
+            // to do nothing). Scale the budget with graph size instead of
+            // raising the fixed constant, so small ego graphs stay snappy.
             if (chaseIntervalRef.current) clearInterval(chaseIntervalRef.current)
             let elapsed = 0
+            const chaseBudgetMs = Math.min(4000 + data.nodes.length * 40, 15000)
             chaseIntervalRef.current = setInterval(() => {
               fgRef.current?.zoomToFit(300, ZOOM_PADDING)
               elapsed += 300
-              if (elapsed > 4000) clearInterval(chaseIntervalRef.current)
+              if (elapsed > chaseBudgetMs) clearInterval(chaseIntervalRef.current)
             }, 300)
           }, 50)
         })
@@ -119,11 +128,17 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
   )
 
   // Re-fires on topK change too (not mount-only) so the top-N control
-  // re-fetches rather than just re-filtering already-truncated data.
+  // re-fetches rather than just re-filtering already-truncated data. scope
+  // is in the same boat: it's baked into the fetchUrl closure the caller
+  // passes, but fetchUrl's own identity is deliberately NOT a dependency
+  // here (an inline arrow function recreated every parent render would
+  // otherwise refetch constantly) -- so callers that vary scope (the
+  // global Volume/Fame toggle on Authors-/BooksRelatedness) pass it
+  // through explicitly just so it can sit in this array.
   useEffect(() => {
     if (initialId != null) loadGraph(initialId, topK)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialId, topK])
+  }, [initialId, topK, scope])
 
   function handleNodeClick(node) {
     if (node.id === center?.id) return
@@ -271,6 +286,15 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
             width={dims.width || undefined}
             height={dims.height || undefined}
             graphData={graphData}
+            // d3-force's default alpha decay (0.0228) is tuned for small
+            // ego graphs -- ticks-to-cool is roughly constant regardless of
+            // node count, but each tick costs more with more nodes/edges,
+            // so wall-clock time to onEngineStop grows with graph size.
+            // Decaying faster on the ~200+ node fame-scope graph trades a
+            // bit of layout quality for actually reaching a settled state
+            // (and firing onEngineStop's own zoomToFit) instead of still
+            // visibly drifting when the chase loop above gives up.
+            d3AlphaDecay={graphData.nodes.length > 100 ? 0.05 : 0.0228}
             nodeLabel={nodeLabel}
             nodeCanvasObject={paintNode}
             nodeCanvasObjectMode={() => 'replace'}

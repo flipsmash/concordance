@@ -12,7 +12,7 @@ const API_BASE = ''
 // here, not plain strings like `data.authors` -- a title alone isn't a
 // stable identity (two books can share one) or enough to build a
 // shared-words URL, so every lookup below keys off book.id.
-function BookMatrix({ highlightBookId }) {
+function BookMatrix({ highlightBookId, scope = 'volume' }) {
   const [data, setData] = useState(null) // {books, grid} | null (loading)
   const [error, setError] = useState('')
   const [hoverCell, setHoverCell] = useState(null) // {row, col} | null
@@ -40,14 +40,15 @@ function BookMatrix({ highlightBookId }) {
   }
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/browse/books/matrix`)
+    setData(null)
+    fetch(`${API_BASE}/api/browse/books/matrix?scope=${scope}`)
       .then((res) => {
         if (!res.ok) throw new Error(`request failed (${res.status})`)
         return res.json()
       })
       .then(setData)
       .catch((err) => setError(err.message || 'failed to load matrix'))
-  }, [])
+  }, [scope])
 
   useEffect(() => {
     const el = containerRef.current
@@ -132,7 +133,9 @@ function BookMatrix({ highlightBookId }) {
       <div className="book-matrix-canvas-wrap" ref={containerRef}>
         {data === null && !error && <div className="graph-loading">Loading…</div>}
         {data !== null && data.books.length === 0 && (
-          <div className="graph-empty">No clustering data yet — run `concordance book-clustering`.</div>
+          <div className="graph-empty">
+            No clustering data yet — run `concordance book-clustering{scope === 'fame' ? ' --min-fame 8' : ''}`.
+          </div>
         )}
         {ready && (
           <canvas

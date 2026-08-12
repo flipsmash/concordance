@@ -43,8 +43,14 @@ function Authors() {
   const [query, setQuery] = useState('')
   const [debounced, setDebounced] = useState('')
   const [letter, setLetter] = useState(null)
-  const [fameMin, setFameMin] = useState('')
-  const [fameMax, setFameMax] = useState('')
+  // fame_min/fame_max/fame_unscored_only seed from the URL so a click on the
+  // Visualizations page's fame-distribution bars (?fame_min=9&fame_max=9 or
+  // ?fame_unscored_only=true) lands pre-filtered -- same one-way-in pattern
+  // as unique_word_bucket below (read once at mount, not kept in sync with
+  // the URL afterward).
+  const [fameMin, setFameMin] = useState(() => searchParams.get('fame_min') || '')
+  const [fameMax, setFameMax] = useState(() => searchParams.get('fame_max') || '')
+  const [fameUnscoredOnly, setFameUnscoredOnly] = useState(() => searchParams.get('fame_unscored_only') === 'true')
   // Deep-linked from the Visualizations page's "words unique to each author"
   // histogram (?unique_word_bucket=<label>) -- read once at mount, not kept
   // in sync with the URL afterward, same one-way-in pattern as every other
@@ -61,7 +67,14 @@ function Authors() {
     pageSize: PAGE_SIZE,
     defaultSort: 'author',
     defaultDir: 'asc',
-    extraParams: { q: debounced, letter, fame_min: fameMin, fame_max: fameMax, unique_word_bucket: uniqueWordBucket },
+    extraParams: {
+      q: debounced,
+      letter,
+      fame_min: fameUnscoredOnly ? '' : fameMin,
+      fame_max: fameUnscoredOnly ? '' : fameMax,
+      fame_unscored_only: fameUnscoredOnly,
+      unique_word_bucket: uniqueWordBucket,
+    },
   })
 
   function changeLetter(l) {
@@ -80,11 +93,18 @@ function Authors() {
 
   function changeFameMin(v) {
     setFameMin(v)
+    setFameUnscoredOnly(false)
     setPage(1)
   }
 
   function changeFameMax(v) {
     setFameMax(v)
+    setFameUnscoredOnly(false)
+    setPage(1)
+  }
+
+  function clearFameUnscoredOnly() {
+    setFameUnscoredOnly(false)
     setPage(1)
   }
 
@@ -124,23 +144,32 @@ function Authors() {
           <input
             type="number" min="1" max="10" placeholder="1"
             value={fameMin}
+            disabled={fameUnscoredOnly}
             onChange={(e) => changeFameMin(e.target.value)}
           />
           <span>–</span>
           <input
             type="number" min="1" max="10" placeholder="10"
             value={fameMax}
+            disabled={fameUnscoredOnly}
             onChange={(e) => changeFameMax(e.target.value)}
           />
         </label>
         <SortControl fields={SORT_FIELDS} sort={sort} dir={dir} onSort={handleSort} />
       </div>
 
-      {uniqueWordBucket && (
+      {(uniqueWordBucket || fameUnscoredOnly) && (
         <div className="browse-shelf">
-          <button type="button" className="browse-chip" onClick={clearUniqueWordBucket}>
-            Unique words: {uniqueWordBucket} ×
-          </button>
+          {uniqueWordBucket && (
+            <button type="button" className="browse-chip" onClick={clearUniqueWordBucket}>
+              Unique words: {uniqueWordBucket} ×
+            </button>
+          )}
+          {fameUnscoredOnly && (
+            <button type="button" className="browse-chip" onClick={clearFameUnscoredOnly}>
+              Fame: Not yet scored ×
+            </button>
+          )}
         </div>
       )}
 

@@ -17,7 +17,7 @@ const API_BASE = ''
 // pair's identity and exact numbers instead, and a click opens the shared-
 // words comparison, since a matrix cell is inherently a two-entity pick in
 // a way map/dendrogram node clicks (simple navigation) aren't.
-function AuthorMatrix({ highlightAuthor }) {
+function AuthorMatrix({ highlightAuthor, scope = 'volume' }) {
   const [data, setData] = useState(null) // {authors, grid} | null (loading)
   const [error, setError] = useState('')
   const [hoverCell, setHoverCell] = useState(null) // {row, col} | null
@@ -45,14 +45,15 @@ function AuthorMatrix({ highlightAuthor }) {
   }
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/browse/authors/matrix`)
+    setData(null)
+    fetch(`${API_BASE}/api/browse/authors/matrix?scope=${scope}`)
       .then((res) => {
         if (!res.ok) throw new Error(`request failed (${res.status})`)
         return res.json()
       })
       .then(setData)
       .catch((err) => setError(err.message || 'failed to load matrix'))
-  }, [])
+  }, [scope])
 
   useEffect(() => {
     const el = containerRef.current
@@ -143,7 +144,9 @@ function AuthorMatrix({ highlightAuthor }) {
       <div className="author-matrix-canvas-wrap" ref={containerRef}>
         {data === null && !error && <div className="graph-loading">Loading…</div>}
         {data !== null && data.authors.length === 0 && (
-          <div className="graph-empty">No clustering data yet — run `concordance author-clustering`.</div>
+          <div className="graph-empty">
+            No clustering data yet — run `concordance author-clustering{scope === 'fame' ? ' --min-fame 8' : ''}`.
+          </div>
         )}
         {ready && (
           <canvas

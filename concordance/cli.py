@@ -1059,8 +1059,14 @@ def book_fame_cmd(
 @app.command("author-clustering")
 def author_clustering(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
-    top_n: int = typer.Option(200, "--top-n", help="Number of authors (by book count) to cluster."),
+    top_n: int = typer.Option(200, "--top-n", help="Number of authors (by book count) to cluster. Ignored if --min-fame is set."),
     n_clusters: int = typer.Option(12, "--n-clusters", help="Target cluster count (fcluster maxclust)."),
+    min_fame: Optional[float] = typer.Option(
+        None, "--min-fame",
+        help="Instead of top-N by book count, cluster every author with author_fame.fame_score >= this "
+             "(no cap). Writes a separate run (author_cluster_fame*), leaving the top-N-by-volume run "
+             "untouched -- run 'author-fame' first so there's something to select.",
+    ),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Hierarchical clustering + 2D (classical MDS) projection over the
@@ -1077,7 +1083,7 @@ def author_clustering(
         console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
     db.apply_schema(conn, schema)
     with console.status("[bold]Clustering authors by vocabulary overlap…"):
-        stats = db.compute_author_clustering(conn, schema, top_n=top_n, n_clusters=n_clusters)
+        stats = db.compute_author_clustering(conn, schema, top_n=top_n, n_clusters=n_clusters, min_fame=min_fame)
     conn.close()
     console.print(f"[green]✓[/green] author-clustering: [bold]{stats['authors']}[/bold] authors "
                   f"-> [bold]{stats['clusters']}[/bold] clusters")
@@ -1086,8 +1092,14 @@ def author_clustering(
 @app.command("book-clustering")
 def book_clustering(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
-    top_n: int = typer.Option(200, "--top-n", help="Number of books (by word count) to cluster."),
+    top_n: int = typer.Option(200, "--top-n", help="Number of books (by word count) to cluster. Ignored if --min-fame is set."),
     n_clusters: int = typer.Option(12, "--n-clusters", help="Target cluster count (fcluster maxclust)."),
+    min_fame: Optional[float] = typer.Option(
+        None, "--min-fame",
+        help="Instead of top-N by word count, cluster every book with book_fame.fame_score >= this "
+             "(no cap). Writes a separate run (book_cluster_fame*), leaving the top-N-by-volume run "
+             "untouched -- run 'book-fame' first so there's something to select.",
+    ),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Hierarchical clustering + 2D (classical MDS) projection over the
@@ -1105,7 +1117,7 @@ def book_clustering(
         console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
     db.apply_schema(conn, schema)
     with console.status("[bold]Clustering books by vocabulary overlap…"):
-        stats = db.compute_book_clustering(conn, schema, top_n=top_n, n_clusters=n_clusters)
+        stats = db.compute_book_clustering(conn, schema, top_n=top_n, n_clusters=n_clusters, min_fame=min_fame)
     conn.close()
     console.print(f"[green]✓[/green] book-clustering: [bold]{stats['books']}[/bold] books "
                   f"-> [bold]{stats['clusters']}[/bold] clusters")

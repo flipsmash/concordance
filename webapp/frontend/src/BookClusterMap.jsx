@@ -14,7 +14,7 @@ const RADIUS_MAX = 14
 // full rationale (classical MDS position, cluster color, plain SVG since
 // these points are precomputed/static). Highlighted/clicked by book id,
 // not title (unlike an author, a title alone isn't guaranteed unique).
-function BookClusterMap({ onBookClick, highlightBookId }) {
+function BookClusterMap({ onBookClick, highlightBookId, scope = 'volume' }) {
   const [nodes, setNodes] = useState(null) // null = loading
   const [error, setError] = useState('')
   const [hovered, setHovered] = useState(null)
@@ -22,14 +22,15 @@ function BookClusterMap({ onBookClick, highlightBookId }) {
   const containerRef = useRef(null)
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/browse/books/map`)
+    setNodes(null)
+    fetch(`${API_BASE}/api/browse/books/map?scope=${scope}`)
       .then((res) => {
         if (!res.ok) throw new Error(`request failed (${res.status})`)
         return res.json()
       })
       .then((data) => setNodes(data.nodes))
       .catch((err) => setError(err.message || 'failed to load cluster map'))
-  }, [])
+  }, [scope])
 
   useEffect(() => {
     function handleFullscreenChange() {
@@ -93,7 +94,9 @@ function BookClusterMap({ onBookClick, highlightBookId }) {
       {error && <div className="graph-error">{error}</div>}
       {nodes === null && !error && <div className="graph-loading">Loading…</div>}
       {nodes !== null && nodes.length === 0 && !error && (
-        <div className="graph-empty">No cluster data yet -- run `concordance book-clustering`.</div>
+        <div className="graph-empty">
+          No cluster data yet -- run `concordance book-clustering{scope === 'fame' ? ' --min-fame 8' : ''}`.
+        </div>
       )}
       {points.length > 0 && (
         <svg viewBox={`0 0 ${VIEW} ${VIEW}`} className="book-cluster-map-svg" role="img" aria-label="Book cluster map">

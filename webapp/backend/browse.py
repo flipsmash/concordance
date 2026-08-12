@@ -405,6 +405,7 @@ def browse_authors(
     difficulty_max: float | None = None,
     fame_min: float | None = None,
     fame_max: float | None = None,
+    fame_unscored_only: bool = False,
     archaic: list[str] = Query([]),
     pos: list[str] = Query([]),
     quizzable_only: bool = False,
@@ -418,6 +419,8 @@ def browse_authors(
     dir: Literal["asc", "desc"] = "desc",
     _: dict = Depends(_main.require_viewer),
 ) -> AuthorPage:
+    if fame_unscored_only and (fame_min is not None or fame_max is not None):
+        raise HTTPException(400, "fame_unscored_only is mutually exclusive with fame_min/fame_max")
     # author/book_id are NOT passed through _build_word_filters here: that
     # helper's EXISTS subquery is only correct when the outer query is
     # anchored on `word` (browse_words) -- it correlates solely to w.id, with
@@ -468,12 +471,15 @@ def browse_authors(
     # once, after the joins that actually need it.
     fame_filters = []
     fame_params: list = []
-    if fame_min is not None:
-        fame_filters.append("af.fame_score >= %s")
-        fame_params.append(fame_min)
-    if fame_max is not None:
-        fame_filters.append("af.fame_score <= %s")
-        fame_params.append(fame_max)
+    if fame_unscored_only:
+        fame_filters.append("af.fame_score IS NULL")
+    else:
+        if fame_min is not None:
+            fame_filters.append("af.fame_score >= %s")
+            fame_params.append(fame_min)
+        if fame_max is not None:
+            fame_filters.append("af.fame_score <= %s")
+            fame_params.append(fame_max)
     fame_where = (" AND " + " AND ".join(fame_filters)) if fame_filters else ""
 
     if random:
@@ -686,6 +692,7 @@ def browse_books(
     difficulty_max: float | None = None,
     fame_min: float | None = None,
     fame_max: float | None = None,
+    fame_unscored_only: bool = False,
     archaic: list[str] = Query([]),
     pos: list[str] = Query([]),
     quizzable_only: bool = False,
@@ -699,6 +706,8 @@ def browse_books(
     dir: Literal["asc", "desc"] = "asc",
     _: dict = Depends(_main.require_viewer),
 ) -> BookPage:
+    if fame_unscored_only and (fame_min is not None or fame_max is not None):
+        raise HTTPException(400, "fame_unscored_only is mutually exclusive with fame_min/fame_max")
     # author/book_id are NOT passed through _build_word_filters -- same
     # reasoning as browse_authors' book_id fix: this endpoint's outer query
     # already has a correctly-scoped `b`, so filtering by either is a direct
@@ -728,12 +737,15 @@ def browse_books(
     # LEFT JOINed column works identically there (it just also has to be
     # true of NULL-having rows being excluded, which is exactly what a
     # min/max filter on an unscored book should do).
-    if fame_min is not None:
-        filters.append("bf.fame_score >= %s")
-        params.append(fame_min)
-    if fame_max is not None:
-        filters.append("bf.fame_score <= %s")
-        params.append(fame_max)
+    if fame_unscored_only:
+        filters.append("bf.fame_score IS NULL")
+    else:
+        if fame_min is not None:
+            filters.append("bf.fame_score >= %s")
+            params.append(fame_min)
+        if fame_max is not None:
+            filters.append("bf.fame_score <= %s")
+            params.append(fame_max)
     if unique_word_bucket:
         clause, bucket_params = _unique_word_bucket_filter("book", unique_word_bucket)
         filters.append(clause)
@@ -1091,7 +1103,8 @@ class BookRelatednessGraph(BaseModel):
 @router.get("/api/browse/books/relatedness", response_model=BookRelatednessGraph)
 def books_relatedness(
     top_k: int = Query(5, ge=1, le=20, description="Neighbors per book, from book_similarity's stored top-k."),
-    limit: int = Query(60, ge=5, le=300, description="Cap on how many books appear at all, by word count."),
+    limit: int = Query(60, ge=5, le=300, description="Cap on how many books appear at all, by word count. Ignored if scope=fame."),
+    scope: Literal["volume", "fame"] = "volume",
     _: dict = Depends(_main.require_viewer),
 ) -> BookRelatednessGraph:
     """The global all-books relatedness graph -- same reasoning as
@@ -1105,15 +1118,31 @@ def books_relatedness(
     peers, and RelatednessGraph.jsx already handles a center-less
     {nodes, edges} response correctly (every node falls back to uniform
     "related" styling when `data.center` is undefined), exactly how
-    AuthorRelatednessGraph already works for the equivalent author view."""
+    AuthorRelatednessGraph already works for the equivalent author view.
+
+    scope="fame" swaps the node-selection query for the same book_fame >=
+    8 set book_cluster_fame holds (see compute_book_clustering's min_fame
+    docstring) instead of top-by-word-count -- `limit` is ignored in this
+    mode, same "no artificial cap" reasoning as the clustering tables
+    themselves. Edges still come straight from book_similarity (this graph
+    was never derived from the clustering run's own precomputed grid), just
+    restricted to pairs where both ends are in the scoped node set."""
     with _main.get_conn() as conn, conn.cursor() as cur:
-        cur.execute(f"""SELECT b.id, b.title, b.author, count(DISTINCT w.id) AS word_count
-                        FROM {_main.SCHEMA}.book b
-                        JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
-                        JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id AND w.active
-                        GROUP BY b.id, b.title, b.author
-                        ORDER BY word_count DESC
-                        LIMIT %s""", (limit,))
+        if scope == "fame":
+            cur.execute(f"""SELECT b.id, b.title, b.author, count(DISTINCT w.id) AS word_count
+                            FROM {_main.SCHEMA}.book b
+                            JOIN {_main.SCHEMA}.book_cluster_fame bcf ON bcf.book_id = b.id
+                            JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
+                            JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id AND w.active
+                            GROUP BY b.id, b.title, b.author""")
+        else:
+            cur.execute(f"""SELECT b.id, b.title, b.author, count(DISTINCT w.id) AS word_count
+                            FROM {_main.SCHEMA}.book b
+                            JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
+                            JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id AND w.active
+                            GROUP BY b.id, b.title, b.author
+                            ORDER BY word_count DESC
+                            LIMIT %s""", (limit,))
         books = cur.fetchall()
         book_ids = [r[0] for r in books]
 
@@ -1152,17 +1181,27 @@ class BookMapResponse(BaseModel):
 
 
 @router.get("/api/browse/books/map", response_model=BookMapResponse)
-def books_map(_: dict = Depends(_main.require_viewer)) -> BookMapResponse:
+def books_map(
+    scope: Literal["volume", "fame"] = "volume",
+    _: dict = Depends(_main.require_viewer),
+) -> BookMapResponse:
     """The cluster map: every book in the precomputed book_cluster table
     (top-N by word count -- see compute_book_clustering), positioned by
     classical MDS over the same IDF-weighted cosine distance book_similarity's
     scores use, colored by hierarchical cluster membership. Same rationale
     as authors_map one level up: a physics-simulation force-directed layout
     becomes an unstable hairball at this many nodes, where MDS position is
-    principled (derived from the real similarity structure) instead."""
+    principled (derived from the real similarity structure) instead.
+
+    scope="fame" reads book_cluster_fame instead -- a second, independently
+    computed run selected by book_fame.fame_score threshold rather than
+    volume (see compute_book_clustering's min_fame docstring). Same table
+    shape either way, so every field below means the same thing in both
+    modes."""
+    table = "book_cluster_fame" if scope == "fame" else "book_cluster"
     with _main.get_conn() as conn, conn.cursor() as cur:
         cur.execute(f"""SELECT book_id, title, author, cluster_id, mds_x, mds_y, word_count
-                        FROM {_main.SCHEMA}.book_cluster
+                        FROM {_main.SCHEMA}.{table}
                         ORDER BY cluster_id, title""")
         rows = cur.fetchall()
     nodes = [BookMapNode(id=r[0], title=r[1], author=r[2], cluster_id=r[3], x=r[4], y=r[5], word_count=r[6])
@@ -1187,13 +1226,19 @@ class BookMatrixResponse(BaseModel):
 
 
 @router.get("/api/browse/books/matrix", response_model=BookMatrixResponse)
-def books_matrix(_: dict = Depends(_main.require_viewer)) -> BookMatrixResponse:
+def books_matrix(
+    scope: Literal["volume", "fame"] = "volume",
+    _: dict = Depends(_main.require_viewer),
+) -> BookMatrixResponse:
     """The seriated similarity matrix/heatmap -- same top-N books as the
     cluster map, in compute_book_clustering's hierarchical-clustering leaf
     order so related books form visible blocks. Reads straight from
-    book_cluster_run (no new computation), same as authors_matrix."""
+    book_cluster_run (no new computation), same as authors_matrix.
+    scope="fame" reads book_cluster_fame_run instead -- see books_map's
+    own scope docstring."""
+    table = "book_cluster_fame_run" if scope == "fame" else "book_cluster_run"
     with _main.get_conn() as conn, conn.cursor() as cur:
-        cur.execute(f"SELECT leaf_order, grid FROM {_main.SCHEMA}.book_cluster_run WHERE id = 1")
+        cur.execute(f"SELECT leaf_order, grid FROM {_main.SCHEMA}.{table} WHERE id = 1")
         row = cur.fetchone()
     if row is None:
         return BookMatrixResponse(books=[], grid=[])
@@ -1222,11 +1267,17 @@ class BookDendrogramResponse(BaseModel):
 
 
 @router.get("/api/browse/books/dendrogram", response_model=BookDendrogramResponse)
-def books_dendrogram(_: dict = Depends(_main.require_viewer)) -> BookDendrogramResponse:
+def books_dendrogram(
+    scope: Literal["volume", "fame"] = "volume",
+    _: dict = Depends(_main.require_viewer),
+) -> BookDendrogramResponse:
     """The dendrogram: the same clustering run's linkage tree, straight
-    from book_cluster_run (no new computation), same as authors_dendrogram."""
+    from book_cluster_run (no new computation), same as authors_dendrogram.
+    scope="fame" reads book_cluster_fame_run instead -- see books_map's own
+    scope docstring."""
+    table = "book_cluster_fame_run" if scope == "fame" else "book_cluster_run"
     with _main.get_conn() as conn, conn.cursor() as cur:
-        cur.execute(f"SELECT tree_json, leaf_order FROM {_main.SCHEMA}.book_cluster_run WHERE id = 1")
+        cur.execute(f"SELECT tree_json, leaf_order FROM {_main.SCHEMA}.{table} WHERE id = 1")
         row = cur.fetchone()
     if row is None:
         return BookDendrogramResponse(tree=None, leaf_order=[])
@@ -1423,7 +1474,8 @@ def author_shared_words(
 @router.get("/api/browse/authors/relatedness", response_model=AuthorRelatednessGraph)
 def authors_relatedness(
     top_k: int = Query(5, ge=1, le=20, description="Neighbors per author, from author_similarity's stored top-k."),
-    limit: int = Query(60, ge=5, le=300, description="Cap on how many authors appear at all, by book count."),
+    limit: int = Query(60, ge=5, le=300, description="Cap on how many authors appear at all, by book count. Ignored if scope=fame."),
+    scope: Literal["volume", "fame"] = "volume",
     _: dict = Depends(_main.require_viewer),
 ) -> AuthorRelatednessGraph:
     """The global all-authors relatedness graph (secondary page, per the
@@ -1433,17 +1485,33 @@ def authors_relatedness(
     `limit` restricts it to the `limit` authors with the most books
     (proxy for "most represented in the corpus", so the busiest, most
     interconnected part of the graph is what's shown by default), and
-    edges are only kept between two authors that both made the cut."""
+    edges are only kept between two authors that both made the cut.
+
+    scope="fame" swaps the node-selection query for the same author_fame
+    >= 8 set author_cluster_fame holds (see compute_author_clustering's
+    min_fame docstring) instead of top-by-book-count -- `limit` is ignored
+    in this mode. Edges still come straight from author_similarity (this
+    graph was never derived from the clustering run's own precomputed
+    grid), just restricted to pairs where both ends are in the scoped node
+    set."""
     with _main.get_conn() as conn, conn.cursor() as cur:
-        cur.execute(f"""SELECT b.author, count(DISTINCT b.id) AS book_count, count(DISTINCT w.id) AS word_count
-                        FROM {_main.SCHEMA}.book b
-                        LEFT JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
-                        LEFT JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id AND w.active
-                        WHERE b.author IS NOT NULL AND b.author <> ''
-                          AND NOT (b.author = ANY(%s))
-                        GROUP BY b.author
-                        ORDER BY book_count DESC
-                        LIMIT %s""", (list(PLACEHOLDER_AUTHORS), limit))
+        if scope == "fame":
+            cur.execute(f"""SELECT b.author, count(DISTINCT b.id) AS book_count, count(DISTINCT w.id) AS word_count
+                            FROM {_main.SCHEMA}.book b
+                            JOIN {_main.SCHEMA}.author_cluster_fame acf ON acf.author = b.author
+                            LEFT JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
+                            LEFT JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id AND w.active
+                            GROUP BY b.author""")
+        else:
+            cur.execute(f"""SELECT b.author, count(DISTINCT b.id) AS book_count, count(DISTINCT w.id) AS word_count
+                            FROM {_main.SCHEMA}.book b
+                            LEFT JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
+                            LEFT JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id AND w.active
+                            WHERE b.author IS NOT NULL AND b.author <> ''
+                              AND NOT (b.author = ANY(%s))
+                            GROUP BY b.author
+                            ORDER BY book_count DESC
+                            LIMIT %s""", (list(PLACEHOLDER_AUTHORS), limit))
         authors = cur.fetchall()
         author_names = [r[0] for r in authors]
 
@@ -1482,7 +1550,10 @@ class AuthorMapResponse(BaseModel):
 
 
 @router.get("/api/browse/authors/map", response_model=AuthorMapResponse)
-def authors_map(_: dict = Depends(_main.require_viewer)) -> AuthorMapResponse:
+def authors_map(
+    scope: Literal["volume", "fame"] = "volume",
+    _: dict = Depends(_main.require_viewer),
+) -> AuthorMapResponse:
     """The cluster map: every author in the precomputed author_cluster table
     (top-N by book count -- see concordance/db.py's compute_author_clustering),
     positioned by classical MDS over the same IDF-weighted cosine distance
@@ -1491,10 +1562,16 @@ def authors_map(_: dict = Depends(_main.require_viewer)) -> AuthorMapResponse:
     color here are both principled (derived from the actual similarity
     structure via clustering + MDS), unlike the force-directed graph's
     physics-simulation compromise layout, which carries no such guarantee
-    and (per real usage) becomes an unstable hairball at this many nodes."""
+    and (per real usage) becomes an unstable hairball at this many nodes.
+
+    scope="fame" reads author_cluster_fame instead -- a second,
+    independently computed run selected by author_fame.fame_score
+    threshold rather than book count (see compute_author_clustering's
+    min_fame docstring). Same table shape either way."""
+    table = "author_cluster_fame" if scope == "fame" else "author_cluster"
     with _main.get_conn() as conn, conn.cursor() as cur:
         cur.execute(f"""SELECT author, cluster_id, mds_x, mds_y, book_count
-                        FROM {_main.SCHEMA}.author_cluster
+                        FROM {_main.SCHEMA}.{table}
                         ORDER BY cluster_id, author""")
         rows = cur.fetchall()
     nodes = [AuthorMapNode(author=r[0], cluster_id=r[1], x=r[2], y=r[3], book_count=r[4]) for r in rows]
@@ -1512,7 +1589,10 @@ class AuthorMatrixResponse(BaseModel):
 
 
 @router.get("/api/browse/authors/matrix", response_model=AuthorMatrixResponse)
-def authors_matrix(_: dict = Depends(_main.require_viewer)) -> AuthorMatrixResponse:
+def authors_matrix(
+    scope: Literal["volume", "fame"] = "volume",
+    _: dict = Depends(_main.require_viewer),
+) -> AuthorMatrixResponse:
     """The seriated similarity matrix/heatmap: the same top-N authors as
     the cluster map, ordered by compute_author_clustering's hierarchical-
     clustering leaf order so similar authors sit near each other and form
@@ -1522,9 +1602,11 @@ def authors_matrix(_: dict = Depends(_main.require_viewer)) -> AuthorMatrixRespo
     including pairs that missed both sides' top-k cutoff -- this is the
     one place that question has an answer at all. Reads straight from
     author_cluster_run, computed once alongside the map and dendrogram
-    (no new computation)."""
+    (no new computation). scope="fame" reads author_cluster_fame_run
+    instead -- see authors_map's own scope docstring."""
+    table = "author_cluster_fame_run" if scope == "fame" else "author_cluster_run"
     with _main.get_conn() as conn, conn.cursor() as cur:
-        cur.execute(f"SELECT leaf_order, grid FROM {_main.SCHEMA}.author_cluster_run WHERE id = 1")
+        cur.execute(f"SELECT leaf_order, grid FROM {_main.SCHEMA}.{table} WHERE id = 1")
         row = cur.fetchone()
     if row is None:
         return AuthorMatrixResponse(authors=[], grid=[])
@@ -1550,15 +1632,21 @@ class AuthorDendrogramResponse(BaseModel):
 
 
 @router.get("/api/browse/authors/dendrogram", response_model=AuthorDendrogramResponse)
-def authors_dendrogram(_: dict = Depends(_main.require_viewer)) -> AuthorDendrogramResponse:
+def authors_dendrogram(
+    scope: Literal["volume", "fame"] = "volume",
+    _: dict = Depends(_main.require_viewer),
+) -> AuthorDendrogramResponse:
     """The dendrogram: the same clustering run's linkage tree, straight
     from author_cluster_run (no new computation) -- the clearest
     hierarchical narrative of the three global views ("this author's
     whole branch shares X"), and the one that scales best to more authors
     since a deep tree can be explored by collapsing subtrees rather than
-    needing every leaf visible at once like the map or matrix do."""
+    needing every leaf visible at once like the map or matrix do.
+    scope="fame" reads author_cluster_fame_run instead -- see authors_map's
+    own scope docstring."""
+    table = "author_cluster_fame_run" if scope == "fame" else "author_cluster_run"
     with _main.get_conn() as conn, conn.cursor() as cur:
-        cur.execute(f"SELECT tree_json, leaf_order FROM {_main.SCHEMA}.author_cluster_run WHERE id = 1")
+        cur.execute(f"SELECT tree_json, leaf_order FROM {_main.SCHEMA}.{table} WHERE id = 1")
         row = cur.fetchone()
     if row is None:
         return AuthorDendrogramResponse(tree=None, leaf_order=[])

@@ -18,6 +18,11 @@ const TABS = [
   { id: 'graph', label: 'Graph' },
 ]
 
+const SCOPES = [
+  { id: 'volume', label: 'Most-represented' },
+  { id: 'fame', label: 'Most famous' },
+]
+
 // Secondary page (per the relatedness plan -- lower priority than the
 // per-author drilldown): the top-N authors at once (N = compute_author_
 // clustering's own --top-n, 200 by default -- NOT literally every author;
@@ -30,9 +35,20 @@ const TABS = [
 // seriated so related authors form visible blocks), Dendrogram (the
 // clearest hierarchical narrative), and Graph (the original force-directed
 // view, kept -- still a valid lower-priority option, not deleted).
+//
+// scope picks WHICH node set every tab draws from: "volume" is the
+// original top-N-by-book-count selection, "fame" is every
+// author_fame.fame_score >= 8 author instead. Map/Matrix/Dendrogram read
+// it from the correspondingly named clustering run (author_cluster vs.
+// author_cluster_fame -- see compute_author_clustering's min_fame
+// docstring); Graph reads it from authors_relatedness's own scope param,
+// which reuses the SAME author_cluster_fame node list but still pulls
+// edges from author_similarity directly (that endpoint was never derived
+// from the clustering run's precomputed grid, unlike the other three).
 function AuthorsRelatedness() {
   const navigate = useNavigate()
   const [tab, setTab] = useState('map')
+  const [scope, setScope] = useState('volume')
   const [clusterNodes, setClusterNodes] = useState(null) // null = loading
   // Owned here, not per-tab -- picking an author to highlight should survive
   // switching tabs, since "where does X sit in this structure" is the same
@@ -42,11 +58,12 @@ function AuthorsRelatedness() {
   const [highlighted, setHighlighted] = useState(null)
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/browse/authors/map`)
+    setClusterNodes(null)
+    fetch(`${API_BASE}/api/browse/authors/map?scope=${scope}`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => setClusterNodes(data ? data.nodes : []))
       .catch(() => setClusterNodes([]))
-  }, [])
+  }, [scope])
 
   // ClusterHighlightSelect's options -- restricted to authors actually IN
   // this clustering run (the same set the Map/Matrix/Dendrogram tabs draw
@@ -64,7 +81,9 @@ function AuthorsRelatedness() {
         <div>
           <h1>{clusterNodes ? `Top ${clusterNodes.length} authors` : 'Top authors'}</h1>
           <p className="muted">
-            Vocabulary overlap across the most-represented authors (by book count)
+            {scope === 'fame'
+              ? 'Vocabulary overlap across the most historically important authors (fame score ≥ 8)'
+              : 'Vocabulary overlap across the most-represented authors (by book count)'}
           </p>
         </div>
         <Link to="/app/authors" className="authors-back-link">
@@ -73,6 +92,13 @@ function AuthorsRelatedness() {
       </header>
 
       <div className="authors-relatedness-controls">
+        <div className="graph-signal-toggle" role="group" aria-label="Selection">
+          {SCOPES.map((s) => (
+            <button key={s.id} type="button" className={scope === s.id ? 'active' : ''} onClick={() => setScope(s.id)}>
+              {s.label}
+            </button>
+          ))}
+        </div>
         <div className="graph-signal-toggle" role="group" aria-label="View">
           {TABS.map((t) => (
             <button key={t.id} type="button" className={tab === t.id ? 'active' : ''} onClick={() => setTab(t.id)}>
@@ -90,15 +116,17 @@ function AuthorsRelatedness() {
         <AuthorClusterMap
           highlightAuthor={highlighted}
           onAuthorClick={(author) => navigate(`/app/authors/${encodeURIComponent(author)}/relatedness`)}
+          scope={scope}
         />
       )}
 
-      {tab === 'matrix' && <AuthorMatrix highlightAuthor={highlighted} />}
+      {tab === 'matrix' && <AuthorMatrix highlightAuthor={highlighted} scope={scope} />}
 
       {tab === 'dendrogram' && (
         <AuthorDendrogram
           highlightAuthor={highlighted}
           onAuthorClick={(author) => navigate(`/app/authors/${encodeURIComponent(author)}/relatedness`)}
+          scope={scope}
         />
       )}
 
@@ -106,7 +134,8 @@ function AuthorsRelatedness() {
         <RelatednessGraph
           initialId="__all__"
           highlightId={highlighted}
-          fetchUrl={(_id, topK) => `${API_BASE}/api/browse/authors/relatedness?top_k=${topK}`}
+          scope={scope}
+          fetchUrl={(_id, topK) => `${API_BASE}/api/browse/authors/relatedness?top_k=${topK}&scope=${scope}`}
           getLabel={(n) => n.id}
           getSublabel={(n) => (n.book_count != null ? `${n.book_count} book${n.book_count === 1 ? '' : 's'}` : undefined)}
           onNodeNavigate={(node) => navigate(`/app/authors/${encodeURIComponent(node.id)}/relatedness`)}

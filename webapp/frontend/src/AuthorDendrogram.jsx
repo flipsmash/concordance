@@ -20,7 +20,7 @@ const BOTTOM_PADDING = 30
 // hover-then-label pattern. Leaf dots are colored by cluster (fetched from
 // /map and joined by author name) so this view visually agrees with the
 // Map tab instead of introducing its own unrelated color language.
-function AuthorDendrogram({ onAuthorClick, highlightAuthor }) {
+function AuthorDendrogram({ onAuthorClick, highlightAuthor, scope = 'volume' }) {
   const [tree, setTree] = useState(null)
   const [leafOrder, setLeafOrder] = useState([])
   const [clusterByAuthor, setClusterByAuthor] = useState({})
@@ -48,7 +48,8 @@ function AuthorDendrogram({ onAuthorClick, highlightAuthor }) {
   const activeAuthor = hoveredAuthor ?? highlightAuthor ?? null
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/browse/authors/dendrogram`)
+    setTree(null)
+    fetch(`${API_BASE}/api/browse/authors/dendrogram?scope=${scope}`)
       .then((res) => {
         if (!res.ok) throw new Error(`request failed (${res.status})`)
         return res.json()
@@ -59,14 +60,14 @@ function AuthorDendrogram({ onAuthorClick, highlightAuthor }) {
       })
       .catch((err) => setError(err.message || 'failed to load dendrogram'))
 
-    fetch(`${API_BASE}/api/browse/authors/map`)
+    fetch(`${API_BASE}/api/browse/authors/map?scope=${scope}`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (!data) return
         setClusterByAuthor(Object.fromEntries(data.nodes.map((n) => [n.author, n.cluster_id])))
       })
       .catch(() => {})
-  }, [])
+  }, [scope])
 
   const layout = useMemo(() => {
     if (!tree || leafOrder.length === 0) return null
@@ -109,7 +110,9 @@ function AuthorDendrogram({ onAuthorClick, highlightAuthor }) {
       {error && <div className="graph-error">{error}</div>}
       {tree === null && !error && <div className="graph-loading">Loading…</div>}
       {tree !== null && leafOrder.length === 0 && (
-        <div className="graph-empty">No clustering data yet — run `concordance author-clustering`.</div>
+        <div className="graph-empty">
+          No clustering data yet — run `concordance author-clustering{scope === 'fame' ? ' --min-fame 8' : ''}`.
+        </div>
       )}
       {layout && (
         <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} className="author-dendrogram-svg" role="img" aria-label="Author dendrogram">
