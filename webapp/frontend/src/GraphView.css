@@ -85,6 +85,21 @@
   white-space: nowrap;
 }
 
+/* Same label+range shape as DomainMap.css's .domain-map-spread -- kept as
+   a separate rule here rather than shared, since that one styles a plain
+   MDS-scatter multiplier and this one drives live d3-force/zoom parameters,
+   two unrelated components that just happen to converge on an identical
+   control. Shared by RelatednessGraph's Spread AND Zoom sliders -- same
+   shape, different value being dragged. */
+.graph-range-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
 .graph-view:fullscreen {
   background: var(--bg);
   padding: 12px;
