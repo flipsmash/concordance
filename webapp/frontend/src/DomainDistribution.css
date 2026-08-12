@@ -4,6 +4,33 @@
   gap: 6px;
 }
 
+/* Same look as WorkDetail.css's .work-detail-heading (both callers already
+   use it for their OTHER section headings) -- duplicated here rather than
+   imported, since DomainDistribution.jsx owns this class itself now and
+   shouldn't depend on a stylesheet only its callers happen to load. */
+.domain-dist-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-h);
+  margin: 0 0 6px;
+  cursor: pointer;
+  width: fit-content;
+}
+
+.domain-dist-heading:hover {
+  color: var(--accent);
+}
+
+.domain-dist-sort-indicator {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text);
+  white-space: nowrap;
+}
+
 .domain-dist-row {
   display: grid;
   /* Last column is a small FIXED width, not auto -- auto used to size itself

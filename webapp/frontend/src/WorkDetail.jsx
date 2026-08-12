@@ -170,7 +170,6 @@ function WorkDetail() {
       )}
 
       <section className="browse-facets work-detail-section">
-        <h2 className="work-detail-heading">Domains represented</h2>
         <DomainDistribution summary={domainSummary} selected={selectedDomain} onSelect={selectDomain} />
       </section>
 
