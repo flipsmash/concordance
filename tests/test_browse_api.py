@@ -434,6 +434,101 @@ def test_fame_min_max_and_unscored_only_filter_books_and_authors():
         restore()
 
 
+def _set_book_word_count(conn, schema, book_id, distinct_nonstop_word_count):
+    with conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE {schema}.book SET distinct_nonstop_word_count = %s WHERE id = %s",
+            (distinct_nonstop_word_count, book_id),
+        )
+
+
+@pg
+def test_overall_difficulty_histogram_buckets_by_percentile_and_counts_unscored():
+    """overall_difficulty is percent_rank(mean_difficulty)/percent_rank(density)
+    averaged, *100 (see BookRow's own field comment) -- 5 books built with
+    difficulty rising in lockstep with density (distinct_nonstop_word_count
+    shrinks as difficulty rises, so this lone word's density -- 1/that count
+    -- rises to match) land with enough headroom in each of the histogram's
+    5 bands in turn, and a 6th book with no word_difficulty row at all (mean_
+    difficulty NULL) lands in "Not enough data" rather than band "0-20". One
+    book per author, so author scope reproduces the exact same 6 numbers."""
+    schema = "cc_test_browse_od_hist"
+    client, conn, restore = _setup(schema)
+    try:
+        specs = [
+            ("Book A", "Author A", 10, 100),
+            ("Book B", "Author B", 30, 50),
+            ("Book C", "Author C", 50, 25),
+            ("Book D", "Author D", 70, 10),
+            ("Book E", "Author E", 90, 2),
+        ]
+        for title, author, difficulty, dnwc in specs:
+            b = _insert_book(conn, schema, title, author=author)
+            w = _insert_word(conn, schema, title.lower().replace(" ", ""), difficulty=difficulty)
+            _link(conn, schema, w, b)
+            _set_book_word_count(conn, schema, b, dnwc)
+
+        b_unscored = _insert_book(conn, schema, "Book F", author="Author F")
+        w_unscored = _insert_word(conn, schema, "bookf")
+        _link(conn, schema, w_unscored, b_unscored)
+        _set_book_word_count(conn, schema, b_unscored, 5)
+        conn.commit()
+
+        for scope in ("book", "author"):
+            hist = {r["label"]: r["word_count"] for r in
+                    client.get("/api/browse/overall-difficulty-histogram", params={"scope": scope}).json()}
+            assert hist == {
+                "0-20": 1, "20-40": 1, "40-60": 1, "60-80": 1, "80-100": 1,
+                "Not enough data": 1,
+            }, (scope, hist)
+    finally:
+        restore()
+
+
+@pg
+def test_overall_difficulty_band_filters_books_and_authors():
+    """Click-through from the Visualizations page's difficulty-distribution
+    bars: a band label isolates exactly that bar's books/authors, the
+    "Not enough data" pseudo-band isolates the unscored ones, and a label
+    that isn't one of the histogram's own (never "silently means nothing")
+    404s."""
+    schema = "cc_test_browse_od_filter"
+    client, conn, restore = _setup(schema)
+    try:
+        b_hard = _insert_book(conn, schema, "Hard Book", author="Hard Author")
+        w_hard = _insert_word(conn, schema, "hardword", difficulty=95)
+        _link(conn, schema, w_hard, b_hard)
+        _set_book_word_count(conn, schema, b_hard, 1)
+
+        b_easy = _insert_book(conn, schema, "Easy Book", author="Easy Author")
+        w_easy = _insert_word(conn, schema, "easyword", difficulty=5)
+        _link(conn, schema, w_easy, b_easy)
+        _set_book_word_count(conn, schema, b_easy, 100)
+
+        b_unscored = _insert_book(conn, schema, "Unscored Book", author="Unscored Author")
+        w_unscored = _insert_word(conn, schema, "unscoredword")
+        _link(conn, schema, w_unscored, b_unscored)
+        _set_book_word_count(conn, schema, b_unscored, 5)
+        conn.commit()
+
+        res = client.get("/api/browse/books", params={"overall_difficulty_band": "80-100"})
+        assert [r["title"] for r in res.json()["items"]] == ["Hard Book"]
+
+        res = client.get("/api/browse/authors", params={"overall_difficulty_band": "80-100"})
+        assert [r["author"] for r in res.json()["items"]] == ["Hard Author"]
+
+        res = client.get("/api/browse/books", params={"overall_difficulty_band": "Not enough data"})
+        assert [r["title"] for r in res.json()["items"]] == ["Unscored Book"]
+
+        res = client.get("/api/browse/authors", params={"overall_difficulty_band": "Not enough data"})
+        assert [r["author"] for r in res.json()["items"]] == ["Unscored Author"]
+
+        res = client.get("/api/browse/books", params={"overall_difficulty_band": "not-a-real-band"})
+        assert res.status_code == 404
+    finally:
+        restore()
+
+
 @pg
 def test_unique_word_bucket_filters_books_and_authors():
     # Same fixture as test_unique_word_histogram_buckets_book_and_author_scopes

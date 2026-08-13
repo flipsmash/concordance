@@ -44,6 +44,11 @@ function Books() {
   // in sync with the URL afterward, same one-way-in pattern as every other
   // filter here.
   const uniqueWordBucket = searchParams.get('unique_word_bucket')
+  // Same one-way-in pattern, deep-linked from the "Book difficulty
+  // distribution" histogram (?overall_difficulty_band=<label>) -- the label
+  // itself (e.g. "40-60" or "Not enough data") is the whole filter, so
+  // there's no min/max pair to seed like fame's.
+  const overallDifficultyBand = searchParams.get('overall_difficulty_band')
 
   useEffect(() => {
     const handle = setTimeout(() => setDebounced(query.trim()), 200)
@@ -62,6 +67,7 @@ function Books() {
       fame_max: fameUnscoredOnly ? '' : fameMax,
       fame_unscored_only: fameUnscoredOnly,
       unique_word_bucket: uniqueWordBucket,
+      overall_difficulty_band: overallDifficultyBand,
     },
   })
 
@@ -74,6 +80,15 @@ function Books() {
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev)
       next.delete('unique_word_bucket')
+      return next
+    })
+    setPage(1)
+  }
+
+  function clearOverallDifficultyBand() {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      next.delete('overall_difficulty_band')
       return next
     })
     setPage(1)
@@ -146,7 +161,7 @@ function Books() {
         <SortControl fields={SORT_FIELDS} sort={sort} dir={dir} onSort={handleSort} />
       </div>
 
-      {(uniqueWordBucket || fameUnscoredOnly) && (
+      {(uniqueWordBucket || fameUnscoredOnly || overallDifficultyBand) && (
         <div className="browse-shelf">
           {uniqueWordBucket && (
             <button type="button" className="browse-chip" onClick={clearUniqueWordBucket}>
@@ -156,6 +171,11 @@ function Books() {
           {fameUnscoredOnly && (
             <button type="button" className="browse-chip" onClick={clearFameUnscoredOnly}>
               Fame: Not yet scored ×
+            </button>
+          )}
+          {overallDifficultyBand && (
+            <button type="button" className="browse-chip" onClick={clearOverallDifficultyBand}>
+              Difficulty: {overallDifficultyBand} ×
             </button>
           )}
         </div>

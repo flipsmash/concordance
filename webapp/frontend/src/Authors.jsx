@@ -56,6 +56,9 @@ function Authors() {
   // in sync with the URL afterward, same one-way-in pattern as every other
   // filter here.
   const uniqueWordBucket = searchParams.get('unique_word_bucket')
+  // Same one-way-in pattern, deep-linked from the "Author difficulty
+  // distribution" histogram (?overall_difficulty_band=<label>).
+  const overallDifficultyBand = searchParams.get('overall_difficulty_band')
 
   useEffect(() => {
     const handle = setTimeout(() => setDebounced(query.trim()), 200)
@@ -74,6 +77,7 @@ function Authors() {
       fame_max: fameUnscoredOnly ? '' : fameMax,
       fame_unscored_only: fameUnscoredOnly,
       unique_word_bucket: uniqueWordBucket,
+      overall_difficulty_band: overallDifficultyBand,
     },
   })
 
@@ -86,6 +90,15 @@ function Authors() {
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev)
       next.delete('unique_word_bucket')
+      return next
+    })
+    setPage(1)
+  }
+
+  function clearOverallDifficultyBand() {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      next.delete('overall_difficulty_band')
       return next
     })
     setPage(1)
@@ -158,7 +171,7 @@ function Authors() {
         <SortControl fields={SORT_FIELDS} sort={sort} dir={dir} onSort={handleSort} />
       </div>
 
-      {(uniqueWordBucket || fameUnscoredOnly) && (
+      {(uniqueWordBucket || fameUnscoredOnly || overallDifficultyBand) && (
         <div className="browse-shelf">
           {uniqueWordBucket && (
             <button type="button" className="browse-chip" onClick={clearUniqueWordBucket}>
@@ -168,6 +181,11 @@ function Authors() {
           {fameUnscoredOnly && (
             <button type="button" className="browse-chip" onClick={clearFameUnscoredOnly}>
               Fame: Not yet scored ×
+            </button>
+          )}
+          {overallDifficultyBand && (
+            <button type="button" className="browse-chip" onClick={clearOverallDifficultyBand}>
+              Difficulty: {overallDifficultyBand} ×
             </button>
           )}
         </div>

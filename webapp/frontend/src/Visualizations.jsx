@@ -59,6 +59,8 @@ function Visualizations() {
   const [authorHist, setAuthorHist] = useState([])
   const [bookFameHist, setBookFameHist] = useState([])
   const [authorFameHist, setAuthorFameHist] = useState([])
+  const [bookDifficultyHist, setBookDifficultyHist] = useState([])
+  const [authorDifficultyHist, setAuthorDifficultyHist] = useState([])
 
   useEffect(() => {
     fetch(`${API_BASE}/api/browse/unique-word-histogram?scope=book`)
@@ -76,6 +78,18 @@ function Visualizations() {
     fetch(`${API_BASE}/api/browse/fame-histogram?scope=author`)
       .then((res) => res.json())
       .then((data) => setAuthorFameHist(toFameHistBands(data)))
+      .catch(() => {})
+    // overall-difficulty-histogram already returns DifficultyHistogram's own
+    // {band_min, band_max, label, word_count} shape (it buckets a real 0-100
+    // percentile, same as word-level difficulty-bands) -- no toHistBands/
+    // toFameHistBands adapter needed, unlike the two above.
+    fetch(`${API_BASE}/api/browse/overall-difficulty-histogram?scope=book`)
+      .then((res) => res.json())
+      .then(setBookDifficultyHist)
+      .catch(() => {})
+    fetch(`${API_BASE}/api/browse/overall-difficulty-histogram?scope=author`)
+      .then((res) => res.json())
+      .then(setAuthorDifficultyHist)
       .catch(() => {})
   }, [])
 
@@ -171,6 +185,37 @@ function Visualizations() {
           bands={authorFameHist}
           selectedBand={null}
           onSelect={(b) => navigate(`/app/authors?${new URLSearchParams(fameHistQuery(b.label))}`)}
+        />
+      </section>
+
+      <section className="browse-facets viz-section">
+        <h2 className="viz-heading">Book difficulty distribution</h2>
+        <p className="viz-description">
+          Overall difficulty is a corpus-relative percentile (not an absolute score) blending a
+          book's average word difficulty with how dense its rare vocabulary is -- a bar near 100
+          means harder than nearly the whole corpus. "Not enough data" covers books missing either
+          input (no scored words, or no distinct-word-count baseline to measure density against).
+        </p>
+        <DifficultyHistogram
+          bands={bookDifficultyHist}
+          selectedBand={null}
+          onSelect={(b) =>
+            navigate(`/app/books?${new URLSearchParams({ overall_difficulty_band: b.label })}`)
+          }
+        />
+      </section>
+
+      <section className="browse-facets viz-section">
+        <h2 className="viz-heading">Author difficulty distribution</h2>
+        <p className="viz-description">
+          Same percentile, aggregated per author rather than per book.
+        </p>
+        <DifficultyHistogram
+          bands={authorDifficultyHist}
+          selectedBand={null}
+          onSelect={(b) =>
+            navigate(`/app/authors?${new URLSearchParams({ overall_difficulty_band: b.label })}`)
+          }
         />
       </section>
 

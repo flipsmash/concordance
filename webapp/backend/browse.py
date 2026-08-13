@@ -366,6 +366,38 @@ def _unique_word_bucket_filter(scope: Literal["book", "author"], bucket_label: s
     )
 
 
+# Equal-width (20-point) bands over overall_difficulty's 0-100 percentile
+# scale, plus one pseudo-band for books/authors with no overall_difficulty
+# at all (missing mean_difficulty or density -- see BookRow.overall_difficulty).
+# Same half-open-except-the-last-band convention as /api/browse/difficulty-
+# bands (band_min <= x < band_max, but band_min <= x <= 100 for the final
+# band) -- NOT fame's inclusive-both-ends convention, which only works there
+# because fame's bars are single integers (min == max); a boundary value
+# here (e.g. exactly 80.0) must land in exactly one bar.
+_OVERALL_DIFFICULTY_BAND_WIDTH = 20
+_OVERALL_DIFFICULTY_UNSCORED_LABEL = "Not enough data"
+
+
+def _overall_difficulty_band_filter(label: str) -> tuple[str, list]:
+    """A WHERE-clause fragment (append to a query that already has
+    `overall_difficulty` as a materialized column/alias in scope -- never
+    valid inside the same SELECT's own WHERE, since that's evaluated before
+    a CASE-expression alias exists) + its params, isolating exactly the
+    population /api/browse/overall-difficulty-histogram's bar for this label
+    counted. Round-trips any label that endpoint actually emits; 404s on
+    anything else, same "no filter can silently mean nothing" contract as
+    _unique_word_bucket_filter above."""
+    if label == _OVERALL_DIFFICULTY_UNSCORED_LABEL:
+        return "overall_difficulty IS NULL", []
+    try:
+        lo_s, hi_s = label.split("-")
+        lo, hi = float(lo_s), float(hi_s)
+    except ValueError:
+        raise HTTPException(404, f"unknown overall-difficulty band {label!r}")
+    op = "<=" if hi >= 100 else "<"
+    return f"overall_difficulty >= %s AND overall_difficulty {op} %s", [lo, hi]
+
+
 # --- /api/browse/authors -------------------------------------------------------
 
 class AuthorRow(BaseModel):
@@ -410,6 +442,7 @@ def browse_authors(
     pos: list[str] = Query([]),
     quizzable_only: bool = False,
     unique_word_bucket: str | None = None,
+    overall_difficulty_band: str | None = None,  # see the matching param on browse_books
     letter: str | None = Query(None, min_length=1, max_length=1),
     random: bool = False,
     page: int = Query(1, ge=1),
@@ -421,6 +454,10 @@ def browse_authors(
 ) -> AuthorPage:
     if fame_unscored_only and (fame_min is not None or fame_max is not None):
         raise HTTPException(400, "fame_unscored_only is mutually exclusive with fame_min/fame_max")
+    overall_diff_where, overall_diff_params = "", []
+    if overall_difficulty_band is not None:
+        _clause, overall_diff_params = _overall_difficulty_band_filter(overall_difficulty_band)
+        overall_diff_where = f" AND {_clause}"
     # author/book_id are NOT passed through _build_word_filters here: that
     # helper's EXISTS subquery is only correct when the outer query is
     # anchored on `word` (browse_words) -- it correlates solely to w.id, with
@@ -494,19 +531,89 @@ def browse_authors(
     offset = 0 if random else (page - 1) * page_size
 
     with _main.get_conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            f"""SELECT count(*) FROM (
-                    SELECT b.author
-                    FROM {_main.SCHEMA}.book b
-                    JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
-                    JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id
-                    LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
-                    LEFT JOIN {_main.SCHEMA}.author_fame af ON af.author = b.author
-                    WHERE {where}{fame_where}
-                    GROUP BY b.author, af.fame_score
-                ) sub""",
-            (*params, *fame_params),
-        )
+        if overall_difficulty_band is not None:
+            # Same reasoning as browse_books' matching branch: overall_
+            # difficulty is a percentile, not a stored column, so counting a
+            # band's matches means computing it for the whole `where`-
+            # filtered set first -- mean_difficulty/density only, via the
+            # same minimal author_base shape the histogram endpoint uses,
+            # but scoped to this request's actual `where`/fame_where rather
+            # than the histogram's fixed unfiltered baseline.
+            cur.execute(
+                f"""SELECT count(*) FROM (
+                        WITH book_word_counts AS (
+                            SELECT b.author, b.id AS book_id, b.distinct_nonstop_word_count,
+                                   count(DISTINCT w.id) AS book_word_count
+                            FROM {_main.SCHEMA}.book b
+                            JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
+                            JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id
+                            LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
+                            WHERE {where}
+                            GROUP BY b.author, b.id, b.distinct_nonstop_word_count
+                        ),
+                        author_density AS (
+                            SELECT author, avg(density) AS density
+                            FROM (
+                                SELECT author,
+                                       CASE WHEN distinct_nonstop_word_count > 0
+                                            THEN book_word_count::float / distinct_nonstop_word_count END AS density
+                                FROM book_word_counts
+                            ) bd
+                            WHERE density IS NOT NULL
+                            GROUP BY author
+                        ),
+                        author_word_ids AS (
+                            SELECT DISTINCT b.author, w.id AS word_id
+                            FROM {_main.SCHEMA}.book b
+                            JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
+                            JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id
+                            LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
+                            WHERE {where}
+                        ),
+                        author_word_stats AS (
+                            SELECT awi.author, avg(wd.difficulty) AS mean_difficulty
+                            FROM author_word_ids awi
+                            LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = awi.word_id
+                            GROUP BY awi.author
+                        ),
+                        author_base AS (
+                            SELECT aws.author, aws.mean_difficulty, ad.density
+                            FROM author_word_stats aws
+                            LEFT JOIN author_density ad ON ad.author = aws.author
+                        ),
+                        diff_rank AS (
+                            SELECT author, percent_rank() OVER (ORDER BY mean_difficulty) AS diff_pct
+                            FROM author_base WHERE mean_difficulty IS NOT NULL
+                        ),
+                        dens_rank AS (
+                            SELECT author, percent_rank() OVER (ORDER BY density) AS dens_pct
+                            FROM author_base WHERE density IS NOT NULL
+                        )
+                        SELECT CASE WHEN dr.diff_pct IS NOT NULL AND de.dens_pct IS NOT NULL
+                                    THEN round((((dr.diff_pct + de.dens_pct) / 2) * 100)::numeric, 1)
+                               END AS overall_difficulty
+                        FROM author_base ab
+                        LEFT JOIN diff_rank dr ON dr.author = ab.author
+                        LEFT JOIN dens_rank de ON de.author = ab.author
+                        LEFT JOIN {_main.SCHEMA}.author_fame af ON af.author = ab.author
+                        WHERE true{fame_where}
+                    ) sub WHERE true{overall_diff_where}""",
+                (*params, *params, *fame_params, *overall_diff_params),
+            )
+        else:
+            cur.execute(
+                f"""SELECT count(*) FROM (
+                        SELECT b.author
+                        FROM {_main.SCHEMA}.book b
+                        JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
+                        JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id
+                        LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
+                        LEFT JOIN {_main.SCHEMA}.author_fame af ON af.author = b.author
+                        WHERE {where}{fame_where}
+                        GROUP BY b.author, af.fame_score
+                    ) sub""",
+                (*params, *fame_params),
+            )
         total = cur.fetchone()[0]
 
         # Two independent DISTINCT sets, not one: a word appearing in two of
@@ -608,21 +715,28 @@ def browse_authors(
             dens_rank AS (
                 SELECT author, percent_rank() OVER (ORDER BY density) AS dens_pct
                 FROM author_base WHERE density IS NOT NULL
+            ),
+            scored AS (
+                SELECT ab2.author, ab2.book_count, ab2.word_count, ab2.scored_word_count,
+                       ab2.mean_difficulty, ab2.stddev_difficulty, ab2.density,
+                       CASE WHEN dr.diff_pct IS NOT NULL AND de.dens_pct IS NOT NULL
+                            THEN round((((dr.diff_pct + de.dens_pct) / 2) * 100)::numeric, 1)
+                       END AS overall_difficulty,
+                       af.fame_score, af.fame_reasoning, ab2.unique_word_count
+                FROM author_base ab2
+                LEFT JOIN diff_rank dr ON dr.author = ab2.author
+                LEFT JOIN dens_rank de ON de.author = ab2.author
+                LEFT JOIN {_main.SCHEMA}.author_fame af ON af.author = ab2.author
+                WHERE true{fame_where}
             )
-            SELECT ab2.author, ab2.book_count, ab2.word_count, ab2.scored_word_count,
-                   ab2.mean_difficulty, ab2.stddev_difficulty, ab2.density,
-                   CASE WHEN dr.diff_pct IS NOT NULL AND de.dens_pct IS NOT NULL
-                        THEN round((((dr.diff_pct + de.dens_pct) / 2) * 100)::numeric, 1)
-                   END AS overall_difficulty,
-                   af.fame_score, af.fame_reasoning, ab2.unique_word_count
-            FROM author_base ab2
-            LEFT JOIN diff_rank dr ON dr.author = ab2.author
-            LEFT JOIN dens_rank de ON de.author = ab2.author
-            LEFT JOIN {_main.SCHEMA}.author_fame af ON af.author = ab2.author
-            WHERE true{fame_where}
+            SELECT author, book_count, word_count, scored_word_count, mean_difficulty,
+                   stddev_difficulty, density, overall_difficulty, fame_score, fame_reasoning,
+                   unique_word_count
+            FROM scored
+            WHERE true{overall_diff_where}
             ORDER BY {order_by}
             LIMIT %s OFFSET %s""",
-            (list(PLACEHOLDER_AUTHORS), *params, *params, *fame_params, limit, offset),
+            (list(PLACEHOLDER_AUTHORS), *params, *params, *fame_params, *overall_diff_params, limit, offset),
         )
         rows = cur.fetchall()
 
@@ -697,6 +811,9 @@ def browse_books(
     pos: list[str] = Query([]),
     quizzable_only: bool = False,
     unique_word_bucket: str | None = None,
+    overall_difficulty_band: str | None = None,  # a label /api/browse/overall-difficulty-histogram
+                                                   # emitted, e.g. "40-60" or "Not enough data" --
+                                                   # see _overall_difficulty_band_filter
     letter: str | None = Query(None, min_length=1, max_length=1),
     random: bool = False,
     page: int = Query(1, ge=1),
@@ -708,6 +825,14 @@ def browse_books(
 ) -> BookPage:
     if fame_unscored_only and (fame_min is not None or fame_max is not None):
         raise HTTPException(400, "fame_unscored_only is mutually exclusive with fame_min/fame_max")
+    # overall_difficulty is a CASE-expression alias, not a real column, so
+    # this filter can't join `filters`/`where` (evaluated before that alias
+    # exists) -- applied later, against the `scored` CTE both queries below
+    # build once overall_difficulty is actually materialized.
+    overall_diff_where, overall_diff_params = "", []
+    if overall_difficulty_band is not None:
+        _clause, overall_diff_params = _overall_difficulty_band_filter(overall_difficulty_band)
+        overall_diff_where = f" AND {_clause}"
     # author/book_id are NOT passed through _build_word_filters -- same
     # reasoning as browse_authors' book_id fix: this endpoint's outer query
     # already has a correctly-scoped `b`, so filtering by either is a direct
@@ -763,19 +888,61 @@ def browse_books(
     offset = 0 if random else (page - 1) * page_size
 
     with _main.get_conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            f"""SELECT count(*) FROM (
-                    SELECT b.id
-                    FROM {_main.SCHEMA}.book b
-                    JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
-                    JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id
-                    LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
-                    LEFT JOIN {_main.SCHEMA}.book_fame bf ON bf.book_id = b.id
-                    WHERE {where}
-                    GROUP BY b.id, bf.fame_score
-                ) sub""",
-            params,
-        )
+        if overall_difficulty_band is not None:
+            # overall_difficulty is a corpus-percentile, not a stored column
+            # -- unlike every other filter here, counting matches requires
+            # computing it for the whole `where`-filtered set first, so this
+            # can't reuse the cheap per-book GROUP BY below. Only book_id/
+            # mean_difficulty/density are needed to get there (no title/
+            # fame/unique-word-count), but book_fame still has to be joined:
+            # `where` may itself reference `bf.fame_score` (fame_min/max
+            # above), and dropping the join would 42P01 on that reference.
+            cur.execute(
+                f"""SELECT count(*) FROM (
+                        WITH book_base AS (
+                            SELECT b.id, b.distinct_nonstop_word_count,
+                                   avg(wd.difficulty) AS mean_difficulty,
+                                   CASE WHEN b.distinct_nonstop_word_count > 0
+                                        THEN count(DISTINCT w.id)::float / b.distinct_nonstop_word_count END AS density
+                            FROM {_main.SCHEMA}.book b
+                            JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
+                            JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id
+                            LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
+                            LEFT JOIN {_main.SCHEMA}.book_fame bf ON bf.book_id = b.id
+                            WHERE {where}
+                            GROUP BY b.id, b.distinct_nonstop_word_count
+                        ),
+                        diff_rank AS (
+                            SELECT id, percent_rank() OVER (ORDER BY mean_difficulty) AS diff_pct
+                            FROM book_base WHERE mean_difficulty IS NOT NULL
+                        ),
+                        dens_rank AS (
+                            SELECT id, percent_rank() OVER (ORDER BY density) AS dens_pct
+                            FROM book_base WHERE density IS NOT NULL
+                        )
+                        SELECT CASE WHEN dr.diff_pct IS NOT NULL AND de.dens_pct IS NOT NULL
+                                    THEN round((((dr.diff_pct + de.dens_pct) / 2) * 100)::numeric, 1)
+                               END AS overall_difficulty
+                        FROM book_base bb
+                        LEFT JOIN diff_rank dr ON dr.id = bb.id
+                        LEFT JOIN dens_rank de ON de.id = bb.id
+                    ) sub WHERE true{overall_diff_where}""",
+                (*params, *overall_diff_params),
+            )
+        else:
+            cur.execute(
+                f"""SELECT count(*) FROM (
+                        SELECT b.id
+                        FROM {_main.SCHEMA}.book b
+                        JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
+                        JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id
+                        LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
+                        LEFT JOIN {_main.SCHEMA}.book_fame bf ON bf.book_id = b.id
+                        WHERE {where}
+                        GROUP BY b.id, bf.fame_score
+                    ) sub""",
+                params,
+            )
         total = cur.fetchone()[0]
 
         # See BookRow's field comments above for why density/overall_difficulty
@@ -832,19 +999,26 @@ def browse_books(
             dens_rank AS (
                 SELECT id, percent_rank() OVER (ORDER BY density) AS dens_pct
                 FROM book_base WHERE density IS NOT NULL
+            ),
+            scored AS (
+                SELECT bb.id, bb.title, bb.author, bb.word_count, bb.scored_word_count,
+                       bb.mean_difficulty, bb.stddev_difficulty, bb.density, bb.archive_path,
+                       CASE WHEN dr.diff_pct IS NOT NULL AND de.dens_pct IS NOT NULL
+                            THEN round((((dr.diff_pct + de.dens_pct) / 2) * 100)::numeric, 1)
+                       END AS overall_difficulty,
+                       bb.fame_score, bb.fame_reasoning, bb.unique_word_count, bb.sort_title
+                FROM book_base bb
+                LEFT JOIN diff_rank dr ON dr.id = bb.id
+                LEFT JOIN dens_rank de ON de.id = bb.id
             )
-            SELECT bb.id, bb.title, bb.author, bb.word_count, bb.scored_word_count,
-                   bb.mean_difficulty, bb.stddev_difficulty, bb.density, bb.archive_path,
-                   CASE WHEN dr.diff_pct IS NOT NULL AND de.dens_pct IS NOT NULL
-                        THEN round((((dr.diff_pct + de.dens_pct) / 2) * 100)::numeric, 1)
-                   END AS overall_difficulty,
-                   bb.fame_score, bb.fame_reasoning, bb.unique_word_count
-            FROM book_base bb
-            LEFT JOIN diff_rank dr ON dr.id = bb.id
-            LEFT JOIN dens_rank de ON de.id = bb.id
+            SELECT id, title, author, word_count, scored_word_count, mean_difficulty,
+                   stddev_difficulty, density, archive_path, overall_difficulty,
+                   fame_score, fame_reasoning, unique_word_count
+            FROM scored
+            WHERE true{overall_diff_where}
             ORDER BY {order_by}
             LIMIT %s OFFSET %s""",
-            (*params, limit, offset),
+            (*params, *overall_diff_params, limit, offset),
         )
         rows = cur.fetchall()
 
@@ -2126,6 +2300,144 @@ def browse_fame_histogram(
     counts = Counter(_FAME_UNSCORED_LABEL if score is None else str(round(score)) for score in scores)
     labels = _FAME_SCORE_LABELS + [_FAME_UNSCORED_LABEL]
     return [UniqueWordBucket(label=label, count=counts.get(label, 0)) for label in labels]
+
+
+# --- /api/browse/overall-difficulty-histogram -------------------------------
+
+@router.get("/api/browse/overall-difficulty-histogram", response_model=list[DifficultyBandCount])
+def browse_overall_difficulty_histogram(
+    scope: Literal["book", "author"] = "book",
+    _: dict = Depends(_main.require_viewer),
+) -> list[DifficultyBandCount]:
+    """Distribution of overall_difficulty (the percent_rank(mean_difficulty)/
+    percent_rank(density) blend -- see BookRow/AuthorRow's own field comments)
+    across every book, or every real author -- unfiltered, same "whole
+    corpus, no facets applied" scope /api/browse/fame-histogram uses, NOT
+    difficulty-bands' "conditioned on every other active facet" scope. That
+    conditioning only makes sense for word-level difficulty (a raw, stored
+    column); overall_difficulty is already a corpus-wide percentile, so
+    narrowing the corpus first would change what the percentile itself means
+    out from under the chart.
+
+    The base population is reproduced via _build_word_filters(None, [], [],
+    None, None, [], [], False) rather than hand-rolled -- for scope='book'
+    this collapses to plain `w.active`, for scope='author' the two extra
+    `b.author IS NOT NULL`/`!= ALL(PLACEHOLDER_AUTHORS)` conditions
+    browse_authors always appends are added the same way it does -- so this
+    histogram's bars are guaranteed to bucket the exact same population
+    browse_books/browse_authors themselves would return with no filters
+    active, not a subtly different one."""
+    s = _main.SCHEMA
+    base_filters, base_params = _build_word_filters(None, [], [], None, None, [], [], False)
+    where = " AND ".join(base_filters)
+
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        if scope == "book":
+            cur.execute(
+                f"""WITH book_base AS (
+                        SELECT b.id, b.distinct_nonstop_word_count,
+                               avg(wd.difficulty) AS mean_difficulty,
+                               CASE WHEN b.distinct_nonstop_word_count > 0
+                                    THEN count(DISTINCT w.id)::float / b.distinct_nonstop_word_count END AS density
+                        FROM {s}.book b
+                        JOIN {s}.word_book wb ON wb.book_id = b.id
+                        JOIN {s}.word w ON w.id = wb.word_id
+                        LEFT JOIN {s}.word_difficulty wd ON wd.word_id = w.id
+                        WHERE {where}
+                        GROUP BY b.id, b.distinct_nonstop_word_count
+                    ),
+                    diff_rank AS (
+                        SELECT id, percent_rank() OVER (ORDER BY mean_difficulty) AS diff_pct
+                        FROM book_base WHERE mean_difficulty IS NOT NULL
+                    ),
+                    dens_rank AS (
+                        SELECT id, percent_rank() OVER (ORDER BY density) AS dens_pct
+                        FROM book_base WHERE density IS NOT NULL
+                    )
+                    SELECT CASE WHEN dr.diff_pct IS NOT NULL AND de.dens_pct IS NOT NULL
+                                THEN round((((dr.diff_pct + de.dens_pct) / 2) * 100)::numeric, 1)
+                           END AS overall_difficulty
+                    FROM book_base bb
+                    LEFT JOIN diff_rank dr ON dr.id = bb.id
+                    LEFT JOIN dens_rank de ON de.id = bb.id""",
+                base_params,
+            )
+        else:
+            placeholders = list(PLACEHOLDER_AUTHORS)
+            cur.execute(
+                f"""WITH author_word_ids AS (
+                        SELECT DISTINCT b.author, w.id AS word_id
+                        FROM {s}.book b
+                        JOIN {s}.word_book wb ON wb.book_id = b.id
+                        JOIN {s}.word w ON w.id = wb.word_id
+                        WHERE {where} AND b.author IS NOT NULL AND b.author != ALL(%s)
+                    ),
+                    author_word_stats AS (
+                        SELECT awi.author, avg(wd.difficulty) AS mean_difficulty
+                        FROM author_word_ids awi
+                        LEFT JOIN {s}.word_difficulty wd ON wd.word_id = awi.word_id
+                        GROUP BY awi.author
+                    ),
+                    book_word_counts AS (
+                        SELECT b.author, b.id AS book_id, b.distinct_nonstop_word_count,
+                               count(DISTINCT w.id) AS book_word_count
+                        FROM {s}.book b
+                        JOIN {s}.word_book wb ON wb.book_id = b.id
+                        JOIN {s}.word w ON w.id = wb.word_id
+                        LEFT JOIN {s}.word_difficulty wd ON wd.word_id = w.id
+                        WHERE {where} AND b.author IS NOT NULL AND b.author != ALL(%s)
+                        GROUP BY b.author, b.id, b.distinct_nonstop_word_count
+                    ),
+                    author_density AS (
+                        SELECT author, avg(density) AS density
+                        FROM (
+                            SELECT author,
+                                   CASE WHEN distinct_nonstop_word_count > 0
+                                        THEN book_word_count::float / distinct_nonstop_word_count END AS density
+                            FROM book_word_counts
+                        ) bd
+                        WHERE density IS NOT NULL
+                        GROUP BY author
+                    ),
+                    author_base AS (
+                        SELECT aws.author, aws.mean_difficulty, ad.density
+                        FROM author_word_stats aws
+                        LEFT JOIN author_density ad ON ad.author = aws.author
+                    ),
+                    diff_rank AS (
+                        SELECT author, percent_rank() OVER (ORDER BY mean_difficulty) AS diff_pct
+                        FROM author_base WHERE mean_difficulty IS NOT NULL
+                    ),
+                    dens_rank AS (
+                        SELECT author, percent_rank() OVER (ORDER BY density) AS dens_pct
+                        FROM author_base WHERE density IS NOT NULL
+                    )
+                    SELECT CASE WHEN dr.diff_pct IS NOT NULL AND de.dens_pct IS NOT NULL
+                                THEN round((((dr.diff_pct + de.dens_pct) / 2) * 100)::numeric, 1)
+                           END AS overall_difficulty
+                    FROM author_base ab
+                    LEFT JOIN diff_rank dr ON dr.author = ab.author
+                    LEFT JOIN dens_rank de ON de.author = ab.author""",
+                (*base_params, placeholders, *base_params, placeholders),
+            )
+        scores = [row[0] for row in cur.fetchall()]
+
+    scored = [float(sc) for sc in scores if sc is not None]
+    results = []
+    band_min = 0.0
+    while band_min < 100:
+        band_max = min(band_min + _OVERALL_DIFFICULTY_BAND_WIDTH, 100)
+        is_last = band_max >= 100
+        count = sum(1 for x in scored if band_min <= x <= band_max) if is_last \
+            else sum(1 for x in scored if band_min <= x < band_max)
+        results.append(DifficultyBandCount(
+            band_min=band_min, band_max=band_max,
+            label=f"{int(band_min)}-{int(band_max)}", word_count=count,
+        ))
+        band_min = band_max
+    results.append(DifficultyBandCount(band_min=None, band_max=None, label=_OVERALL_DIFFICULTY_UNSCORED_LABEL,
+                                        word_count=len(scores) - len(scored)))
+    return results
 
 
 # --- /api/browse/pos-values ------------------------------------------------------
