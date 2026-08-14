@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """One-time backfill: stamp vocab1_import=true on words that were already
 imported from vocab.defined by import_defined_words() before that flag
-existed (concordance ran it 2026-07-22 and 2026-07-24, ~8379 words, back
-when the only provenance signal was "book-less + first_added=that date").
+existed (concordance ran it 2026-07-22 and 2026-07-24, back when the only
+provenance signal was "book-less + first_added=that date").
 
 definition_source is untouched -- these words already carry vocab.defined's
 own per-row source label (datamuse/phrontistery/oed/mw/...), which stays as
@@ -14,6 +14,19 @@ filter is required, not just belt-and-suspenders -- book-less alone would
 also catch words added via the unrelated admin "suggest a new word" flow
 (webapp/backend/suggest_word.py) if one happens to match a vocab.defined
 term by coincidence.
+
+Deliberately conservative, confirmed with Brian 2026-08-14: "book-less"
+undercounts by design. A word inserted by this import starts book-less, but
+a later book (ingested any time since 2026-07-24) can legitimately attach a
+word_book row to it via the normal ON CONFLICT upsert -- first_added stays
+put (LEAST()), so the word no longer matches this script's predicate even
+though it genuinely came from the import. Measured live: ~3028 of the
+original ~8379 import-sourced words fell into this state by 2026-08-14,
+of which content-matching (word.definition still exactly equal to
+vocab.defined's current definition for that term) could recover ~286 as
+verifiably import-sourced. Brian chose the narrower/book-less-only
+predicate anyway -- do not "fix" this to the content-match count without
+asking again.
 
 Usage:
     python scripts/backfill_vocab1_import_flag.py           # dry run (counts only)
@@ -54,8 +67,9 @@ def main():
         matched = cur.fetchone()[0]
 
     print(f"matched {matched} word(s) eligible for vocab1_import=true")
-    if matched != 8379:
-        print(f"WARNING: expected exactly 8379 (98 on 2026-07-22 + 8281 on 2026-07-24) -- "
+    if matched != 8285:
+        print(f"WARNING: expected 8285 (measured live 2026-08-14, after ~3028 of the original "
+              f"~8379 import-sourced words picked up a word_book link from later book ingests) -- "
               f"got {matched}. Stop and investigate before --apply.")
 
     if not args.apply:
