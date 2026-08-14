@@ -99,3 +99,52 @@ def test_pronunciation_lexicon_bulk_lookup_and_dedup_and_paren_fix():
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
     conn.close()
+
+
+@pg
+def test_compute_lemma_flags_backfills_only_uncomputed_entries():
+    schema = "oed_test_lemma"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    oed_db.apply_schema(conn, schema)
+
+    volume_id = oed_db.upsert_volume(conn, file_name="test.pdf", file_hash_="def456",
+                                      volume_label="Test Volume", page_count=1, schema=schema)
+
+    def _entry(headword, pos):
+        return oed_db.insert_entry(
+            conn, volume_id=volume_id, headword=headword, homograph_number=None,
+            part_of_speech=pos, etymology=None, entry_type="main", parent_entry_id=None,
+            page_number=1, raw_text="raw", schema=schema)
+
+    lemma_id = _entry("abandon", "v")
+    inflected_id = _entry("abandoned", "ppl. a")
+    conn.commit()
+
+    stats = oed_db.compute_lemma_flags(conn, schema)
+    assert stats == {"entries": 2, "lemma": 1, "not_lemma": 1}
+
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT lemma, lemma_computed_at FROM {schema}.entry WHERE id = %s", (lemma_id,))
+        lemma, computed_at = cur.fetchone()
+        assert lemma is True and computed_at is not None
+
+        cur.execute(f"SELECT lemma FROM {schema}.entry WHERE id = %s", (inflected_id,))
+        assert cur.fetchone()[0] is False
+
+    # A second run with only_missing=True (the default) touches nothing new.
+    stats2 = oed_db.compute_lemma_flags(conn, schema)
+    assert stats2["entries"] == 0
+
+    # A third, freshly-added entry is picked up incrementally.
+    _entry("cats", "sb")
+    conn.commit()
+    stats3 = oed_db.compute_lemma_flags(conn, schema)
+    assert stats3 == {"entries": 1, "lemma": 0, "not_lemma": 1}
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()

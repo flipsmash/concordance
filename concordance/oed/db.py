@@ -111,6 +111,18 @@ CREATE INDEX IF NOT EXISTS quotation_text_fts_idx
 def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> None:
     with conn.cursor() as cur:
         cur.execute(_SCHEMA_DDL.format(s=schema))
+        # Is this entry's headword the lemma (base/citation) form of the
+        # word, as opposed to an inflected form OED gave its own headword
+        # entry (e.g. "abandoned"/"ppl. a", a past-participial adjective
+        # derived from "abandon")? See concordance/oed/lemma.py for the
+        # computation. NULL lemma_computed_at means not yet computed --
+        # distinct from a computed false, so an incremental run (new
+        # volumes keep arriving) only touches entries not yet checked.
+        cur.execute(f"ALTER TABLE {schema}.entry ADD COLUMN IF NOT EXISTS lemma boolean NOT NULL DEFAULT false")
+        cur.execute(f"ALTER TABLE {schema}.entry ADD COLUMN IF NOT EXISTS lemma_computed_at timestamptz")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS entry_lemma_idx ON {schema}.entry (lemma) WHERE lemma")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS entry_lemma_uncomputed_idx ON {schema}.entry (id) "
+                    f"WHERE lemma_computed_at IS NULL")
     conn.commit()
 
 
@@ -273,3 +285,37 @@ def update_pronunciation(conn: psycopg.Connection, entry_id: int, *, pronunciati
             """,
             (pronunciation_raw, pass1, pass2, ipa, source, needs_review, entry_id),
         )
+
+
+def compute_lemma_flags(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA, *,
+                        only_missing: bool = True, limit: int = 0, commit_every: int = 500) -> dict:
+    """Backfill entry.lemma/lemma_computed_at -- see lemma.py's module
+    docstring for the computation. only_missing=True (default) only touches
+    entries not yet checked (lemma_computed_at IS NULL), so this is safe to
+    re-run periodically as new volumes keep landing in oed-ingest without
+    redoing the whole table each time."""
+    from . import lemma as _lemma
+    from .. import tokenize
+
+    where = "WHERE lemma_computed_at IS NULL" if only_missing else ""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT id, headword_norm, part_of_speech FROM {schema}.entry "
+                    f"{where} ORDER BY id" + (f" LIMIT {int(limit)}" if limit else ""))
+        rows = cur.fetchall()
+
+    stats = {"entries": len(rows), "lemma": 0, "not_lemma": 0}
+    if not rows:
+        return stats
+
+    nlp = tokenize.load_nlp()
+    with conn.cursor() as cur:
+        for i, (entry_id, headword_norm, pos) in enumerate(rows, 1):
+            is_lemma = _lemma.is_lemma(nlp, headword_norm, pos)
+            stats["lemma" if is_lemma else "not_lemma"] += 1
+            cur.execute(
+                f"UPDATE {schema}.entry SET lemma = %s, lemma_computed_at = now() WHERE id = %s",
+                (is_lemma, entry_id))
+            if i % commit_every == 0:
+                conn.commit()
+    conn.commit()
+    return stats

@@ -1518,6 +1518,36 @@ def oed_ipa_cmd(
                   f"{stats.get('no_match',0)} had no oed match")
 
 
+@app.command("oed-lemma")
+def oed_lemma_cmd(
+    schema: str = typer.Option("oed", "--schema", help="Postgres schema for the oed tables."),
+    refetch: bool = typer.Option(False, "--refetch", help="Recompute every entry (default: only uncomputed)."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of entries processed."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Compute oed.entry.lemma -- flags whether each entry's headword is the
+    base/citation form of the word, as opposed to an inflected form OED gave
+    its own headword (e.g. "abandoned"/"ppl. a" derived from "abandon"). See
+    concordance/oed/lemma.py's module docstring for the two-tier computation
+    (OED's own POS tag when present, spaCy's context-free guess otherwise).
+
+    Standalone like `oed-ipa`/`oed-ingest` -- not part of `maintain`, re-run
+    periodically as new volumes land. Not load-bearing for anything yet; this
+    is prep for a future cross-reference into concordance.word (limiting
+    that eventual import to lemma entries only, for manageability)."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    from .oed import db as oed_db
+    oed_db.apply_schema(conn, schema)
+    with console.status("[bold]Computing oed lemma flags…"):
+        stats = oed_db.compute_lemma_flags(conn, schema, only_missing=not refetch, limit=limit)
+    conn.close()
+    console.print(f"[green]✓[/green] oed-lemma: [bold]{stats['entries']}[/bold] entries checked — "
+                  f"{stats['lemma']} lemma, {stats['not_lemma']} not")
+
+
 @app.command()
 def maintain(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
