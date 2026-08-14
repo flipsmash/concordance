@@ -115,16 +115,22 @@ def test_import_defined_words_excludes_existing_and_rejected_and_imports_new():
         assert cur.fetchone()[0] == 0
 
         # #3 imported with a real definition and no word_book row (book-less).
-        cur.execute(f"SELECT id, definition, part_of_speech FROM {schema}.word WHERE lemma_lc = %s",
-                    (genuinely_new,))
+        cur.execute(f"SELECT id, definition, part_of_speech, vocab1_import, vocab1_import_at "
+                    f"FROM {schema}.word WHERE lemma_lc = %s", (genuinely_new,))
         row = cur.fetchone()
         assert row is not None
-        word_id, definition, pos = row
+        word_id, definition, pos, vocab1_import, vocab1_import_at = row
         assert definition
         assert pos == pos.lower()  # normalize_pos always lowercases
+        assert vocab1_import is True
+        assert vocab1_import_at is not None
 
         cur.execute(f"SELECT count(*) FROM {schema}.word_book WHERE word_id = %s", (word_id,))
         assert cur.fetchone()[0] == 0
+
+        # #1 (pre-seeded, not touched by the import) has no provenance flag.
+        cur.execute(f"SELECT vocab1_import FROM {schema}.word WHERE lemma_lc = %s", (already_in_word,))
+        assert cur.fetchone()[0] is False
 
         # No imported lemma is a phrase (contains a space).
         cur.execute(f"SELECT lemma FROM {schema}.word WHERE lemma_lc = %s", (genuinely_new,))

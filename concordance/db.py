@@ -841,6 +841,15 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS admin_suggested boolean NOT NULL DEFAULT false")
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS admin_suggested_by text")
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS admin_suggested_at timestamptz")
+        # tracks a word that came from the legacy vocab.defined bootstrap
+        # (import_defined_words) -- purely provenance, same rationale as
+        # admin_suggested above. definition_source is deliberately left alone
+        # for these words (it keeps vocab.defined's own per-row source label,
+        # e.g. "datamuse"/"phrontistery" -- confirmed with the user those are
+        # more informative than a blanket tag), so this is the only place
+        # that origin is recorded.
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS vocab1_import boolean NOT NULL DEFAULT false")
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS vocab1_import_at timestamptz")
         # audit trail for an admin hand-editing `definition` directly (PATCH
         # /api/words/{id}/definition) -- edited_by/edited_at note WHO and
         # WHEN, previous_definition holds the value it replaced. Deliberately
@@ -1636,7 +1645,15 @@ def import_defined_words(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
 
     Commits every `commit_every` words, not once at the end -- same
     crash-safety rationale as classify_and_store (a run over ~11k candidates
-    that dies partway through should keep whatever it already inserted)."""
+    that dies partway through should keep whatever it already inserted).
+
+    Every inserted word is stamped vocab1_import=true (vocab1_import_at=now())
+    so it can be found later regardless of what definition_source says --
+    definition_source is deliberately left as vocab.defined's own per-row
+    label (falls back to "vocab.defined import" only when that's blank),
+    not overwritten with a blanket tag, since those original source labels
+    are more informative. Words imported before this flag existed were
+    backfilled once via scripts/backfill_vocab1_import_flag.py."""
     from . import localdict
 
     s = _safe_schema(schema)
@@ -1683,8 +1700,8 @@ def import_defined_words(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
             cur.execute(
                 f"""INSERT INTO {s}.word
                         (lemma, as_seen, definition, part_of_speech, ipa, etymology,
-                         definition_source, first_added)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s, CURRENT_DATE)
+                         definition_source, first_added, vocab1_import, vocab1_import_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s, CURRENT_DATE, true, now())
                     ON CONFLICT (lemma_lc) DO NOTHING""",
                 (term, term, definition, norm_pos, ipa, etymology,
                  def_source or "vocab.defined import"))
