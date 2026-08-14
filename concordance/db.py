@@ -340,7 +340,7 @@ CREATE TABLE IF NOT EXISTS {s}.book_merge_group (
 
 CREATE TABLE IF NOT EXISTS {s}.word_audio (
     word_id      integer PRIMARY KEY REFERENCES {s}.word(id) ON DELETE CASCADE,
-    source       text,          -- 'commons' | 'azure' | 'none' (looked up, nothing found)
+    source       text,          -- 'commons' | 'mw' | 'azure' | 'azure_guess' | 'none' (looked up, nothing found)
     file_path    text,
     ipa_used     text,          -- the exact phoneme string sent to the synthesizer (azure only)
     voice        text,          -- azure voice name, or the Commons source URL
@@ -1207,6 +1207,16 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
     re-entering the cascade at Tier LOCAL, the second one's local/free
     attempts always redundant with the first's on the same lemma.
 
+    Tier.MW (mw_api_key auto-discovered from MW_DICTIONARY_API_KEY, same as
+    Wordnik) is included automatically -- this is the first `maintain` step
+    to try it; previously only ingest-time enrichment and the standalone
+    `mw-backfill` command ever reached MW, so a word needing MW specifically
+    (not LOCAL/FREE) sat undefined through every `maintain` run until someone
+    remembered to run `mw-backfill` by hand. A foreign-language loanword MW
+    catches (its own "<Language> noun/verb/..." fl convention) is cast out
+    below exactly like a symbol/proper-noun-only resolution -- see the
+    cand.reject_reason check a few lines down.
+
     A word that resolves to a symbol/proper-noun-only sense (see
     model.junk_pos_reason -- the same gate ingest's pipeline.process()
     applies) is cast out (active=false) instead of being filled in: these
@@ -1260,6 +1270,23 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
     key = deepdef.wordnik_key()
     max_tier = resolve.Tier.WEB if use_web else resolve.Tier.YOURDICT
 
+    # Same quota pre-check pipeline.py's ingest-time enrichment already does
+    # (mw.mw_api_key() + mw.quota_exhausted()) -- checked ONCE for the whole
+    # batch, not per word: without this, resolve_definition's Tier.MW would
+    # auto-discover the key regardless, silently burn the shared 1000/day cap
+    # on the first however-many words of a real backlog, then every
+    # remaining word's Tier.MW call returns [] from mw.lookup_api for free
+    # but still means a wasted cache re-read/re-parse per word (see mw.py's
+    # lookup_api) -- and a word that reaches WORDNIK/YOURDICT/WEB and still
+    # misses gets validity_checked_at stamped, so recheck_after_days pushes
+    # its next MW attempt out two weeks instead of to tomorrow's run. This
+    # also protects mw_backfill/lookup_mw.py, which share the same on-disk
+    # quota counter, from starving for the rest of the day.
+    from . import mw as mw_module
+    mw_key = mw_module.mw_api_key()
+    if mw_key and mw_module.quota_exhausted():
+        mw_key = ""
+
     llm = None
     if use_web:
         cfg = Config()
@@ -1284,7 +1311,7 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
             est = None
             found = resolve.resolve_definition(
                 cand, max_tier=max_tier, lexicon=lexicon, session=session,
-                wordnik_key=key, llm=None) is not None
+                wordnik_key=key, mw_api_key=mw_key, llm=None) is not None
             if not found:
                 est = validity_score.estimate(lemma, session=session, sentence=sentence or "")
                 if llm is not None:
@@ -1301,7 +1328,12 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
             # haft, glaive, thurible, discomfit, kickshaw -- rather than the
             # junk it was built to catch) but still worth recording so a
             # human can review + prune via the webapp.
-            reason = junk_pos_reason(cand.part_of_speech) if found else None
+            # cand.reject_reason: set directly by resolve.Tier.MW when the hit
+            # revealed a foreign-language loanword (MW's own raw POS
+            # convention, e.g. "Swahili noun" -- see resolve._from_mw) --
+            # caught here alongside junk_pos_reason's symbol/proper-noun
+            # check since MW's signal doesn't survive normalize_pos.
+            reason = (junk_pos_reason(cand.part_of_speech) or cand.reject_reason) if found else None
             variant = validity_score.variant_reject_reason(lemma) if (found and not reason) else None
             if reason:
                 cur.execute(
@@ -3816,16 +3848,17 @@ def search_commons_direct(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | N
 
 
 def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None,
-                 only_missing: bool = True, limit: int = 0) -> dict:
-    """Backfill + clean word.ipa. Sources tried in order per word: (1) kaikki's
-    Wiktextract dump; (2) Wordnik's raw pronunciation (already fetched by
-    `wordnik-pron`), converted via the matching notation converter — direct
-    IPA as-is, ARPAbet or AHD respellings through their own deterministic
-    converters (gcide-diacritical has no converter yet, lowest yield, skipped);
-    (3) the local vocab.wiktionary dump's us_pronunciation column — low yield
-    (it's the same Wiktionary data kaikki's dump already draws from, just a
-    different snapshot, so it only rescues the handful of words where the two
-    dumps disagree) but free, since the DB connection is already open.
+                 only_missing: bool = True, limit: int = 0, oed_schema: str = "oed") -> dict:
+    """Backfill + clean word.ipa via resolve_pronunciation's unified cascade
+    (kaikki -> Wordnik-converted -> local Wiktionary -> oed, see that
+    module's docstring for the full per-tier rationale) -- one candidate
+    SELECT, four lexicons built once for the whole batch, one per-word trip
+    through resolve_pronunciation.resolve_ipa. Folds in what used to be the
+    separate standalone `oed-ipa` command's own candidate-selection/priority
+    logic (backfill_ipa_from_oed still exists for a targeted OED-only run,
+    but every regular `ipa`/`maintain` pass now covers OED too, so it's
+    rarely needed on its own anymore).
+
     Also NULLs out any existing transcription that fails the English-language
     sanity check (the pre-existing ad hoc scrape occasionally grabbed a
     cross-referenced foreign cognate's IPA instead of the word's own — e.g.
@@ -3833,10 +3866,11 @@ def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None
     only_missing=True (default), only words with an empty or invalid ipa are
     candidates, so a re-run after everything's resolved does no dump parsing
     at all and is a no-op. ipa_source is kept in sync with every write here
-    (set to whichever of the three sources won, cleared alongside a NULLed
-    ipa) -- see audio.ipa_dialect_for_source for why this matters downstream."""
+    (set to whichever tier won, cleared alongside a NULLed ipa) -- see
+    audio.ipa_dialect_for_source for why this matters downstream."""
     from collections import Counter
-    from . import ahd, arpabet, audio, localdict, wiktextract
+    from . import audio, localdict, resolve_pronunciation, wiktextract
+    from .oed import db as oed_db
     s = _safe_schema(schema)
 
     with conn.cursor() as cur:
@@ -3862,28 +3896,10 @@ def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None
 
     lemmas = {lemma.strip().lower() for _, lemma, _, _, _ in candidates}
     dump_path = dump_path or wiktextract.DEFAULT_DUMP_PATH
-    lexicon = wiktextract.build_lexicon(
+    kaikki_lexicon = wiktextract.build_lexicon(
         dump_path, lemmas, progress_cb=lambda n: print(f"  ...{n} lines scanned"))
     local_lexicon = localdict.build_lexicon(conn, lemmas)
-
-    def wordnik_ipa(raw, rtype):
-        if not raw:
-            return None
-        if rtype == "IPA":
-            converted = raw
-        elif rtype == "arpabet":
-            converted = arpabet.to_ipa(raw)
-        elif rtype == "ahd-5":
-            converted = ahd.to_ipa(raw)
-        else:
-            return None  # gcide-diacritical: no converter yet
-        return converted if converted and audio.looks_like_english_ipa(converted) else None
-
-    def local_wiktionary_ipa(lemma):
-        for _pos, _definition, ipa, *_rest in local_lexicon.get(lemma, []):
-            if ipa and audio.looks_like_english_ipa(ipa):
-                return ipa
-        return None
+    oed_lexicon = oed_db.pronunciation_lexicon(conn, lemmas, schema=oed_schema)
 
     with conn.cursor() as cur:
         for i, (wid, lemma, existing_ipa, wn_raw, wn_type) in enumerate(candidates, 1):
@@ -3892,13 +3908,14 @@ def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None
                 print(f"  ...{i}/{len(candidates)} words checked")
             had_valid_existing = is_valid(existing_ipa)
             lemma_lc = lemma.strip().lower()
-            entry = lexicon.get(lemma_lc, {})
-            kaikki_ipa = wiktextract.best_ipa(entry.get("ipa", []))
-            if kaikki_ipa and not audio.looks_like_english_ipa(kaikki_ipa):
-                kaikki_ipa = None
-            wn_ipa = wordnik_ipa(wn_raw, wn_type)
-            replacement = kaikki_ipa or wn_ipa or local_wiktionary_ipa(lemma_lc)
-            source = "kaikki" if kaikki_ipa else ("wordnik" if wn_ipa else ("local_wiktionary" if replacement else None))
+            hit = resolve_pronunciation.resolve_ipa(
+                kaikki_entry=kaikki_lexicon.get(lemma_lc),
+                wordnik_raw=wn_raw, wordnik_type=wn_type,
+                local_entries=local_lexicon.get(lemma_lc),
+                oed_matches=oed_lexicon.get(lemma_lc),
+            )
+            replacement, source = hit if hit else (None, None)
+            source = source.name.lower() if source else None
 
             if had_valid_existing and not replacement:
                 dist["already_valid"] += 1  # nothing to do, no change
@@ -3924,11 +3941,17 @@ def backfill_ipa_from_oed(conn, schema: str = DEFAULT_SCHEMA, oed_schema: str = 
     pronunciation_ipa (see oed/pronunciation.py's module docstring for how
     that's gated -- confirmed live: pronunciation_ipa IS NOT NULL implies
     pronunciation_needs_review=false for all 5007 resolved entries in this
-    corpus, 0 counterexamples). Standalone, like `wordnik-pron`/`ipa` --
-    OED coverage is partial (3 of ~20 planned volumes as of this writing)
-    and grows with each future `oed-ingest` run, so this is meant to be
-    re-run periodically, not folded into `maintain`. No local LLM or
-    embedding model, so safe to run alongside GPU-bound steps.
+    corpus, 0 counterexamples).
+
+    Superseded for routine use: compute_ipa (the `ipa`/`maintain` step) now
+    tries OED as its own tier too (see resolve_pronunciation.py), so a
+    regular `ipa` run already picks up whatever OED coverage exists as of
+    that run. Kept as a standalone command for a targeted OED-only pass
+    (e.g. right after a fresh `oed-ingest` run, without re-touching the
+    kaikki/Wordnik/local-Wiktionary tiers) -- no local LLM or embedding
+    model, so safe to run alongside GPU-bound steps.
+
+    OED coverage is partial and grows with each future `oed-ingest` run.
 
     Same only_missing candidate gate as compute_ipa (empty or invalid
     existing ipa). A headword can map to several oed.entry rows (homographs
@@ -4044,23 +4067,35 @@ def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = No
                    only_missing: bool = True, limit: int = 0, delay: float = 0.3) -> dict:
     """Fill in word_audio: real Commons recordings where kaikki/Wiktextract has
     one, else a real recording the direct Commons search found that kaikki
-    missed, else Azure IPA-guided synthesis where a transcription is known
-    (ours, kaikki's, or Wordnik's — backfilling word.ipa along the way), else
-    a 'none' placeholder so re-runs don't keep re-parsing the dump for words
-    with nothing to find. Azure synthesis picks its voice/lang from the
-    word's ipa_source (audio.ipa_dialect_for_source/voice_for_dialect) so an
-    OED-sourced (British RP) transcription gets the UK voice and the RP
-    linking-r convention, not the US voice's rhotic default -- see
-    audio.normalize_ipa's docstring for why that distinction matters."""
+    missed, else a real Merriam-Webster recording (mw.py's Collegiate API --
+    same cached, quota-respecting mw.lookup_api every other MW caller uses,
+    so a word already looked up during fill_definitions'/maintain's Tier.MW
+    costs nothing extra here, a genuinely fresh one still costs one of the
+    shared 1000/day API calls), else Azure IPA-guided synthesis where a
+    transcription is known (ours, kaikki's, or Wordnik's — backfilling
+    word.ipa along the way), else a 'none' placeholder so re-runs don't keep
+    re-parsing the dump for words with nothing to find. Azure synthesis
+    picks its voice/lang from the word's ipa_source
+    (audio.ipa_dialect_for_source/voice_for_dialect) so an OED-sourced
+    (British RP) transcription gets the UK voice and the RP linking-r
+    convention, not the US voice's rhotic default -- see
+    audio.normalize_ipa's docstring for why that distinction matters.
+
+    MW audio is real human speech (same trust tier as Commons, ahead of any
+    synthesis), NOT gated on word.ipa the way Azure is -- MW's own
+    pronunciation field is a proprietary respelling, never written to
+    word.ipa (see resolve.py's Tier.MW), but the recording itself doesn't
+    need that respelling to be usable."""
     import time
     from collections import Counter
-    from . import audio, wiktextract
+    from . import audio, mw as mw_module, wiktextract
+    from .dictionary import make_session
     s = _safe_schema(schema)
 
     where = (f" WHERE NOT EXISTS (SELECT 1 FROM {s}.word_audio a WHERE a.word_id=w.id)"
              if only_missing else "")
     with conn.cursor() as cur:
-        cur.execute(f"""SELECT w.id, w.lemma, w.ipa, w.ipa_source, cs.download_url
+        cur.execute(f"""SELECT w.id, w.lemma, w.ipa, w.ipa_source, w.part_of_speech, cs.download_url
                         FROM {s}.word w
                         LEFT JOIN {s}.word_commons_search cs ON cs.word_id = w.id{where}""" +
                     (f" LIMIT {int(limit)}" if limit else ""))
@@ -4070,7 +4105,7 @@ def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = No
     if not rows:
         return {"candidates": 0, **dist}
 
-    lemmas = {lemma.strip().lower() for _, lemma, _, _, _ in rows}
+    lemmas = {lemma.strip().lower() for _, lemma, _, _, _, _ in rows}
     dump_path = dump_path or wiktextract.DEFAULT_DUMP_PATH
     lexicon = wiktextract.build_lexicon(
         dump_path, lemmas, progress_cb=lambda n: print(f"  ...{n} lines scanned"))
@@ -4078,10 +4113,20 @@ def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = No
     key, region = audio.azure_credentials()
     if not (key and region):
         print("  (no AZURE_SPEECH_KEY/AZURE_SPEECH_REGION in .env — skipping synthesis, Commons-only pass)")
+
+    # Same batch-level quota pre-check fill_definitions/pipeline.py already
+    # do -- checked ONCE, not per word, so a real backlog can't silently
+    # burn the shared 1000/day cap one lookup at a time (see fill_definitions'
+    # own comment for the full "why" -- identical reasoning here).
+    mw_key = mw_module.mw_api_key()
+    if mw_key and mw_module.quota_exhausted():
+        mw_key = ""
+    mw_session = make_session() if mw_key else None
+
     audio.AUDIO_DIR.mkdir(exist_ok=True)
 
     with conn.cursor() as cur:
-        for i, (wid, lemma, existing_ipa, ipa_source, direct_search_url) in enumerate(rows, start=1):
+        for i, (wid, lemma, existing_ipa, ipa_source, pos, direct_search_url) in enumerate(rows, start=1):
             lemma_lc = lemma.strip().lower()
             entry = lexicon.get(lemma_lc, {})
 
@@ -4115,6 +4160,21 @@ def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = No
                            "Wikimedia Commons recording (direct search — kaikki's dump missed it); "
                            "verify per-file license before public reuse")
                     dist["commons_direct_search"] += 1
+            if row is None and mw_key:
+                tagger_pos = _POS_TO_TAGGER.get((pos or "").lower(), "")
+                mw_entries = mw_module.exact_matches(
+                    mw_module.lookup_api(lemma, mw_key, mw_session), lemma)
+                mw_audio_url = None
+                if mw_entries:
+                    mw_entry = mw_module.pick_entry(mw_entries, tagger_pos)
+                    mw_audio_url = next(
+                        (p.audio_url for p in mw_entry.pronunciations if p.audio_url), None)
+                if mw_audio_url:
+                    dest = audio.AUDIO_DIR / f"{lemma_lc}.mp3"
+                    if audio.fetch_commons_audio(mw_audio_url, dest, tries=1):
+                        row = ("mw", str(dest), None, mw_audio_url,
+                               "Merriam-Webster recording; verify terms before public reuse")
+                        dist["mw"] += 1
             if row is None and (existing_ipa or "").strip() and key and region:
                 dialect = audio.ipa_dialect_for_source(ipa_source)
                 voice, lang = audio.voice_for_dialect(dialect)
@@ -4214,7 +4274,6 @@ def synthesize_unverified_guesses(conn, schema: str = DEFAULT_SCHEMA, limit: int
 MAINTAIN_STEPS = [
     "fill-definitions", "classify", "normalize-pos", "ngram", "archaic",
     "difficulty", "quizdef", "quizzable", "calibrate-difficulty",
-    "book-similarity", "author-similarity", "author-clustering",
     "wordnik-pron", "ipa", "embed", "backfill-analogies",
 ]
 
@@ -4222,10 +4281,13 @@ MAINTAIN_STEPS = [
 def maintain_status(conn, schema: str = DEFAULT_SCHEMA) -> list[dict]:
     """One dict per MAINTAIN_STEPS entry, in maintain's own run order:
     {name, done, total, note}. `done`/`total` are None for a step with no
-    meaningful fraction (normalize-pos, quizzable, calibrate-difficulty,
-    book-clustering, author-clustering -- each recomputes fully in one fast
-    pass rather than incrementally skipping already-touched rows, so there's nothing to be
-    partway through between runs)."""
+    meaningful fraction (normalize-pos, quizzable, calibrate-difficulty --
+    each recomputes fully in one fast pass rather than incrementally
+    skipping already-touched rows, so there's nothing to be partway through
+    between runs). book-similarity/book-clustering/author-similarity/
+    author-clustering are NOT listed here -- no longer part of `maintain`'s
+    own chain (see maintain's own docstring for why), track their own
+    freshness by re-running those commands directly."""
     s = _safe_schema(schema)
     steps: list[dict] = []
     with conn.cursor() as cur:
@@ -4263,20 +4325,6 @@ def maintain_status(conn, schema: str = DEFAULT_SCHEMA) -> list[dict]:
 
         steps.append({"name": "calibrate-difficulty", "done": None, "total": None,
                       "note": "driven by real quiz answers, not a fixed word-count target"})
-
-        cur.execute(f"SELECT count(*) FROM {s}.book_similarity")
-        steps.append({"name": "book-similarity", "done": None, "total": cur.fetchone()[0],
-                      "note": "row count only -- pairwise, no fixed target to divide by"})
-
-        steps.append({"name": "book-clustering", "done": None, "total": None,
-                      "note": "recomputes fully each run -- fast, no meaningful fraction"})
-
-        cur.execute(f"SELECT count(*) FROM {s}.author_similarity")
-        steps.append({"name": "author-similarity", "done": None, "total": cur.fetchone()[0],
-                      "note": "row count only -- pairwise, no fixed target to divide by"})
-
-        steps.append({"name": "author-clustering", "done": None, "total": None,
-                      "note": "recomputes fully each run -- fast, no meaningful fraction"})
 
         cur.execute(f"SELECT count(*) FROM {s}.word WHERE active AND wordnik_checked_at IS NOT NULL")
         steps.append({"name": "wordnik-pron", "done": cur.fetchone()[0], "total": active_total,

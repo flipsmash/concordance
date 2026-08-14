@@ -147,11 +147,23 @@ def pronunciation_lexicon(conn: psycopg.Connection, headwords: set[str],
     distinct value; this just reports what's there. Mirrors
     localdict.build_lexicon's bulk-lookup shape (one query for every
     candidate headword, empty dict on an empty input rather than a
-    `= ANY('{}')` query that would just scan nothing)."""
+    `= ANY('{}')` query that would just scan nothing).
+
+    Degrades to {} (not an error) if the oed schema/entry table doesn't
+    exist yet -- this is now also called from compute_ipa's regular
+    kaikki/Wordnik/local-Wiktionary/oed cascade (resolve_pronunciation.py),
+    not just the standalone oed-ipa command someone would only run after
+    already setting up oed-ingest, so a plain `concordance ipa`/`maintain`
+    on a DB that's never touched OED must not start hard-erroring because
+    of a tier it was never relying on before. Same to_regclass pattern
+    import_defined_words uses for vocab.defined's optional presence."""
     if not headwords:
         return {}
     s = schema
     with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass(%s)", (f"{s}.entry",))
+        if cur.fetchone()[0] is None:
+            return {}
         cur.execute(
             f"""SELECT headword_norm, pronunciation_ipa FROM {s}.entry
                 WHERE headword_norm = ANY(%s) AND pronunciation_ipa IS NOT NULL""",

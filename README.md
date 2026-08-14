@@ -105,14 +105,22 @@ commands to remember and re-order by hand:
 ```bash
 concordance maintain   # fill-definitions -> classify -> normalize-pos -> ngram
                         # -> archaic -> difficulty -> quizdef -> quizzable
-                        # -> calibrate-difficulty -> book-similarity -> book-clustering
-                        # -> author-similarity -> author-clustering -> wordnik-pron -> ipa
+                        # -> calibrate-difficulty -> wordnik-pron -> ipa
                         # -> embed -> backfill-analogies
 ```
 
-Every step runs incrementally (only-missing / blank-only / not-yet-embedded),
-so a re-run after everything's caught up is fast — it only touches the newest
-batch's words. The **first** run against a corpus with a real backlog is not:
+`book-similarity`/`book-clustering`/`author-similarity`/`author-clustering`
+are NOT part of this chain (see "Vocabulary relatedness" below) — same
+reasoning that already kept `book-fame`/`author-fame` standalone: those four
+are full-corpus recomputes with no only-missing gate (corpus-wide IDF
+weights shift whenever any book's vocabulary membership changes), so folding
+one into a chain whose whole point is "catch up on just the new batch" would
+mean `maintain` could never have a cheap mode.
+
+Every remaining step runs incrementally (only-missing / blank-only /
+not-yet-embedded), so a re-run after everything's caught up is fast — it
+only touches the newest batch's words. The **first** run against a corpus
+with a real backlog is not:
 `classify`, `quizdef`, and `backfill-analogies` all load a local LLM and call
 it per word (or per candidate relation), so catching up a few thousand words
 is likely to take hours. That cost is paid once. Use `--skip-fill-definitions`,
@@ -605,6 +613,13 @@ concordance book-similarity      # each book's top-k most vocabulary-related boo
 concordance book-clustering      # hierarchical clustering + 2D map over the top-N books
 concordance author-similarity    # same, one level up, for authors
 concordance author-clustering    # hierarchical clustering + 2D map over the top-N authors
+
+concordance relate               # convenience wrapper: runs all four above with default
+                                  # options, in the order listed (--skip-book-similarity /
+                                  # --skip-book-clustering / --skip-author-similarity /
+                                  # --skip-author-clustering to omit one; --limit caps the
+                                  # two similarity steps only). Use the standalone commands
+                                  # directly for --top-k/--top-n/--n-clusters/--min-fame.
 ```
 
 - **`book-similarity`** / **`author-similarity`** — `idf = ln(N / df)` (N =
@@ -655,10 +670,11 @@ concordance author-clustering    # hierarchical clustering + 2D map over the top
   not enough to build a link), so `book_cluster`/`book_cluster_run.leaf_order`
   and every dendrogram leaf carry all three rather than a single string.
 
-All four are wired into `maintain` (`--skip-book-similarity`,
-`--skip-book-clustering`, `--skip-author-similarity`,
-`--skip-author-clustering`) and reachable from the review webapp's
-**Visualizations** page — see below.
+All four are standalone commands, deliberately NOT part of `maintain`
+(full-corpus recomputes, no only-missing gate — see "Post-ingest
+maintenance" above) — run them on their own schedule when you want fresher
+cross-references, or `concordance relate` to run all four at once. Reachable
+from the review webapp's **Visualizations** page — see below.
 
 ## Cultural & historical importance (`author-fame`, `book-fame`)
 

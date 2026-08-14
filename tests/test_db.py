@@ -443,6 +443,95 @@ def test_compute_ipa_sets_ipa_source_on_backfill_and_correction_and_clears_it(mo
 
 
 @pg
+def test_compute_audio_mw_tier_downloads_when_commons_misses(monkeypatch):
+    # Real recorded MW audio (mw.py's MWEntry.pronunciations[].audio_url) is
+    # a same-trust-tier fallback to Commons, tried before Azure synthesis --
+    # this is the tier that was sitting completely unused until now.
+    from concordance import audio, mw, wiktextract
+    from concordance.model import Candidate
+
+    monkeypatch.setattr(wiktextract, "build_lexicon", lambda *a, **k: {})
+    monkeypatch.setattr(audio, "azure_credentials", lambda: (None, None))
+    monkeypatch.setattr(mw, "mw_api_key", lambda: "fake-key")
+    monkeypatch.setattr(mw, "quota_exhausted", lambda: False)
+
+    entry = mw.MWEntry(
+        headword="besmirch", part_of_speech="verb", definitions=["to soil"],
+        pronunciations=[mw.MWPronunciation(respelling="bi-SMURCH",
+                                            audio_url="https://example.test/besmirch.mp3")],
+        source="Merriam-Webster API",
+    )
+    monkeypatch.setattr(mw, "lookup_api", lambda *a, **k: [entry])
+    monkeypatch.setattr(mw, "exact_matches", lambda entries, word: entries)
+    monkeypatch.setattr(mw, "pick_entry", lambda entries, pos: entries[0])
+
+    downloaded = []
+
+    def fake_fetch(url, dest, tries=1):
+        downloaded.append(url)
+        return True
+
+    monkeypatch.setattr(audio, "fetch_commons_audio", fake_fetch)
+
+    schema = "cc_test_audio_mw"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    db.sync_book_results(conn, "Book One", kept=[Candidate(lemma="besmirch", pos="VERB")],
+                          rejected=[], schema=schema)
+
+    stats = db.compute_audio(conn, schema)
+
+    assert stats["mw"] == 1
+    assert downloaded == ["https://example.test/besmirch.mp3"]
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT source, voice FROM {schema}.word_audio WHERE word_id = "
+                    f"(SELECT id FROM {schema}.word WHERE lemma='besmirch')")
+        assert cur.fetchone() == ("mw", "https://example.test/besmirch.mp3")
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_compute_audio_skips_mw_when_quota_exhausted(monkeypatch):
+    from concordance import audio, mw, wiktextract
+    from concordance.model import Candidate
+
+    monkeypatch.setattr(wiktextract, "build_lexicon", lambda *a, **k: {})
+    monkeypatch.setattr(audio, "azure_credentials", lambda: (None, None))
+    monkeypatch.setattr(mw, "mw_api_key", lambda: "fake-key")
+    monkeypatch.setattr(mw, "quota_exhausted", lambda: True)
+
+    called = []
+    monkeypatch.setattr(mw, "lookup_api", lambda *a, **k: called.append(1) or [])
+
+    schema = "cc_test_audio_mw_exhausted"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    db.sync_book_results(conn, "Book One", kept=[Candidate(lemma="besmirch", pos="VERB")],
+                          rejected=[], schema=schema)
+
+    stats = db.compute_audio(conn, schema)
+
+    assert stats.get("mw", 0) == 0
+    assert called == []  # never even attempted once quota was exhausted
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
 def test_backfill_ipa_from_oed(monkeypatch):
     from concordance.model import Candidate
     from concordance.oed import db as oed_db
@@ -547,6 +636,7 @@ def test_fill_definitions_web_tier_is_no_longer_gated_on_validity(monkeypatch, t
     monkeypatch.setattr(resolve.localdict, "enrich", lambda cand, lex: False)
     monkeypatch.setattr(resolve.dictionary, "enrich", lambda cand, session: None)
     monkeypatch.setattr(resolve.deepdef, "wordnik_key", lambda: "")
+    monkeypatch.setattr(resolve.mw, "mw_api_key", lambda: "")
     monkeypatch.setattr(resolve.deepdef, "_from_yourdictionary", lambda cand, session: False)
 
     schema = "cc_test_fill"
@@ -613,6 +703,7 @@ def test_fill_definitions_cooldown_skips_a_recently_checked_word(monkeypatch):
     monkeypatch.setattr(resolve.localdict, "enrich", lambda cand, lex: False)
     monkeypatch.setattr(resolve.dictionary, "enrich", lambda cand, session: None)
     monkeypatch.setattr(resolve.deepdef, "wordnik_key", lambda: "")
+    monkeypatch.setattr(resolve.mw, "mw_api_key", lambda: "")
     monkeypatch.setattr(resolve.deepdef, "_from_yourdictionary", lambda cand, session: False)
 
     schema = "cc_test_cooldown"
@@ -659,6 +750,7 @@ def test_fill_definitions_builds_the_lexicon_once_not_twice_per_word(monkeypatch
 
     monkeypatch.setattr(resolve.dictionary, "enrich", lambda cand, session: None)
     monkeypatch.setattr(resolve.deepdef, "wordnik_key", lambda: "")
+    monkeypatch.setattr(resolve.mw, "mw_api_key", lambda: "")
     monkeypatch.setattr(resolve.deepdef, "_from_yourdictionary", lambda cand, session: False)
 
     schema = "cc_test_lexicon_once"
@@ -690,6 +782,51 @@ def test_fill_definitions_builds_the_lexicon_once_not_twice_per_word(monkeypatch
     conn.close()
 
 
+@pg
+def test_fill_definitions_checks_mw_quota_once_not_per_word(monkeypatch):
+    # Same pre-check pipeline.py's ingest-time enrichment already does --
+    # without it, Tier.MW would auto-discover the key regardless and burn
+    # the shared 1000/day cap one word at a time on a real backlog, then
+    # spend the rest of the run re-reading mw.py's on-disk cache for free.
+    from concordance import mw, resolve
+    from concordance.model import Candidate
+
+    monkeypatch.setattr(resolve.localdict, "enrich", lambda cand, lex: False)
+    monkeypatch.setattr(resolve.dictionary, "enrich", lambda cand, session: None)
+    monkeypatch.setattr(resolve.deepdef, "wordnik_key", lambda: "")
+    monkeypatch.setattr(resolve.deepdef, "_from_yourdictionary", lambda cand, session: False)
+    monkeypatch.setattr(mw, "mw_api_key", lambda: "fake-key")
+
+    exhausted_checks = {"n": 0}
+
+    def fake_exhausted():
+        exhausted_checks["n"] += 1
+        return True
+
+    monkeypatch.setattr(mw, "quota_exhausted", fake_exhausted)
+
+    lookup_calls = []
+    monkeypatch.setattr(mw, "lookup_api", lambda *a, **k: lookup_calls.append(1) or [])
+
+    schema = "cc_test_mw_quota"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    words = [Candidate(lemma=f"quotaword{i}", pos="NOUN") for i in range(3)]
+    db.sync_book_results(conn, "Book One", kept=words, rejected=[], schema=schema)
+
+    db.fill_definitions(conn, schema)
+
+    assert exhausted_checks["n"] == 1     # checked once for the whole batch
+    assert lookup_calls == []             # MW never actually called once exhausted
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
 
 
 @pg
@@ -1246,6 +1383,7 @@ def test_dedupe_plural_definitions_all_three_outcomes(monkeypatch):
 
     monkeypatch.setattr(resolve.localdict, "enrich", lambda cand, lex: False)
     monkeypatch.setattr(resolve.deepdef, "wordnik_key", lambda: "")
+    monkeypatch.setattr(resolve.mw, "mw_api_key", lambda: "")
     monkeypatch.setattr(resolve.deepdef, "_from_yourdictionary", lambda cand, session: False)
 
     def fake_freedict(cand, session):
@@ -1341,6 +1479,7 @@ def test_dedupe_plural_definitions_is_idempotent(monkeypatch):
     monkeypatch.setattr(resolve.localdict, "enrich", lambda cand, lex: False)
     monkeypatch.setattr(resolve.dictionary, "enrich", lambda cand, session: None)
     monkeypatch.setattr(resolve.deepdef, "wordnik_key", lambda: "")
+    monkeypatch.setattr(resolve.mw, "mw_api_key", lambda: "")
     monkeypatch.setattr(resolve.deepdef, "_from_yourdictionary", lambda cand, session: False)
 
     schema = "cc_test_dedupe_idempotent"
@@ -1375,6 +1514,7 @@ def test_expand_synonym_definitions_all_outcomes(monkeypatch):
 
     monkeypatch.setattr(resolve.localdict, "enrich", lambda cand, lex: False)
     monkeypatch.setattr(resolve.deepdef, "wordnik_key", lambda: "")
+    monkeypatch.setattr(resolve.mw, "mw_api_key", lambda: "")
     monkeypatch.setattr(resolve.deepdef, "_from_yourdictionary", lambda cand, session: False)
 
     def fake_freedict(cand, session):

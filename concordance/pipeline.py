@@ -11,7 +11,7 @@ from rich.console import Console
 from . import clean, db, extract, floor, judge, localdict, master, mw, output, propernouns, resolve, tokenize, validity, validity_score
 from .dictionary import make_session
 from .config import Config
-from .model import Candidate, RejectReason, Verdict, junk_pos_reason, normalize_pos
+from .model import Candidate, RejectReason, Verdict, junk_pos_reason
 
 
 @dataclass
@@ -58,19 +58,20 @@ def apply_known_verdicts(candidates: dict[str, Candidate], known: dict[str, str]
 
 
 def _enrich_one(cand: Candidate, *, lexicon: dict, session, mw_api_key: str) -> bool:
-    """Resolve one shortlisted candidate: LOCAL/FREE via
-    resolve.resolve_definition, then Merriam-Webster's Collegiate API
-    (mw.py) if FREE still left it undefined and a key is configured --
-    ingest's own cascade becomes LOCAL -> FREE -> MW, still skipping
-    Wordnik/yourdictionary/web (too slow/capped for ingest throughput, see
-    resolve.py's own max_tier docstring).
+    """Resolve one shortlisted candidate via resolve.resolve_definition,
+    capped at Tier.MW -- ingest's own cascade is LOCAL -> FREE -> MW, still
+    skipping Wordnik/yourdictionary/web (too slow/capped for ingest
+    throughput, see resolve.py's own max_tier docstring). MW itself,
+    including the exact-match/homograph-pick/foreign-loanword-detection
+    logic, now lives in resolve.py's Tier.MW (folded in from what used to
+    be this function's own hand-rolled step -- one fewer place tier order
+    and MW-specific behavior could drift from the rest of the cascade).
 
-    Returns True if this call cast the candidate out as a foreign-language
-    loanword via MW's own "<Language> noun/verb/..." fl convention (see
-    mw.is_foreign_pos) -- that signal only survives on MW's RAW
-    part_of_speech string, before normalize_pos lowercases it away, so it
-    has to be caught here rather than in process()'s existing post-loop,
-    which only ever sees the already-normalized part_of_speech.
+    Returns True if resolve_definition cast the candidate out as a foreign-
+    language loanword (MW's own "<Language> noun/verb/..." fl convention,
+    see mw.is_foreign_pos) -- process()'s post-loop only ever sees
+    cand.verdict, so this just surfaces that signal to the caller's own
+    counting/logging.
 
     Thread-safe: touches only `cand` (a distinct object per call -- shortlist
     entries are never shared across calls), the shared read-only `lexicon`
@@ -79,33 +80,9 @@ def _enrich_one(cand: Candidate, *, lexicon: dict, session, mw_api_key: str) -> 
     quota bookkeeping is protected by mw._LOCK, so concurrent MW calls from
     multiple workers are safe but serialize against each other by design --
     MW is quota-scarce and doesn't need concurrency anyway."""
-    resolve.resolve_definition(cand, max_tier=resolve.Tier.FREE, lexicon=lexicon, session=session)
-    if cand.definition or not mw_api_key:
-        return False
-
-    entries = mw.exact_matches(mw.lookup_api(cand.lemma, mw_api_key, session), cand.lemma)
-    if not entries:
-        return False
-
-    entry = mw.pick_entry(entries, cand.pos)   # cand.pos is spaCy's own coarse tagger POS
-    cand.definition = "; ".join(entry.definitions)
-    cand.definition_source = entry.source
-    cand.part_of_speech = normalize_pos(entry.part_of_speech)
-    if entry.etymology:
-        cand.etymology = entry.etymology
-    # NOT cand.ipa: MW's pronunciation is a proprietary respelling, not real
-    # IPA -- word.ipa is trusted elsewhere (audio.py's Azure TTS synthesis)
-    # to actually contain IPA; same rule db.mw_backfill already enforces.
-
-    if mw.is_foreign_pos(entry.part_of_speech):
-        cand.verdict = Verdict.DROP
-        cand.reject_reason = RejectReason.FOREIGN_LANGUAGE
-        cand.interesting_reason = (
-            f"Merriam-Webster listed this as a {entry.part_of_speech.lower()} — cast out")
-        return True
-
-    resolve.apply_pos_repair(cand, lexicon)
-    return False
+    resolve.resolve_definition(cand, max_tier=resolve.Tier.MW, lexicon=lexicon, session=session,
+                                mw_api_key=mw_api_key)
+    return cand.verdict is Verdict.DROP
 
 
 def process(book: str | Path, cfg: Config, console: Console | None = None,

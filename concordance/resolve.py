@@ -12,15 +12,30 @@ Tier order, cheapest/most-reliable first:
   2. FREE     -- Free Dictionary API + Wiktionary REST (dictionary.py). No
                  key, no rate limit (dictionary._get already backs off on
                  429/5xx on its own).
-  3. WORDNIK  -- Century/GCIDE/AHD (deepdef.py). Needs WORDNIK_API_KEY;
+  3. MW       -- Merriam-Webster Collegiate API (mw.py). Needs
+                 MW_DICTIONARY_API_KEY; capped at 1000 requests/day (mw.py's
+                 own on-disk cache + quota counter), no per-request pacing
+                 needed unlike Wordnik, so it's cheaper per word despite the
+                 daily ceiling -- placed ahead of WORDNIK for that reason.
+                 Was previously only reachable via pipeline.py's own
+                 hand-rolled ingest-time step (LOCAL -> FREE -> MW); folded
+                 in here so every caller gets it, not just ingest. Uniquely
+                 among tiers, a hit can also set cand.verdict/reject_reason
+                 directly: MW's own "<Language> noun/verb/..." POS
+                 convention (mw.is_foreign_pos) is real, load-bearing
+                 evidence a headword is a not-yet-naturalized loanword
+                 (confirmed live: "hatari" -> "Swahili noun") that no other
+                 tier can detect, so it casts the word out right here
+                 instead of silently defining it as if it were English.
+  4. WORDNIK  -- Century/GCIDE/AHD (deepdef.py). Needs WORDNIK_API_KEY;
                  capped at 5 requests/minute on the free tier -- paced by
                  THIS module (see _pace_wordnik), not by the caller, so
                  every caller gets correct pacing automatically instead of
                  each one re-implementing (and, historically, over-
                  applying) its own blanket per-word delay regardless of
                  whether Wordnik was even reached that word.
-  4. YOURDICT -- yourdictionary.com (deepdef.py). Scraped, keyless, no cap.
-  5. WEB      -- web search + local LLM extraction (websearch.py). The true
+  5. YOURDICT -- yourdictionary.com (deepdef.py). Scraped, keyless, no cap.
+  6. WEB      -- web search + local LLM extraction (websearch.py). The true
                  last resort: reads real search-result snippets and has the
                  model extract a definition that is actually present in
                  them -- it never invents one.
@@ -51,9 +66,9 @@ from __future__ import annotations
 import time
 from enum import IntEnum
 
-from . import deepdef, dictionary, localdict, websearch
+from . import deepdef, dictionary, localdict, mw, websearch
 from .localdict import _pick_entry
-from .model import Candidate, normalize_pos
+from .model import Candidate, RejectReason, Verdict, normalize_pos
 
 _WORDNIK_MIN_INTERVAL = 12.5  # seconds; free tier caps at 5 requests/minute
 
@@ -61,9 +76,10 @@ _WORDNIK_MIN_INTERVAL = 12.5  # seconds; free tier caps at 5 requests/minute
 class Tier(IntEnum):
     LOCAL = 1
     FREE = 2
-    WORDNIK = 3
-    YOURDICT = 4
-    WEB = 5
+    MW = 3
+    WORDNIK = 4
+    YOURDICT = 5
+    WEB = 6
 
 
 _last_wordnik_call: float = 0.0
@@ -80,6 +96,35 @@ def _pace_wordnik() -> None:
     _last_wordnik_call = time.monotonic()
 
 
+def _from_mw(cand: Candidate, session, api_key: str) -> bool:
+    """MW tier: exact-headword-matched entries only (mw.exact_matches --
+    MW's API does fuzzy full-text search and will happily return an
+    unrelated idiom for a non-headword query), homograph picked by the
+    tagger's coarse POS (mw.pick_entry). A foreign-language loanword,
+    caught via MW's raw (pre-normalize_pos) part_of_speech string, still
+    fills in the definition (for context) but also marks the candidate
+    DROP/FOREIGN_LANGUAGE -- the caller doesn't need to special-case this,
+    just check cand.verdict same as any other cast-out path."""
+    entries = mw.exact_matches(mw.lookup_api(cand.lemma, api_key, session), cand.lemma)
+    if not entries:
+        return False
+    entry = mw.pick_entry(entries, cand.pos)
+    cand.definition = "; ".join(entry.definitions)
+    cand.definition_source = entry.source
+    cand.part_of_speech = normalize_pos(entry.part_of_speech)
+    if entry.etymology:
+        cand.etymology = entry.etymology
+    # NOT cand.ipa: MW's pronunciation is a proprietary respelling, not real
+    # IPA -- word.ipa is trusted elsewhere (audio.py's Azure TTS synthesis)
+    # to actually contain IPA.
+    if mw.is_foreign_pos(entry.part_of_speech):
+        cand.verdict = Verdict.DROP
+        cand.reject_reason = RejectReason.FOREIGN_LANGUAGE
+        cand.interesting_reason = (
+            f"Merriam-Webster listed this as a {entry.part_of_speech.lower()} — cast out")
+    return True
+
+
 def resolve_definition(
     cand: Candidate,
     *,
@@ -87,6 +132,7 @@ def resolve_definition(
     lexicon: dict | None = None,
     session=None,
     wordnik_key: str | None = None,
+    mw_api_key: str | None = None,
     llm=None,
 ) -> Tier | None:
     """Try tiers in order up to max_tier, stopping at the first hit. Mutates
@@ -108,6 +154,13 @@ def resolve_definition(
         dictionary.enrich(cand, session)
         if cand.definition:
             resolved = Tier.FREE
+
+    if resolved is None and max_tier >= Tier.MW:
+        key = mw_api_key if mw_api_key is not None else mw.mw_api_key()
+        if key:
+            session = session or dictionary.make_session()
+            if _from_mw(cand, session, key):
+                resolved = Tier.MW
 
     if resolved is None and max_tier >= Tier.WORDNIK:
         key = wordnik_key if wordnik_key is not None else deepdef.wordnik_key()

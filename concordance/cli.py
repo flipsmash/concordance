@@ -1123,6 +1123,77 @@ def book_clustering(
                   f"-> [bold]{stats['clusters']}[/bold] clusters")
 
 
+@app.command("relate")
+def relate(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    limit: int = typer.Option(0, "--limit", "-l",
+                               help="Cap number of books/authors (re)computed, per similarity step (0 = all; "
+                                    "does not apply to the two clustering steps, which always recompute the "
+                                    "whole top-N set in one pass)."),
+    skip_book_similarity: bool = typer.Option(False, "--skip-book-similarity"),
+    skip_book_clustering: bool = typer.Option(False, "--skip-book-clustering"),
+    skip_author_similarity: bool = typer.Option(False, "--skip-author-similarity"),
+    skip_author_clustering: bool = typer.Option(False, "--skip-author-clustering"),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Run all four vocabulary-relatedness steps in one command:
+    book-similarity -> book-clustering -> author-similarity ->
+    author-clustering. Each is independent (no shared ordering requirement --
+    unlike book-fame's own optional dependency on author-fame's score), so
+    the order here is just the README's documented listing, not a real
+    dependency chain.
+
+    Deliberately NOT part of `maintain` and never was, even before these
+    four were split out of it (see maintain's own docstring): all four are
+    full-corpus recomputes with no only-missing gate -- IDF weights are
+    corpus-wide and shift whenever any book's/author's vocabulary changes --
+    so unlike every `maintain` step, there's no "just the new batch" mode to
+    speak of. This command exists purely as a convenience wrapper over the
+    four standalone commands below (each still runs fine on its own, with
+    its own tuning options like --top-k/--top-n/--n-clusters/--min-fame,
+    none of which this wrapper exposes -- use the standalone command
+    directly if you need those)."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+
+    if not skip_book_similarity:
+        with console.status("[bold]Computing book vocabulary overlap…"):
+            stats = db.compute_book_similarity(conn, schema, limit=limit)
+        console.print(f"[green]✓[/green] book-similarity: [bold]{stats['books']}[/bold] books "
+                      f"-> [bold]{stats['pairs_stored']}[/bold] related-book pairs stored")
+    else:
+        console.print("[dim]book-similarity skipped.[/dim]")
+
+    if not skip_book_clustering:
+        with console.status("[bold]Clustering books by vocabulary overlap…"):
+            stats = db.compute_book_clustering(conn, schema)
+        console.print(f"[green]✓[/green] book-clustering: [bold]{stats['books']}[/bold] books "
+                      f"-> [bold]{stats['clusters']}[/bold] clusters")
+    else:
+        console.print("[dim]book-clustering skipped.[/dim]")
+
+    if not skip_author_similarity:
+        with console.status("[bold]Computing author vocabulary overlap…"):
+            stats = db.compute_author_similarity(conn, schema, limit=limit)
+        console.print(f"[green]✓[/green] author-similarity: [bold]{stats['authors']}[/bold] authors "
+                      f"-> [bold]{stats['pairs_stored']}[/bold] related-author pairs stored")
+    else:
+        console.print("[dim]author-similarity skipped.[/dim]")
+
+    if not skip_author_clustering:
+        with console.status("[bold]Clustering authors by vocabulary overlap…"):
+            stats = db.compute_author_clustering(conn, schema)
+        console.print(f"[green]✓[/green] author-clustering: [bold]{stats['authors']}[/bold] authors "
+                      f"-> [bold]{stats['clusters']}[/bold] clusters")
+    else:
+        console.print("[dim]author-clustering skipped.[/dim]")
+
+    conn.close()
+
+
 @app.command("dedupe-plurals")
 def dedupe_plurals(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
@@ -1447,33 +1518,38 @@ def ipa(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
     dump_path: str = typer.Option(None, "--dump-path", help="Path to the kaikki Wiktextract dump "
                                    "(default: data/wiktextract-en.jsonl.gz)."),
+    oed_schema: str = typer.Option("oed", "--oed-schema", help="Postgres schema for the oed tables."),
     refetch: bool = typer.Option(False, "--refetch", help="Re-check every word (default: only empty/invalid ipa)."),
     limit: int = typer.Option(0, "--limit", "-l", help="Cap number of words checked."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
-    """Backfill + clean word.ipa from kaikki, then Wordnik (ARPAbet/AHD-5 converted,
-    direct IPA as-is). NULLs out+replaces transcriptions that fail an
-    English-language sanity check. Run this before `audio` — synthesis is only
-    as good as the IPA it's given."""
+    """Backfill + clean word.ipa via resolve_pronunciation's unified cascade:
+    kaikki, then Wordnik (ARPAbet/AHD-5 converted, direct IPA as-is), then
+    local Wiktionary, then oed (whatever double-pass-verified coverage
+    exists as of this run). NULLs out+replaces transcriptions that fail an
+    English-language sanity check. Run this before `audio` — synthesis is
+    only as good as the IPA it's given."""
     try:
         conn = db.connect(database_url)
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
     db.apply_schema(conn, schema)
     try:
-        stats = db.compute_ipa(conn, schema, dump_path=dump_path, only_missing=not refetch, limit=limit)
+        stats = db.compute_ipa(conn, schema, dump_path=dump_path, only_missing=not refetch,
+                                limit=limit, oed_schema=oed_schema)
     except FileNotFoundError as exc:
         console.print(f"[red]✗[/red] {exc}"); raise typer.Exit(code=1)
     conn.close()
     backfilled = (stats.get("backfilled_kaikki", 0) + stats.get("backfilled_wordnik", 0)
-                  + stats.get("backfilled_local_wiktionary", 0))
+                  + stats.get("backfilled_local_wiktionary", 0) + stats.get("backfilled_oed", 0))
     corrected = (stats.get("corrected_kaikki", 0) + stats.get("corrected_wordnik", 0)
-                 + stats.get("corrected_local_wiktionary", 0))
+                 + stats.get("corrected_local_wiktionary", 0) + stats.get("corrected_oed", 0))
     console.print(f"[green]✓[/green] ipa: {stats.get('total',0)} words — "
                   f"[bold]{stats.get('already_valid',0)}[/bold] already valid, "
                   f"{backfilled} backfilled ({stats.get('backfilled_kaikki',0)} kaikki, "
                   f"{stats.get('backfilled_wordnik',0)} wordnik, "
-                  f"{stats.get('backfilled_local_wiktionary',0)} local wiktionary), "
+                  f"{stats.get('backfilled_local_wiktionary',0)} local wiktionary, "
+                  f"{stats.get('backfilled_oed',0)} oed), "
                   f"{corrected} corrected, "
                   f"{stats.get('cleared_no_replacement',0)} cleared (no valid source found), "
                   f"{stats.get('unresolved',0)} still unresolved")
@@ -1588,10 +1664,6 @@ def maintain(
     skip_quizdef: bool = typer.Option(False, "--skip-quizdef"),
     skip_quizzable: bool = typer.Option(False, "--skip-quizzable"),
     skip_calibrate_difficulty: bool = typer.Option(False, "--skip-calibrate-difficulty"),
-    skip_book_similarity: bool = typer.Option(False, "--skip-book-similarity"),
-    skip_book_clustering: bool = typer.Option(False, "--skip-book-clustering"),
-    skip_author_similarity: bool = typer.Option(False, "--skip-author-similarity"),
-    skip_author_clustering: bool = typer.Option(False, "--skip-author-clustering"),
     skip_wordnik: bool = typer.Option(False, "--skip-wordnik", help="Skip the wordnik-pron fetch step."),
     skip_ipa: bool = typer.Option(False, "--skip-ipa", help="Skip the ipa backfill step."),
     skip_embed: bool = typer.Option(False, "--skip-embed"),
@@ -1603,17 +1675,32 @@ def maintain(
     """Run the full post-ingest maintenance chain in dependency order:
     fill-definitions -> classify -> normalize-pos -> ngram -> archaic ->
     difficulty -> quizdef -> quizzable -> calibrate-difficulty ->
-    book-similarity -> book-clustering -> author-similarity ->
-    author-clustering -> wordnik-pron -> ipa -> embed -> backfill-analogies.
+    wordnik-pron -> ipa -> embed -> backfill-analogies.
     This is the whole documented sequence from the README's
     "Backfilling definitions" / "Enrichment & scoring" / "Definition-quality
     cleanup" / "Pronunciation audio" / "Semantic distance" sections, chained
-    into one command instead of twelve to remember and re-order by hand.
+    into one command instead of remembering and re-ordering by hand.
     `load-taxonomy` and `train-fasttext` are deliberately excluded — both
     are one-time/occasional holistic setup, not per-batch maintenance (see
     their own docstrings); Commons/Azure audio steps stay separate too,
     since Commons rate-limits hard and is meant to run for hours unattended
     on its own.
+
+    book-similarity/book-clustering/author-similarity/author-clustering are
+    ALSO deliberately excluded (removed from this chain -- they used to run
+    here) -- same reasoning that already kept book-fame/author-fame out from
+    day one: those four are full-corpus recomputes with no only-missing gate
+    (IDF weights are corpus-wide, so they shift whenever ANY book's
+    word_book membership changes), fundamentally different in shape from
+    every step below, which is genuinely incremental. Folding an O(books²)/
+    O(authors²) recompute into a chain whose whole point is "catch up on
+    just the new batch" means `maintain` could never have a cheap mode --
+    every run paid that cost regardless of how few words were actually new.
+    Run those four on their own schedule instead: `book-similarity`,
+    `book-clustering`, `author-similarity`, `author-clustering` -- each
+    independent of the others (no shared ordering requirement, unlike
+    book-fame's own optional dependency on author-fame's score) -- or
+    `relate` to run all four at once with default options.
 
     fill-definitions used to be two separate steps here (refill then deepen)
     that each re-entered the definition cascade from scratch on the same
@@ -1621,14 +1708,14 @@ def maintain(
     allows, gated by --recheck-after-days so a permanently-undefined tail
     doesn't get re-ground through Wordnik/web-search on every single run.
 
-    Every step runs incrementally (only-missing / blank-only / not-refetch),
-    including forcing classify's only_missing (its own default is False) — so
-    a re-run after everything's caught up is fast. The FIRST run against a
-    corpus with a real backlog is not: classify and quizdef load a local LLM
-    and call it per word, so catching up ~19k words there is the dominant
-    cost, likely hours. That cost is paid once; every later run only touches
-    the new batch's words. Use the --skip-* flags to defer the slow steps to
-    run separately/overnight instead."""
+    Every remaining step runs incrementally (only-missing / blank-only /
+    not-refetch), including forcing classify's only_missing (its own default
+    is False) — so a re-run after everything's caught up is fast. The FIRST
+    run against a corpus with a real backlog is not: classify and quizdef
+    load a local LLM and call it per word, so catching up ~19k words there
+    is the dominant cost, likely hours. That cost is paid once; every later
+    run only touches the new batch's words. Use the --skip-* flags to defer
+    the slow steps to run separately/overnight instead."""
     try:
         conn = db.connect(database_url)
     except Exception as exc:  # noqa: BLE001
@@ -1723,38 +1810,6 @@ def maintain(
     else:
         console.print("[dim]calibrate-difficulty skipped.[/dim]")
 
-    if not skip_book_similarity:
-        with console.status("[bold]Computing book vocabulary overlap…"):
-            stats = db.compute_book_similarity(conn, schema, limit=limit)
-        console.print(f"[green]✓[/green] book-similarity: [bold]{stats['books']}[/bold] books "
-                      f"-> [bold]{stats['pairs_stored']}[/bold] related-book pairs stored")
-    else:
-        console.print("[dim]book-similarity skipped.[/dim]")
-
-    if not skip_book_clustering:
-        with console.status("[bold]Clustering books by vocabulary overlap…"):
-            stats = db.compute_book_clustering(conn, schema)
-        console.print(f"[green]✓[/green] book-clustering: [bold]{stats['books']}[/bold] books "
-                      f"-> [bold]{stats['clusters']}[/bold] clusters")
-    else:
-        console.print("[dim]book-clustering skipped.[/dim]")
-
-    if not skip_author_similarity:
-        with console.status("[bold]Computing author vocabulary overlap…"):
-            stats = db.compute_author_similarity(conn, schema, limit=limit)
-        console.print(f"[green]✓[/green] author-similarity: [bold]{stats['authors']}[/bold] authors "
-                      f"-> [bold]{stats['pairs_stored']}[/bold] related-author pairs stored")
-    else:
-        console.print("[dim]author-similarity skipped.[/dim]")
-
-    if not skip_author_clustering:
-        with console.status("[bold]Clustering authors by vocabulary overlap…"):
-            stats = db.compute_author_clustering(conn, schema)
-        console.print(f"[green]✓[/green] author-clustering: [bold]{stats['authors']}[/bold] authors "
-                      f"-> [bold]{stats['clusters']}[/bold] clusters")
-    else:
-        console.print("[dim]author-clustering skipped.[/dim]")
-
     if not skip_wordnik:
         console.print("[bold]Fetching Wordnik pronunciations (rate-limited)…[/bold]")
         stats = db.fetch_wordnik_pronunciations(conn, schema, only_missing=True, limit=limit)
@@ -1774,9 +1829,9 @@ def maintain(
             console.print(f"[red]✗[/red] ipa: {exc}")
         else:
             backfilled = (stats.get("backfilled_kaikki", 0) + stats.get("backfilled_wordnik", 0)
-                          + stats.get("backfilled_local_wiktionary", 0))
+                          + stats.get("backfilled_local_wiktionary", 0) + stats.get("backfilled_oed", 0))
             corrected = (stats.get("corrected_kaikki", 0) + stats.get("corrected_wordnik", 0)
-                         + stats.get("corrected_local_wiktionary", 0))
+                         + stats.get("corrected_local_wiktionary", 0) + stats.get("corrected_oed", 0))
             console.print(f"[green]✓[/green] ipa: {stats.get('total',0)} words — "
                           f"[bold]{stats.get('already_valid',0)}[/bold] already valid, "
                           f"{backfilled} backfilled, {corrected} corrected, "
@@ -1947,8 +2002,10 @@ def audio(
     limit: int = typer.Option(0, "--limit", "-l", help="Cap number of words processed."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
-    """Pronunciation audio: Commons recordings where they exist, else Azure IPA-guided
-    synthesis where a transcription is known. Words with neither are left alone."""
+    """Pronunciation audio: Commons recordings where they exist, else a real
+    Merriam-Webster recording (needs MW_DICTIONARY_API_KEY -- shares the same
+    1000/day cap as MW definition lookups), else Azure IPA-guided synthesis
+    where a transcription is known. Words with none of the above are left alone."""
     try:
         conn = db.connect(database_url)
     except Exception as exc:  # noqa: BLE001
@@ -1962,6 +2019,7 @@ def audio(
     commons_total = stats.get('commons', 0) + stats.get('commons_direct_search', 0)
     console.print(f"[green]✓[/green] audio: [bold]{stats.get('candidates',0)}[/bold] processed — "
                   f"{commons_total} Commons ({stats.get('commons_direct_search',0)} via direct search), "
+                  f"{stats.get('mw',0)} Merriam-Webster, "
                   f"{stats.get('azure',0)} Azure-synthesized, "
                   f"{stats.get('none',0)} no data found")
 

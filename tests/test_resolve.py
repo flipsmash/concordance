@@ -16,6 +16,18 @@ def _no_sleep(monkeypatch):
     monkeypatch.setattr(resolve.time, "sleep", lambda *a, **k: None)
 
 
+@pytest.fixture(autouse=True)
+def _no_mw_by_default(monkeypatch):
+    # MW auto-discovers its key the same way Wordnik does (see
+    # resolve_definition's mw_api_key param) -- every existing test below
+    # predates Tier.MW and isn't exercising it, so keep it inert by default
+    # here rather than have it silently hit the real MW API/on-disk cache
+    # whenever a real MW_DICTIONARY_API_KEY happens to be configured. Tests
+    # that actually want to exercise Tier.MW pass mw_api_key explicitly,
+    # which overrides this.
+    monkeypatch.setattr(resolve.mw, "mw_api_key", lambda: "")
+
+
 def _cand(lemma="testword"):
     return Candidate(lemma=lemma, pos="NOUN")
 
@@ -47,13 +59,71 @@ def test_falls_through_to_free_tier_on_local_miss(monkeypatch):
     assert c.definition == "a free def"
 
 
+def test_falls_through_to_mw_tier_on_free_miss(monkeypatch):
+    monkeypatch.setattr(resolve.localdict, "enrich", _miss)
+    monkeypatch.setattr(resolve.dictionary, "enrich", lambda cand, session: None)
+    monkeypatch.setattr(resolve.deepdef, "_from_wordnik", lambda *a, **k: pytest.fail("WORDNIK should not run"))
+    entry = resolve.mw.MWEntry(headword="testword", part_of_speech="noun",
+                                definitions=["an MW def"], source="Merriam-Webster API")
+    monkeypatch.setattr(resolve.mw, "lookup_api", lambda *a, **k: [entry])
+    monkeypatch.setattr(resolve.mw, "exact_matches", lambda entries, word: entries)
+    monkeypatch.setattr(resolve.mw, "pick_entry", lambda entries, pos: entries[0])
+    c = _cand()
+    result = resolve.resolve_definition(c, session=object(), mw_api_key="fake-key")
+    assert result is resolve.Tier.MW
+    assert c.definition == "an MW def"
+    assert c.definition_source == "Merriam-Webster API"
+    assert c.verdict is None  # ordinary hit, not a foreign-language cast-out
+
+
+def test_mw_skipped_without_a_key(monkeypatch):
+    monkeypatch.setattr(resolve.localdict, "enrich", _miss)
+    monkeypatch.setattr(resolve.dictionary, "enrich", lambda cand, session: None)
+    called = {"mw": False}
+    monkeypatch.setattr(resolve.mw, "lookup_api", lambda *a, **k: called.__setitem__("mw", True) or [])
+    monkeypatch.setattr(resolve.deepdef, "wordnik_key", lambda: "")
+    monkeypatch.setattr(resolve.deepdef, "_from_yourdictionary", _miss)
+    c = _cand()
+    resolve.resolve_definition(c, session=object(), mw_api_key="")
+    assert called["mw"] is False
+
+
+def test_mw_foreign_entry_sets_drop_verdict_but_still_fills_definition(monkeypatch):
+    # A real, confirmed case: MW's own "<Language> noun/verb/..." fl
+    # convention (e.g. "Swahili noun" for "hatari") is decisive evidence of
+    # a not-yet-naturalized loanword -- see resolve._from_mw's docstring.
+    from concordance.model import RejectReason, Verdict
+
+    monkeypatch.setattr(resolve.localdict, "enrich", _miss)
+    monkeypatch.setattr(resolve.dictionary, "enrich", lambda cand, session: None)
+    entry = resolve.mw.MWEntry(headword="hatari", part_of_speech="Swahili noun",
+                                definitions=["danger"], source="Merriam-Webster API")
+    monkeypatch.setattr(resolve.mw, "lookup_api", lambda *a, **k: [entry])
+    monkeypatch.setattr(resolve.mw, "exact_matches", lambda entries, word: entries)
+    monkeypatch.setattr(resolve.mw, "pick_entry", lambda entries, pos: entries[0])
+    c = _cand("hatari")
+    result = resolve.resolve_definition(c, session=object(), mw_api_key="fake-key")
+    assert result is resolve.Tier.MW
+    assert c.definition == "danger"
+    assert c.verdict is Verdict.DROP
+    assert c.reject_reason is RejectReason.FOREIGN_LANGUAGE
+
+
+def test_max_tier_cutoff_stops_before_mw(monkeypatch):
+    monkeypatch.setattr(resolve.localdict, "enrich", _miss)
+    monkeypatch.setattr(resolve.dictionary, "enrich", lambda cand, session: None)  # leaves definition blank
+    monkeypatch.setattr(resolve.mw, "lookup_api", lambda *a, **k: pytest.fail("MW should not run"))
+    c = _cand()
+    assert resolve.resolve_definition(c, max_tier=resolve.Tier.FREE, session=object(), mw_api_key="fake-key") is None
+
+
 def test_max_tier_cutoff_stops_before_wordnik(monkeypatch):
     monkeypatch.setattr(resolve.localdict, "enrich", _miss)
     monkeypatch.setattr(resolve.dictionary, "enrich", lambda cand, session: None)  # leaves definition blank
     monkeypatch.setattr(resolve.deepdef, "wordnik_key", lambda: "KEY")
     monkeypatch.setattr(resolve.deepdef, "_from_wordnik", lambda *a, **k: pytest.fail("WORDNIK should not run"))
     c = _cand()
-    assert resolve.resolve_definition(c, max_tier=resolve.Tier.FREE, session=object()) is None
+    assert resolve.resolve_definition(c, max_tier=resolve.Tier.MW, session=object(), mw_api_key="") is None
 
 
 def test_wordnik_skipped_without_a_key(monkeypatch):

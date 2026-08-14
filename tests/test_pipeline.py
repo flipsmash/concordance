@@ -1,8 +1,10 @@
 """pipeline.apply_known_verdicts — the cross-book verdict cache marking.
-pipeline._enrich_one — the LOCAL/FREE/MW enrichment cascade for one
-candidate. Pure logic (mocked resolve/mw calls), no DB or network needed."""
+pipeline._enrich_one — delegates to resolve.resolve_definition(max_tier=MW)
+and translates cand.verdict into its own bool return; the MW tier's own
+logic (exact-match, homograph pick, foreign-loanword detection) now lives
+in resolve.py and is tested there (test_resolve.py), not here."""
 
-from concordance import mw, resolve
+from concordance import resolve
 from concordance.model import Candidate, RejectReason, Verdict
 from concordance.pipeline import _enrich_one, apply_known_verdicts
 
@@ -61,45 +63,32 @@ def test_mixed_batch_counts():
     assert cands["fuligin"].verdict is None
 
 
-def test_enrich_one_skips_mw_when_free_resolves(monkeypatch):
+def test_enrich_one_delegates_to_resolve_definition_capped_at_mw(monkeypatch):
+    calls = []
+
     def fake_resolve(cand, **kwargs):
-        cand.definition = "already resolved by FREE"
+        calls.append(kwargs.get("max_tier"))
+        cand.definition = "already resolved"
 
     monkeypatch.setattr(resolve, "resolve_definition", fake_resolve)
-    called = []
-    monkeypatch.setattr(mw, "lookup_api", lambda *a, **k: called.append(1))
-
     c = Candidate(lemma="besmirch", pos="VERB")
     result = _enrich_one(c, lexicon={}, session=None, mw_api_key="fake-key")
 
     assert result is False
-    assert called == []
-    assert c.definition == "already resolved by FREE"
+    assert calls == [resolve.Tier.MW]
+    assert c.definition == "already resolved"
 
 
-def test_enrich_one_skips_mw_with_no_api_key(monkeypatch):
-    monkeypatch.setattr(resolve, "resolve_definition", lambda cand, **kwargs: None)
-    called = []
-    monkeypatch.setattr(mw, "lookup_api", lambda *a, **k: called.append(1))
+def test_enrich_one_returns_true_when_resolve_definition_drops_the_candidate(monkeypatch):
+    # resolve.Tier.MW's own foreign-loanword detection sets cand.verdict --
+    # _enrich_one just needs to surface that as its bool return, whatever
+    # set it.
+    def fake_resolve(cand, **kwargs):
+        cand.definition = "danger"
+        cand.verdict = Verdict.DROP
+        cand.reject_reason = RejectReason.FOREIGN_LANGUAGE
 
-    c = Candidate(lemma="hatari", pos="NOUN")
-    result = _enrich_one(c, lexicon={}, session=None, mw_api_key="")
-
-    assert result is False
-    assert called == []
-    assert c.definition == ""
-
-
-def test_enrich_one_foreign_mw_entry_casts_out(monkeypatch):
-    monkeypatch.setattr(resolve, "resolve_definition", lambda cand, **kwargs: None)
-    entry = mw.MWEntry(
-        headword="hatari", part_of_speech="Swahili noun",
-        definitions=["danger"], source="Merriam-Webster API",
-    )
-    monkeypatch.setattr(mw, "lookup_api", lambda *a, **k: [entry])
-    monkeypatch.setattr(mw, "exact_matches", lambda entries, word: entries)
-    monkeypatch.setattr(mw, "pick_entry", lambda entries, pos: entries[0])
-
+    monkeypatch.setattr(resolve, "resolve_definition", fake_resolve)
     c = Candidate(lemma="hatari", pos="NOUN")
     result = _enrich_one(c, lexicon={}, session=None, mw_api_key="fake-key")
 
@@ -107,4 +96,3 @@ def test_enrich_one_foreign_mw_entry_casts_out(monkeypatch):
     assert c.verdict is Verdict.DROP
     assert c.reject_reason is RejectReason.FOREIGN_LANGUAGE
     assert c.definition == "danger"
-    assert c.definition_source == "Merriam-Webster API"

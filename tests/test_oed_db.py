@@ -54,6 +54,20 @@ def test_pronunciation_lexicon_empty_input_returns_empty_dict():
 
 
 @pg
+def test_pronunciation_lexicon_degrades_gracefully_when_oed_schema_absent():
+    # compute_ipa (via resolve_pronunciation) now calls this unconditionally
+    # from the regular `ipa`/`maintain` path, not just the standalone
+    # oed-ipa command someone would only run after already setting up
+    # oed-ingest -- must not hard-error on a DB that never touched OED.
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute("DROP SCHEMA IF EXISTS oed_test_absent CASCADE")
+    conn.commit()
+    assert oed_db.pronunciation_lexicon(conn, {"whatever"}, schema="oed_test_absent") == {}
+    conn.close()
+
+
+@pg
 def test_pronunciation_lexicon_bulk_lookup_and_dedup_and_paren_fix():
     schema = "oed_test_pron"
     conn = db.connect(_URL)
