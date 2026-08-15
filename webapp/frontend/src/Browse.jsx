@@ -78,6 +78,12 @@ function Browse() {
   // box on Enter (see HeaderSearch.jsx), never set from a control on this
   // page itself.
   const definitionContains = searchParams.get('definition_contains') || ''
+  // Same deep-link-only treatment, one level up: the header's LEMMA search
+  // box's Enter behavior for a wildcard (%/_) query (see HeaderSearch.jsx)
+  // -- landing here with ?q= previously did nothing, since nothing on this
+  // page ever read it (the box's own live dropdown calls /api/browse/words
+  // directly; this page never saw that request or its query at all).
+  const q = searchParams.get('q') || ''
 
   function updateParams(mutator) {
     const next = new URLSearchParams(searchParams)
@@ -141,6 +147,10 @@ function Browse() {
     updateParams((next) => next.delete('definition_contains'))
   }
 
+  function clearQ() {
+    updateParams((next) => next.delete('q'))
+  }
+
   function setDifficultyRange(min, max) {
     updateParams((next) => {
       if (min !== '' && min != null) next.set('difficulty_min', min)
@@ -180,7 +190,7 @@ function Browse() {
   const activeFacetCount =
     (author ? 1 : 0) + bookIds.length + domains.length + topCodes.length + allTopCodes.length +
     (difficultyMin || difficultyMax ? 1 : 0) + archaic.length +
-    (quizzableOnly ? 1 : 0) + (letter ? 1 : 0) + (definitionContains ? 1 : 0)
+    (quizzableOnly ? 1 : 0) + (letter ? 1 : 0) + (definitionContains ? 1 : 0) + (q ? 1 : 0)
 
   // Every dependent fetch below (books, domain counts, difficulty bands) is
   // fully derived from `searchParams` -- using its own string form as the
@@ -314,6 +324,7 @@ function Browse() {
         quizzable_only: quizzableOnly,
         letter: letter || '',
         definition_contains: definitionContains,
+        q,
       },
     })
 
@@ -477,6 +488,11 @@ function Browse() {
             {definitionContains && (
               <button type="button" className="browse-chip" onClick={clearDefinitionContains}>
                 Definition contains "{definitionContains}" ×
+              </button>
+            )}
+            {q && (
+              <button type="button" className="browse-chip" onClick={clearQ}>
+                Word matches "{q}" ×
               </button>
             )}
             {activeFacetCount > 1 && (

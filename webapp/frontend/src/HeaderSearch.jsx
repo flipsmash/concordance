@@ -56,18 +56,30 @@ function HeaderSearch({ mode, placeholder }) {
     setOpen(false)
   }
 
-  // Definition mode only: the live dropdown above is deliberately a fuzzy,
+  // Definition mode: the live dropdown above is deliberately a fuzzy,
   // top-8 preview (word_similarity via definition_q) -- good for "is this
   // roughly what I'm thinking of," not for "show me every match." Enter
   // instead lands on the full Words browse list, filtered by literal
   // substring containment (definition_contains -- see browse_words' own
   // comment on why that's a different, non-fuzzy filter from definition_q).
-  // Lemma mode has no Enter behavior: the dropdown alone already resolves
-  // "find this specific word" well enough that a second, list-everything
-  // path isn't a clear win the way it is for a definition phrase.
+  //
+  // Lemma mode otherwise has no Enter behavior: the dropdown alone already
+  // resolves "find this specific word" well enough that a second,
+  // list-everything path isn't a clear win the way it is for a definition
+  // phrase -- EXCEPT a SQL-style wildcard pattern (% / _, see browse_words'
+  // own q_is_pattern handling), where the whole point is "show me every
+  // match," not just a top-8 preview, so it gets the same Enter-to-full-list
+  // treatment as definition mode.
+  const queryIsPattern = mode === 'lemma' && (query.includes('%') || query.includes('_'))
   function handleKeyDown(e) {
-    if (mode !== 'definition' || e.key !== 'Enter' || !query.trim()) return
-    navigate(`/app/words?definition_contains=${encodeURIComponent(query.trim())}`)
+    if (e.key !== 'Enter' || !query.trim()) return
+    if (mode === 'definition') {
+      navigate(`/app/words?definition_contains=${encodeURIComponent(query.trim())}`)
+    } else if (queryIsPattern) {
+      navigate(`/app/words?q=${encodeURIComponent(query.trim())}`)
+    } else {
+      return
+    }
     setQuery('')
     setOpen(false)
   }
@@ -83,6 +95,7 @@ function HeaderSearch({ mode, placeholder }) {
         onFocus={() => setOpen(true)}
         onKeyDown={handleKeyDown}
         aria-label={placeholder}
+        title={mode === 'lemma' ? 'Tip: % matches any characters, _ matches one -- e.g. "b_ll" or "%tion"' : undefined}
       />
       {open && suggestions.length > 0 && (
         <ul className="header-search-list">

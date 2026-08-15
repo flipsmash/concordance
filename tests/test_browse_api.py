@@ -771,6 +771,40 @@ def test_browse_words_definition_contains_lists_every_literal_match():
 
 
 @pg
+def test_browse_words_q_with_wildcards_is_a_literal_like_pattern():
+    """A `q` containing % or _ (typed directly into the header's lemma
+    search box) switches from the default fuzzy similarity() match to a
+    literal LIKE pattern against lemma_lc -- e.g. "b_ll" must find
+    ball/bell but not balll (four Ls), and must return every match, in
+    alphabetical order, not a relevance-ranked top-N the way a plain q
+    does. A `q` with no wildcard characters must still use the fuzzy path
+    (unchanged behavior)."""
+    schema = "cc_test_browse_words_q_wildcard"
+    client, conn, restore = _setup(schema)
+    try:
+        _insert_word(conn, schema, "ball")
+        _insert_word(conn, schema, "bell")
+        _insert_word(conn, schema, "balll")       # four Ls -- must NOT match b_ll
+        _insert_word(conn, schema, "unrelated")
+        conn.commit()
+
+        res = client.get("/api/browse/words", params={"q": "b_ll"})
+        assert res.status_code == 200, res.text
+        assert [w["lemma"] for w in res.json()["items"]] == ["ball", "bell"]
+
+        res = client.get("/api/browse/words", params={"q": "%tion"})
+        assert res.json()["items"] == []  # LIKE, not similarity -- no false positive here
+
+        _insert_word(conn, schema, "action")
+        _insert_word(conn, schema, "fraction")
+        conn.commit()
+        res = client.get("/api/browse/words", params={"q": "%tion"})
+        assert [w["lemma"] for w in res.json()["items"]] == ["action", "fraction"]  # alphabetical, no relevance ranking
+    finally:
+        restore()
+
+
+@pg
 def test_browse_books_and_authors_sort_by_unique_word_count():
     schema = "cc_test_browse_uwc_sort"
     client, conn, restore = _setup(schema)

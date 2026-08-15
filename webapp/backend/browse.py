@@ -1896,7 +1896,20 @@ def browse_words(
     if letter:
         filters.append("w.lemma_lc LIKE %s")
         params.append(f"{letter.lower()}%")
-    if q:
+    q_is_pattern = bool(q) and ("%" in q or "_" in q)
+    if q_is_pattern:
+        # SQL-style wildcards typed directly into the search box -- % for
+        # any run of characters, _ for exactly one -- e.g. "b_ll" finds
+        # ball/bell/bill, "%tion" finds every word ending in "tion". A
+        # literal LIKE against lemma_lc, not the fuzzy trigram match below:
+        # once the user's typed an actual pattern, "close enough" relevance
+        # scoring is the wrong tool -- they want every literal match, not a
+        # ranked top-N guess. params.append (not %-formatted into the SQL
+        # text) keeps this a normal bound parameter, so the wildcards are
+        # LIKE syntax, never a SQL-injection vector.
+        filters.append("w.lemma_lc LIKE %s")
+        params.append(q.lower())
+    elif q:
         filters.append("similarity(w.lemma, %s) > 0.1")
         params.append(q)
     if definition_q:
@@ -1936,6 +1949,12 @@ def browse_words(
         if random:
             order_by = "random()"
             limit = 1
+        elif q_is_pattern:
+            # No relevance ranking for a literal pattern -- same reasoning
+            # as definition_contains below: containment/pattern-matching has
+            # no notion of a "better" match, so just go alphabetical.
+            order_by = "w.lemma_lc ASC"
+            limit = page_size
         elif q:
             # Best text match wins over the requested sort -- "search within
             # these filters" and "alphabetical/difficulty order" aren't
