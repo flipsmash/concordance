@@ -85,3 +85,26 @@ def test_title_case_capitalization_still_counts(nlp):
     # Title-Case name detection (the Bloom/Baker collision case).
     text = "The sailor met Bloom at the docks. Later Bloom returned alone."
     assert _cap_ratio(nlp, text, "bloom") == 1.0
+
+
+# --- derivational collapsing (see derive.py) -------------------------------
+
+def test_regular_adverb_collapses_into_its_adjective(nlp):
+    text = "She walked quickly and spoke quickly again."
+    cands = tokenize([Chapter(title="1", text=text)], nlp=nlp)
+    assert "quick" in cands
+    assert cands["quick"].pos == "ADJ"
+    assert "quickly" not in cands
+
+
+def test_un_word_collapses_into_its_root(nlp):
+    text = "He seemed unhappy about it. Everyone else was unhappy too."
+    cands = tokenize([Chapter(title="1", text=text)], nlp=nlp)
+    assert "happy" in cands
+    assert "unhappy" not in cands
+
+
+def test_non_decomposable_un_word_left_alone(nlp):
+    text = "The uncle waited by the gate."
+    cands = tokenize([Chapter(title="1", text=text)], nlp=nlp)
+    assert "uncle" in cands

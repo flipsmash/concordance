@@ -6,6 +6,11 @@ per lemma, the evidence the proper-noun stage (§04) will need: how often the
 tagger called it a proper noun / entity, and how often it was capitalized in
 mid-sentence position (where capitalization is a real signal, not just the
 start-of-sentence convention).
+
+A regular -ly adverb or "un-" word with an independently attested root
+collapses one step further, into that root's own candidate (see derive.py) —
+so ``quickly``/``unhappy`` are ingested as ``quick``/``happy``, not as
+separate vocabulary items.
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+from . import derive
 from .extract import Chapter
 from .model import Candidate, Occurrence
 
@@ -142,8 +148,16 @@ def tokenize(chapters: list[Chapter], nlp=None) -> dict[str, Candidate]:
                     lemma = _resolve_lemma(tok)
                     if not lemma:
                         continue
+                    # A regular -ly adverb or "un-" word with an attested
+                    # root collapses INTO that root's accumulator here (not
+                    # just a scoring adjustment -- see derive.py) so it's
+                    # counted, floored, and judged as the root word.
+                    pos = tok.pos_
+                    sub = derive.derived_root(lemma, pos)
+                    if sub:
+                        lemma, pos = sub
                     a = acc[lemma]
-                    a.pos_counts[tok.pos_] += 1
+                    a.pos_counts[pos] += 1
                     if tok.pos_ == "PROPN":
                         a.propn_hits += 1
                     if tok.ent_type_:

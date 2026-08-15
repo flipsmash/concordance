@@ -17,8 +17,13 @@ _LIGATURES = {
 }
 
 # Fancy punctuation -> ASCII so tokenizers and dictionary lookups behave.
+# "ʼ" (U+02BC MODIFIER LETTER APOSTROPHE) matters beyond cosmetics: unlike
+# the curly/straight apostrophes above, spaCy's tokenizer treats it as a
+# letter (Unicode category Lm), so "publisherʼs" never splits into
+# "publisher" + "'s" the way "publisher's"/"publisher’s" do -- the whole
+# possessive survives is_alpha filtering as one bogus "word".
 _PUNCT = {
-    "‘": "'", "’": "'", "“": '"', "”": '"',
+    "‘": "'", "’": "'", "ʼ": "'", "“": '"', "”": '"',
     "–": "-", "—": "-", "…": "...", " ": " ",
 }
 
