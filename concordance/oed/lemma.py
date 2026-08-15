@@ -33,7 +33,10 @@ Two-tier approach, in order:
 
 from __future__ import annotations
 
-_POS_TOKEN_MAP = {
+# Public: also reused by resolve.py's OED definition tier (_from_oed) to
+# pick a homograph entry by the tagger's coarse POS, the same way
+# localdict._pick_entry/mw.pick_entry already do for their own sources.
+POS_TOKEN_MAP = {
     "sb": "NOUN", "n": "NOUN", "N": "NOUN",
     "v": "VERB", "V": "VERB", "vb": "VERB",
     "a": "ADJ", "A": "ADJ", "adj": "ADJ",
@@ -70,11 +73,20 @@ def _normalize_pos(raw: str | None) -> tuple[set[str], bool]:
             historical = True
             i += 2
             continue
-        pos = _POS_TOKEN_MAP.get(tokens[i]) or _POS_TOKEN_MAP.get(tokens[i].upper())
+        pos = POS_TOKEN_MAP.get(tokens[i]) or POS_TOKEN_MAP.get(tokens[i].upper())
         if pos:
             categories.add(pos)
         i += 1
     return categories, historical
+
+
+def pos_categories(raw: str | None) -> set[str]:
+    """Public wrapper around _normalize_pos for callers that only need the
+    coarse spaCy-style categories (resolve.py's OED definition tier, picking
+    a homograph entry by cand.pos) and don't care about the historical-verb-
+    form flag that's specific to is_lemma's own use."""
+    categories, _ = _normalize_pos(raw)
+    return categories
 
 
 def _force_lemma(nlp, word: str, pos: str) -> str:

@@ -108,6 +108,8 @@ def ingest(
     workers: int = typer.Option(4, "--workers", help="Enrichment worker threads (network-bound; see Config.enrichment_workers)."),
     no_mw: bool = typer.Option(False, "--no-mw", help="Skip the Merriam-Webster fallback step during enrichment."),
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema to write into."),
+    oed_schema: str = typer.Option("oed", "--oed-schema", help="Schema holding the OED reference dataset "
+                                    "(Tier.OED in the definition cascade); a no-op if it doesn't exist yet."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
     no_archive: bool = typer.Option(False, "--no-archive", help="Leave source book files in place instead of moving them to archive/."),
 ) -> None:
@@ -175,7 +177,8 @@ def ingest(
 
         try:
             kept, rejected = process_pipeline(b, cfg, console, schema=schema,
-                                              nlp=nlp, gate=gate, judge_obj=judge_obj)
+                                              nlp=nlp, gate=gate, judge_obj=judge_obj,
+                                              oed_schema=oed_schema)
         except (ScannedPDFError, UnsupportedFormatError, FileNotFoundError, RuntimeError, psycopg.Error) as exc:
             console.print(f"[red]✗[/red] {exc}")
             if batch_mode:
@@ -1333,15 +1336,18 @@ def deepen(
                                    "misses most of the permanently-undefined tail)."),
     model: Optional[Path] = typer.Option(None, "--model", "-m", help="Model for --web extraction (defaults to the 14B)."),
     limit: int = typer.Option(0, "--limit", "-l", help="Cap words processed (0 = all)."),
+    oed_schema: str = typer.Option("oed", "--oed-schema", help="Schema holding the OED reference dataset "
+                                    "(Tier.OED in the definition cascade); a no-op if it doesn't exist yet."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
-    """Run after `refill`: reach further (Wordnik, yourdictionary, web-search
-    by default) for words still undefined. Whatever STILL can't be defined
-    gets a validity estimate (real word vs OCR/variant/foreign/nonsense)
-    written to word.validity_* — pair with the flagged_undefined marker to
-    find prune candidates: flagged AND validity_label='likely-artifact' is
-    the review queue. Needs WORDNIK_API_KEY in .env for the Wordnik source;
-    falls back to yourdictionary+web without it."""
+    """Run after `refill`: reach further (OED, Merriam-Webster, Wordnik,
+    yourdictionary, web-search by default) for words still undefined.
+    Whatever STILL can't be defined gets a validity estimate (real word vs
+    OCR/variant/foreign/nonsense) written to word.validity_* — pair with the
+    flagged_undefined marker to find prune candidates: flagged AND
+    validity_label='likely-artifact' is the review queue. Needs
+    WORDNIK_API_KEY in .env for the Wordnik source; falls back to
+    yourdictionary+web without it."""
     try:
         conn = db.connect(database_url)
     except Exception as exc:  # noqa: BLE001
@@ -1349,7 +1355,8 @@ def deepen(
     db.apply_schema(conn, schema)
     with console.status("[bold]Resolving the undefined tail…"):
         stats = db.deepen_definitions(conn, schema, use_web=web,
-                                      model_path=str(model) if model else None, limit=limit)
+                                      model_path=str(model) if model else None, limit=limit,
+                                      oed_schema=oed_schema)
     conn.close()
     console.print(f"[green]✓[/green] deepen: [bold]{stats['defined']}[/bold]/{stats['attempted']} "
                   f"defined ({stats['still_undefined']} scored for validity, still undefined, "
@@ -1647,6 +1654,8 @@ def maintain(
                                                  "re-grinds the whole permanently-undefined tail through "
                                                  "Wordnik/web-search again, forever."),
     limit: int = typer.Option(0, "--limit", "-l", help="Cap number of words processed, per step (0 = all)."),
+    oed_schema: str = typer.Option("oed", "--oed-schema", help="Schema holding the OED reference dataset "
+                                    "(Tier.OED in fill-definitions' cascade); a no-op if it doesn't exist yet."),
     skip_fill_definitions: bool = typer.Option(False, "--skip-fill-definitions",
                                                 help="Skip the definition-lookup step (formerly two separate "
                                                      "refill + deepen steps, now one)."),
@@ -1729,7 +1738,8 @@ def maintain(
         with console.status("[bold]Backfilling definitions…"):
             stats = db.fill_definitions(conn, schema, limit=limit, use_web=deepen_web,
                                         model_path=str(model) if model else None,
-                                        recheck_after_days=recheck_after_days)
+                                        recheck_after_days=recheck_after_days,
+                                        oed_schema=oed_schema)
         console.print(f"[green]✓[/green] fill-definitions: [bold]{stats['defined']}[/bold]/{stats['attempted']} "
                       f"defined ({stats['still_undefined']} scored for validity, still undefined, "
                       f"{stats.get('cast_out', 0)} cast out as symbol/proper-noun-only)")

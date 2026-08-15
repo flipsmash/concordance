@@ -12,7 +12,25 @@ Tier order, cheapest/most-reliable first:
   2. FREE     -- Free Dictionary API + Wiktionary REST (dictionary.py). No
                  key, no rate limit (dictionary._get already backs off on
                  429/5xx on its own).
-  3. MW       -- Merriam-Webster Collegiate API (mw.py). Needs
+  3. OED      -- the OED reference dataset, OCR'd from scanned volumes into
+                 its own `oed` schema (oed/definitions.py). No network, no
+                 rate limit -- but unlike every tier above, its text was
+                 never editorially curated for this purpose: oed.definition
+                 rows come from a sense-splitter its own module docstring
+                 calls "a first pass, not a calibrated parser," and can
+                 still contain a truncated etymology fragment or (rarely) a
+                 sense bled in from an adjacent headword's entry.
+                 oed/definitions.py filters out the failure patterns it can
+                 detect (an unbalanced bracket, an OED "(See quot...)"
+                 cross-reference with no standalone prose), but what
+                 survives isn't given the same trust as a curated
+                 dictionary hit -- see the variant_flag_reason note in
+                 _from_oed. Placed after FREE (a clean modern gloss wins by
+                 default when one exists) and before MW/WORDNIK (costs
+                 nothing, so there's no reason to burn either's rate-limited
+                 quota first when OED might already have it) -- Brian's
+                 call, made with the measured hit-rate in hand.
+  4. MW       -- Merriam-Webster Collegiate API (mw.py). Needs
                  MW_DICTIONARY_API_KEY; capped at 1000 requests/day (mw.py's
                  own on-disk cache + quota counter), no per-request pacing
                  needed unlike Wordnik, so it's cheaper per word despite the
@@ -27,15 +45,15 @@ Tier order, cheapest/most-reliable first:
                  (confirmed live: "hatari" -> "Swahili noun") that no other
                  tier can detect, so it casts the word out right here
                  instead of silently defining it as if it were English.
-  4. WORDNIK  -- Century/GCIDE/AHD (deepdef.py). Needs WORDNIK_API_KEY;
+  5. WORDNIK  -- Century/GCIDE/AHD (deepdef.py). Needs WORDNIK_API_KEY;
                  capped at 5 requests/minute on the free tier -- paced by
                  THIS module (see _pace_wordnik), not by the caller, so
                  every caller gets correct pacing automatically instead of
                  each one re-implementing (and, historically, over-
                  applying) its own blanket per-word delay regardless of
                  whether Wordnik was even reached that word.
-  5. YOURDICT -- yourdictionary.com (deepdef.py). Scraped, keyless, no cap.
-  6. WEB      -- web search + local LLM extraction (websearch.py). The true
+  6. YOURDICT -- yourdictionary.com (deepdef.py). Scraped, keyless, no cap.
+  7. WEB      -- web search + local LLM extraction (websearch.py). The true
                  last resort: reads real search-result snippets and has the
                  model extract a definition that is actually present in
                  them -- it never invents one.
@@ -69,6 +87,8 @@ from enum import IntEnum
 from . import deepdef, dictionary, localdict, mw, websearch
 from .localdict import _pick_entry
 from .model import Candidate, RejectReason, Verdict, normalize_pos
+from .oed import definitions as oed_definitions
+from .oed.lemma import pos_categories as oed_pos_categories
 
 _WORDNIK_MIN_INTERVAL = 12.5  # seconds; free tier caps at 5 requests/minute
 
@@ -76,10 +96,11 @@ _WORDNIK_MIN_INTERVAL = 12.5  # seconds; free tier caps at 5 requests/minute
 class Tier(IntEnum):
     LOCAL = 1
     FREE = 2
-    MW = 3
-    WORDNIK = 4
-    YOURDICT = 5
-    WEB = 6
+    OED = 3
+    MW = 4
+    WORDNIK = 5
+    YOURDICT = 6
+    WEB = 7
 
 
 _last_wordnik_call: float = 0.0
@@ -125,11 +146,46 @@ def _from_mw(cand: Candidate, session, api_key: str) -> bool:
     return True
 
 
+_OED_REVIEW_FLAG = "oed_unverified"
+_OED_REVIEW_NOTE = "definition sourced from OED; sense-splitting isn't fully reliable yet, not human-reviewed"
+
+
+def _from_oed(cand: Candidate, oed_lexicon: dict) -> bool:
+    """OED tier: senses matched by exact lemma headword, homograph picked by
+    the tagger's coarse POS (oed.definitions.pick_sense, same pattern as
+    localdict._pick_entry/mw.pick_entry). Unlike every other tier, a hit
+    here also marks the candidate for human review (variant_flag_reason,
+    the same "probably fine, human should glance" channel
+    validity_score.variant_reject_reason already uses) rather than being
+    trusted silently -- oed/definitions.py's filter catches the failure
+    patterns it can detect, but this is real OCR'd dictionary text that was
+    never curated for this purpose, and this project's other definition
+    sources all are. Doesn't overwrite an existing flag from an earlier
+    stage (pipeline.py's own variant_reject_reason check runs after
+    enrichment and is a stronger, more specific signal when it fires)."""
+    senses = oed_lexicon.get(cand.lemma.lower())
+    if not senses:
+        return False
+    sense = oed_definitions.pick_sense(cand.pos, senses)
+    cand.definition = sense.definition
+    cand.definition_source = "OED"
+    categories = oed_pos_categories(sense.part_of_speech)
+    if categories:
+        cand.part_of_speech = normalize_pos(cand.pos if cand.pos in categories else sorted(categories)[0])
+    if sense.etymology:
+        cand.etymology = sense.etymology
+    if not cand.variant_flag_reason:
+        cand.variant_flag_reason = _OED_REVIEW_FLAG
+        cand.variant_flag_note = _OED_REVIEW_NOTE
+    return True
+
+
 def resolve_definition(
     cand: Candidate,
     *,
     max_tier: Tier = Tier.WEB,
     lexicon: dict | None = None,
+    oed_lexicon: dict | None = None,
     session=None,
     wordnik_key: str | None = None,
     mw_api_key: str | None = None,
@@ -142,8 +198,11 @@ def resolve_definition(
     max_tier missed. `lexicon` (from localdict.build_lexicon) and `session`
     (from dictionary.make_session) are expected to be built once per batch
     by the caller and passed in -- omitting `lexicon` simply skips Tier
-    LOCAL (e.g. scripts/lookup_word.py, which has no database at all)."""
+    LOCAL (e.g. scripts/lookup_word.py, which has no database at all).
+    `oed_lexicon` (from oed.definitions.definition_lexicon) works the same
+    way for Tier OED -- omitting it just skips that tier."""
     lexicon = lexicon or {}
+    oed_lexicon = oed_lexicon or {}
     resolved: Tier | None = None
 
     if localdict.enrich(cand, lexicon):
@@ -154,6 +213,10 @@ def resolve_definition(
         dictionary.enrich(cand, session)
         if cand.definition:
             resolved = Tier.FREE
+
+    if resolved is None and max_tier >= Tier.OED:
+        if _from_oed(cand, oed_lexicon):
+            resolved = Tier.OED
 
     if resolved is None and max_tier >= Tier.MW:
         key = mw_api_key if mw_api_key is not None else mw.mw_api_key()

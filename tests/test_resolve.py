@@ -59,7 +59,46 @@ def test_falls_through_to_free_tier_on_local_miss(monkeypatch):
     assert c.definition == "a free def"
 
 
-def test_falls_through_to_mw_tier_on_free_miss(monkeypatch):
+def _oed_sense(pos="noun", definition="an OED def", etymology=""):
+    return resolve.oed_definitions.OedSense(entry_id=1, part_of_speech=pos,
+                                             etymology=etymology, definition=definition)
+
+
+def test_falls_through_to_oed_tier_on_free_miss(monkeypatch):
+    monkeypatch.setattr(resolve.localdict, "enrich", _miss)
+    monkeypatch.setattr(resolve.dictionary, "enrich", lambda cand, session: None)
+    c = _cand()
+    oed_lexicon = {"testword": [_oed_sense()]}
+    result = resolve.resolve_definition(c, session=object(), oed_lexicon=oed_lexicon)
+    assert result is resolve.Tier.OED
+    assert c.definition == "an OED def"
+    assert c.definition_source == "OED"
+    # unlike every other tier, a hit here also flags for human review
+    assert c.variant_flag_reason == "oed_unverified"
+
+
+def test_oed_tier_does_not_overwrite_an_existing_variant_flag(monkeypatch):
+    monkeypatch.setattr(resolve.localdict, "enrich", _miss)
+    monkeypatch.setattr(resolve.dictionary, "enrich", lambda cand, session: None)
+    c = _cand()
+    c.variant_flag_reason = "misspelling"
+    c.variant_flag_note = "an earlier, stronger signal"
+    resolve.resolve_definition(c, session=object(), oed_lexicon={"testword": [_oed_sense()]})
+    assert c.variant_flag_reason == "misspelling"
+    assert c.variant_flag_note == "an earlier, stronger signal"
+
+
+def test_max_tier_free_skips_oed(monkeypatch):
+    monkeypatch.setattr(resolve.localdict, "enrich", _miss)
+    monkeypatch.setattr(resolve.dictionary, "enrich", lambda cand, session: None)
+    c = _cand()
+    result = resolve.resolve_definition(c, max_tier=resolve.Tier.FREE, session=object(),
+                                         oed_lexicon={"testword": [_oed_sense()]})
+    assert result is None
+    assert c.definition == ""
+
+
+def test_falls_through_to_mw_tier_on_oed_miss(monkeypatch):
     monkeypatch.setattr(resolve.localdict, "enrich", _miss)
     monkeypatch.setattr(resolve.dictionary, "enrich", lambda cand, session: None)
     monkeypatch.setattr(resolve.deepdef, "_from_wordnik", lambda *a, **k: pytest.fail("WORDNIK should not run"))

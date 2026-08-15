@@ -72,7 +72,7 @@ def test_enrich_one_delegates_to_resolve_definition_capped_at_mw(monkeypatch):
 
     monkeypatch.setattr(resolve, "resolve_definition", fake_resolve)
     c = Candidate(lemma="besmirch", pos="VERB")
-    result = _enrich_one(c, lexicon={}, session=None, mw_api_key="fake-key")
+    result = _enrich_one(c, lexicon={}, oed_lexicon={}, session=None, mw_api_key="fake-key")
 
     assert result is False
     assert calls == [resolve.Tier.MW]
@@ -90,7 +90,7 @@ def test_enrich_one_returns_true_when_resolve_definition_drops_the_candidate(mon
 
     monkeypatch.setattr(resolve, "resolve_definition", fake_resolve)
     c = Candidate(lemma="hatari", pos="NOUN")
-    result = _enrich_one(c, lexicon={}, session=None, mw_api_key="fake-key")
+    result = _enrich_one(c, lexicon={}, oed_lexicon={}, session=None, mw_api_key="fake-key")
 
     assert result is True
     assert c.verdict is Verdict.DROP

@@ -1198,7 +1198,7 @@ _POS_TO_TAGGER = {"noun": "NOUN", "verb": "VERB", "adjective": "ADJ", "adverb": 
 
 def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
                      use_web: bool = False, model_path: str | None = None,
-                     recheck_after_days: int = 14) -> dict:
+                     recheck_after_days: int = 14, oed_schema: str = "oed") -> dict:
     """The single definition-acquisition pass for words whose definition is
     still blank: one candidate SELECT, one lexicon build, one per-row trip
     through resolve.resolve_definition at whatever depth `use_web` allows
@@ -1206,6 +1206,11 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
     separate passes (refill_definitions then deepen_definitions) each
     re-entering the cascade at Tier LOCAL, the second one's local/free
     attempts always redundant with the first's on the same lemma.
+
+    Tier.OED (oed_schema, default "oed") is included automatically too --
+    local/free like Tier LOCAL, so there's no reason to gate it behind
+    use_web the way YOURDICT/WEB are. Degrades to a no-op if that schema/
+    table doesn't exist yet.
 
     Tier.MW (mw_api_key auto-discovered from MW_DICTIONARY_API_KEY, same as
     Wordnik) is included automatically -- this is the first `maintain` step
@@ -1266,6 +1271,9 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
         return stats
 
     lexicon = localdict.build_lexicon(conn, {lemma.lower() for _, lemma, *_ in rows})
+    from .oed import definitions as oed_definitions
+    oed_lexicon = oed_definitions.definition_lexicon(
+        conn, {lemma.lower() for _, lemma, *_ in rows}, schema=oed_schema)
     session = make_session()
     key = deepdef.wordnik_key()
     max_tier = resolve.Tier.WEB if use_web else resolve.Tier.YOURDICT
@@ -1310,7 +1318,7 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
             # gets computed and is available to write if WEB also misses.
             est = None
             found = resolve.resolve_definition(
-                cand, max_tier=max_tier, lexicon=lexicon, session=session,
+                cand, max_tier=max_tier, lexicon=lexicon, oed_lexicon=oed_lexicon, session=session,
                 wordnik_key=key, mw_api_key=mw_key, llm=None) is not None
             if not found:
                 est = validity_score.estimate(lemma, session=session, sentence=sentence or "")
@@ -1335,6 +1343,17 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
             # check since MW's signal doesn't survive normalize_pos.
             reason = (junk_pos_reason(cand.part_of_speech) or cand.reject_reason) if found else None
             variant = validity_score.variant_reject_reason(lemma) if (found and not reason) else None
+            # variant (a foreign-word/archaic-spelling suspicion) is a
+            # stronger, more specific signal than cand.variant_flag_reason
+            # (which resolve.py's Tier.OED may have already set, marking
+            # this definition as OED-sourced and unreviewed) -- prefer
+            # variant when both are present, otherwise fall back to
+            # whatever _from_oed already put on the candidate. Without this
+            # merge, the UPDATE below only ever threads `variant` through
+            # COALESCE against the word row's PRIOR value, silently
+            # dropping cand.variant_flag_reason entirely.
+            flag_reason = variant[0].value if variant else (cand.variant_flag_reason or None)
+            flag_note = variant[1] if variant else (cand.variant_flag_note or None)
             if reason:
                 cur.execute(
                     f"""UPDATE {s}.word SET
@@ -1361,8 +1380,7 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
                         WHERE id=%s""",
                     (cand.definition, cand.definition_source, normalize_pos(cand.part_of_speech),
                      cand.ipa, cand.etymology, bool(cand.synonyms), list(cand.synonyms),
-                     variant[0].value if variant else None, variant[1] if variant else None,
-                     variant[0].value if variant else None, wid))
+                     flag_reason, flag_note, flag_reason, wid))
                 stats["defined"] += 1
             else:
                 cur.execute(
@@ -1472,14 +1490,15 @@ def refill_definitions(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> di
 
 
 def deepen_definitions(conn, schema: str = DEFAULT_SCHEMA, use_web: bool = False,
-                       model_path: str | None = None, limit: int = 0) -> dict:
+                       model_path: str | None = None, limit: int = 0,
+                       oed_schema: str = "oed") -> dict:
     """Standalone `concordance deepen`: a thin wrapper around fill_definitions
     with no cooldown (recheck_after_days=0) -- an explicit, human-invoked
     deepen run should always retry the undefined tail regardless of when it
     was last checked; the cooldown exists to stop `maintain`'s *automatic*
     re-grinding, not to gate a deliberate one-off command."""
     return fill_definitions(conn, schema, limit=limit, use_web=use_web,
-                            model_path=model_path, recheck_after_days=0)
+                            model_path=model_path, recheck_after_days=0, oed_schema=oed_schema)
 
 
 def mw_backfill(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,

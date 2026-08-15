@@ -12,6 +12,7 @@ from . import clean, db, extract, floor, judge, localdict, master, mw, output, p
 from .dictionary import make_session
 from .config import Config
 from .model import Candidate, RejectReason, Verdict, junk_pos_reason
+from .oed import definitions as oed_definitions
 
 
 @dataclass
@@ -57,15 +58,18 @@ def apply_known_verdicts(candidates: dict[str, Candidate], known: dict[str, str]
     return counts
 
 
-def _enrich_one(cand: Candidate, *, lexicon: dict, session, mw_api_key: str) -> bool:
+def _enrich_one(cand: Candidate, *, lexicon: dict, oed_lexicon: dict, session, mw_api_key: str) -> bool:
     """Resolve one shortlisted candidate via resolve.resolve_definition,
-    capped at Tier.MW -- ingest's own cascade is LOCAL -> FREE -> MW, still
-    skipping Wordnik/yourdictionary/web (too slow/capped for ingest
+    capped at Tier.MW -- ingest's own cascade is LOCAL -> FREE -> OED -> MW,
+    still skipping Wordnik/yourdictionary/web (too slow/capped for ingest
     throughput, see resolve.py's own max_tier docstring). MW itself,
     including the exact-match/homograph-pick/foreign-loanword-detection
     logic, now lives in resolve.py's Tier.MW (folded in from what used to
     be this function's own hand-rolled step -- one fewer place tier order
-    and MW-specific behavior could drift from the rest of the cascade).
+    and MW-specific behavior could drift from the rest of the cascade). OED
+    (resolve.py's Tier.OED, oed/definitions.py) is local/free like LOCAL, so
+    it's reached automatically here too -- no separate ingest-time cost or
+    throughput tradeoff, unlike MW/Wordnik.
 
     Returns True if resolve_definition cast the candidate out as a foreign-
     language loanword (MW's own "<Language> noun/verb/..." fl convention,
@@ -74,19 +78,21 @@ def _enrich_one(cand: Candidate, *, lexicon: dict, session, mw_api_key: str) -> 
     counting/logging.
 
     Thread-safe: touches only `cand` (a distinct object per call -- shortlist
-    entries are never shared across calls), the shared read-only `lexicon`
-    (localdict.enrich never mutates it), and the shared `session` (urllib3's
-    connection pool does its own locking). mw.lookup_api's on-disk cache/
-    quota bookkeeping is protected by mw._LOCK, so concurrent MW calls from
-    multiple workers are safe but serialize against each other by design --
-    MW is quota-scarce and doesn't need concurrency anyway."""
-    resolve.resolve_definition(cand, max_tier=resolve.Tier.MW, lexicon=lexicon, session=session,
-                                mw_api_key=mw_api_key)
+    entries are never shared across calls), the shared read-only `lexicon`/
+    `oed_lexicon` (localdict.enrich/_from_oed never mutate them), and the
+    shared `session` (urllib3's connection pool does its own locking).
+    mw.lookup_api's on-disk cache/quota bookkeeping is protected by mw._LOCK,
+    so concurrent MW calls from multiple workers are safe but serialize
+    against each other by design -- MW is quota-scarce and doesn't need
+    concurrency anyway."""
+    resolve.resolve_definition(cand, max_tier=resolve.Tier.MW, lexicon=lexicon, oed_lexicon=oed_lexicon,
+                                session=session, mw_api_key=mw_api_key)
     return cand.verdict is Verdict.DROP
 
 
 def process(book: str | Path, cfg: Config, console: Console | None = None,
             schema: str = db.DEFAULT_SCHEMA, *, nlp=None, gate=None, judge_obj=None,
+            oed_schema: str = "oed",
             ) -> tuple[list[Candidate], list[Candidate]]:
     """Extract -> filter -> judge -> enrich a book, returning (kept, rejected).
     Shared by `run` (writes CSVs for hand-editing) and `ingest` (writes straight
@@ -98,6 +104,12 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
     enrichment, both because it's free (no network) and because unlike every
     other authority here it carries no "Proper noun" POS at all, so it doesn't
     get to vouch for real names the way the frequency-based checks do.
+
+    `oed_schema`: the OED reference dataset (resolve.py's Tier.OED), tried
+    during enrichment right after FREE -- degrades to an empty lexicon (tier
+    simply never fires) if that schema/table doesn't exist yet, same as
+    compute_ipa's own oed_schema handling, so a DB that's never run
+    oed-ingest is unaffected.
 
     `nlp`, `gate`, `judge_obj` may be pre-built and passed in (a batch run builds
     each once and reuses it across every book, instead of reloading the ~9GB
@@ -171,13 +183,18 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
             console.print("[dim]Merriam-Webster daily quota already exhausted — "
                            "skipping the MW step for this book.[/dim]")
             mw_api_key = ""
+        # Built scoped to the shortlist, not every tokenized candidate --
+        # unlike `lexicon` (also needed earlier, for the validity gate),
+        # OED is only ever consulted during enrichment.
+        oed_lexicon = oed_definitions.definition_lexicon(
+            conn, {c.lemma.lower() for c in shortlist}, schema=oed_schema)
 
         foreign_cast = 0
         with console.status("[bold]Looking up definitions…") as status:
             with ThreadPoolExecutor(max_workers=max(1, cfg.enrichment_workers)) as pool:
                 futures = {
-                    pool.submit(_enrich_one, cand, lexicon=lexicon, session=session,
-                                mw_api_key=mw_api_key): cand
+                    pool.submit(_enrich_one, cand, lexicon=lexicon, oed_lexicon=oed_lexicon,
+                                session=session, mw_api_key=mw_api_key): cand
                     for cand in shortlist
                 }
                 for i, fut in enumerate(as_completed(futures), 1):

@@ -918,6 +918,63 @@ def test_fill_definitions_flags_but_does_not_cast_out_a_variant_hit(monkeypatch)
 
 
 @pg
+def test_fill_definitions_reaches_oed_tier_and_writes_the_review_flag(monkeypatch):
+    # Regression test for the variant_flag merge bug: fill_definitions used
+    # to thread ONLY validity_score.variant_reject_reason's result through
+    # the UPDATE's COALESCE, silently dropping cand.variant_flag_reason (set
+    # by resolve.py's Tier.OED to mark an OED-sourced definition for human
+    # review) whenever that local check found nothing -- which is the common
+    # case, since a real OED hit is neither a foreign word nor a misspelling.
+    from concordance import resolve
+    from concordance.model import Candidate
+    from concordance.oed import db as oed_db
+
+    monkeypatch.setattr(resolve.localdict, "enrich", lambda cand, lex: False)
+    monkeypatch.setattr(resolve.dictionary, "enrich", lambda cand, session: None)
+
+    schema = "cc_test_oed_tier_fill"
+    oed_schema = "oed_test_tier_fill"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        cur.execute(f"DROP SCHEMA IF EXISTS {oed_schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+    oed_db.apply_schema(conn, oed_schema)
+
+    volume_id = oed_db.upsert_volume(conn, file_name="test.pdf", file_hash_="fill-defs-test",
+                                      volume_label="Test", page_count=1, schema=oed_schema)
+    entry_id = oed_db.insert_entry(
+        conn, volume_id=volume_id, headword="tetarteron", homograph_number=None,
+        part_of_speech="sb", etymology=None, entry_type="main", parent_entry_id=None,
+        page_number=1, raw_text="raw", schema=oed_schema)
+    oed_db.insert_definitions(conn, entry_id, [
+        {"sense_label": None, "definition_text": "A Byzantine gold coin of the 10th-11th centuries."},
+    ], schema=oed_schema)
+    with conn.cursor() as cur:
+        cur.execute(f"UPDATE {oed_schema}.entry SET lemma=true WHERE id=%s", (entry_id,))
+    conn.commit()
+
+    words = [Candidate(lemma="tetarteron", pos="NOUN")]
+    db.sync_book_results(conn, "Book One", kept=words, rejected=[], schema=schema)
+
+    stats = db.fill_definitions(conn, schema, oed_schema=oed_schema)
+
+    assert stats["defined"] == 1
+    with conn.cursor() as cur:
+        cur.execute(f"select definition_source, variant_flag_reason from {schema}.word "
+                    f"where lemma='tetarteron'")
+        source, flag = cur.fetchone()
+        assert source == "OED"
+        assert flag == "oed_unverified"
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+        cur.execute(f"DROP SCHEMA {oed_schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
 def test_mw_backfill_defines_skips_and_casts_out(monkeypatch):
     # One candidate per outcome: a real MW hit (defined), a genuine miss (no
     # MW entry), and an MW hit that resolves to a leaked proper noun (cast
