@@ -118,6 +118,22 @@ CREATE TABLE IF NOT EXISTS {s}.word_category (
     PRIMARY KEY (word_id, category_id)
 );
 
+-- One row per (book, genre) tag -- see concordance/genre.py for the fixed
+-- tag vocabulary and the fiction/nonfiction-redundancy rule enforced in
+-- Python before a row ever lands here (not a DB CHECK -- this schema
+-- validates enum-like strings in code, not constraints; see
+-- word_difficulty.archaic below for the same convention). `source`
+-- distinguishes the LLM classifier from a future admin correction, same
+-- provenance pattern as word_category.source.
+CREATE TABLE IF NOT EXISTS {s}.book_genre (
+    book_id     integer NOT NULL REFERENCES {s}.book(id) ON DELETE CASCADE,
+    genre       text NOT NULL,
+    source      text NOT NULL DEFAULT 'llm',   -- 'llm' | 'manual'
+    confidence  real,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (book_id, genre)
+);
+
 CREATE TABLE IF NOT EXISTS {s}.word_difficulty (
     word_id           integer PRIMARY KEY REFERENCES {s}.word(id) ON DELETE CASCADE,
     archaic             text,          -- current | dated | archaic | obsolete
@@ -2601,6 +2617,29 @@ def update_book_archive_metadata(conn, book_id: int, *, archive_path: str, word_
             (archive_path, word_count, distinct_nonstop_word_count, publication_year, publication_era, book_id),
         )
     conn.commit()
+
+
+def set_book_publication_info(cur, book_id: int, publication_year: int | None,
+                               publication_era: str | None, schema: str = DEFAULT_SCHEMA) -> None:
+    """Fills in publication_year/era for a book that doesn't have it yet --
+    used by concordance/genre.py's backfill pass, which re-fetches the same
+    Gutenberg RDF `archive-metadata` would (for books whose first pass
+    predates this field, or never found a match) while it's already there
+    for the genre hints. Only overwrites a currently-NULL column so this
+    never clobbers a value archive-metadata already found.
+
+    Takes an open cursor and does NOT commit -- the caller's chunk-level
+    commit covers it (see classify_and_store_genres), keeping "a chunk's
+    writes land together or not at all" true for this update too, not just
+    the book_genre inserts."""
+    s = _safe_schema(schema)
+    cur.execute(
+        f"""UPDATE {s}.book SET
+                publication_year=coalesce(publication_year, %s),
+                publication_era=coalesce(publication_era, %s)
+            WHERE id=%s""",
+        (publication_year, publication_era, book_id),
+    )
 
 
 def compute_book_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,

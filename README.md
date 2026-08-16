@@ -973,6 +973,10 @@ it at `/app/quiz`, driven entirely by `webapp/backend/quiz.py` and
   pick the definition." Matching is direction-agnostic (always shows both).
 - **Filters**: length (5/10/20/custom), difficulty range, POS, and domain
   (the same 6 USAS buckets `/api/graph/legend` uses, not raw category codes).
+  Also **genre** (`genres`, from `concordance/genre.py`'s `GENRE_LIST`,
+  populated by `concordance book-genres`) — ANDed against the author/book
+  source-scoping filter below it, since genre is an orthogonal book-content
+  facet, not another way of picking the same books.
 - **Distractors** are POS-matched (never negotiable) and drawn from a
   weighted blend of orthographic lookalikes (`pg_trgm` on the lemma),
   near-miss semantic proximity (embedding cosine-distance band — close
@@ -1142,7 +1146,7 @@ WSLg itself keeps working. Neither file lives in this repo (machine-specific,
 like the tunnel config). Check it's running with `systemctl status
 fix-run-user-runtime-dir.service`.
 
-## Corpus housekeeping (`book-merge`, `incoming-merge`, `archive-metadata`, `refresh-rejected-index`, `import-defined`)
+## Corpus housekeeping (`book-merge`, `incoming-merge`, `archive-metadata`, `book-genres`, `refresh-rejected-index`, `import-defined`)
 
 Occasional/one-time commands, none part of `maintain` — each addresses a
 specific corpus-hygiene problem rather than routine per-batch upkeep:
@@ -1174,6 +1178,22 @@ specific corpus-hygiene problem rather than routine per-batch upkeep:
   Only-missing by default; the Gutenberg year lookup is slow (thousands of
   requests, hours-scale), which is why this stays a standalone pass rather
   than folding into `maintain`.
+- **`book-genres`** — tags every book with 1+ labels from a fixed 40-item
+  genre list (`concordance/genre.py`'s `GENRE_LIST`), via the same local-LLM
+  pattern as `classify` (USAS word tagging): title/author plus Gutenberg RDF
+  subject/bookshelf hints as input, output validated against the fixed list.
+  A book never gets both a generic `Fiction`/`Nonfiction` tag and a more
+  specific same-axis tag (`Science Fiction` implies fiction; format/audience/
+  canon-status tags like `Comics`/`Young Adult`/`Classics` are exempt,
+  combining freely with anything). Also backfills `publication_year`/
+  `publication_era` (NULL-only) for any book whose RDF gets fetched here
+  anyway — one network round trip covering both, since most of the corpus
+  has never had a successful Gutenberg lookup at all. Defaults to a full
+  rewrite of the LLM-sourced tags, same as `classify`; `--only-missing`
+  skips books already tagged, for a cheap re-run after the backlog's
+  caught up. Network-heavy and book-level like `archive-metadata`, so
+  deliberately not part of `maintain` — run standalone, expect hours on a
+  fresh backlog.
 - **`refresh-rejected-index`** — refreshes `rejected_lemma_index`, the
   precomputed distinct-lemma view behind the Rejected tab's search box and
   A–Z letter jump (`rejected_word` itself is tens of millions of rows,

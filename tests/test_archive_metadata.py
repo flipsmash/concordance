@@ -185,3 +185,84 @@ def test_year_to_era_avoids_11th_12th_13th_ordinal_mistakes():
     assert year_to_era(1005) == "early 11th century"
     assert year_to_era(1105) == "early 12th century"
     assert year_to_era(1205) == "early 13th century"
+
+
+# --- genre_hints_from_rdf / fetch_gutenberg_rdf ---------------------------------
+# genre.py's LLM classifier input -- pure parsing (genre_hints_from_rdf) plus a
+# mocked-network test for fetch_gutenberg_rdf's combined year/era/hints fetch.
+
+_RDF_SAMPLE = """<?xml version="1.0"?>
+<rdf:RDF>
+  <pgterms:ebook rdf:about="ebooks/36">
+    <pgterms:marc520>Written in 1897, this novel...</pgterms:marc520>
+    <dcterms:subject>
+      <rdf:Description rdf:nodeID="N1">
+        <dcam:memberOf rdf:resource="http://purl.org/dc/terms/LCSH"/>
+        <rdf:value>Science fiction</rdf:value>
+      </rdf:Description>
+    </dcterms:subject>
+    <dcterms:subject>
+      <rdf:Description rdf:nodeID="N2">
+        <dcam:memberOf rdf:resource="http://purl.org/dc/terms/LCC"/>
+        <rdf:value>PR</rdf:value>
+      </rdf:Description>
+    </dcterms:subject>
+    <pgterms:bookshelf>
+      <rdf:Description rdf:nodeID="N3">
+        <dcam:memberOf rdf:resource="2009/pgterms/Bookshelf"/>
+        <rdf:value>Category: Science-Fiction &amp; Fantasy</rdf:value>
+      </rdf:Description>
+    </pgterms:bookshelf>
+  </pgterms:ebook>
+</rdf:RDF>
+"""
+
+
+def test_genre_hints_from_rdf_keeps_lcsh_subjects_and_bookshelf_values():
+    from concordance.archive_metadata import genre_hints_from_rdf
+
+    assert genre_hints_from_rdf(_RDF_SAMPLE) == ["Science fiction", "Category: Science-Fiction & Fantasy"]
+
+
+def test_genre_hints_from_rdf_drops_lcc_call_number_subjects():
+    from concordance.archive_metadata import genre_hints_from_rdf
+
+    hints = genre_hints_from_rdf(_RDF_SAMPLE)
+    assert "PR" not in hints
+
+
+def test_genre_hints_from_rdf_dedupes_preserving_order():
+    from concordance.archive_metadata import genre_hints_from_rdf
+
+    hints = genre_hints_from_rdf(_RDF_SAMPLE + _RDF_SAMPLE)  # same subject appears twice, distinct documents
+    assert hints.count("Science fiction") == 1
+
+
+def test_fetch_gutenberg_rdf_combines_year_era_and_hints_from_one_response(monkeypatch):
+    import requests
+
+    from concordance import archive_metadata as am
+
+    class _FakeResponse:
+        ok = True
+        text = _RDF_SAMPLE
+
+    monkeypatch.setattr(requests, "get", lambda url, timeout=15.0: _FakeResponse())
+
+    result = am.fetch_gutenberg_rdf(36)
+    assert result["publication_year"] == 1897
+    assert result["genre_hints"] == ["Science fiction", "Category: Science-Fiction & Fantasy"]
+
+
+def test_fetch_gutenberg_rdf_degrades_to_empty_on_network_failure(monkeypatch):
+    import requests
+
+    from concordance import archive_metadata as am
+
+    def raise_request_exception(url, timeout=15.0):
+        raise requests.RequestException("boom")
+
+    monkeypatch.setattr(requests, "get", raise_request_exception)
+
+    result = am.fetch_gutenberg_rdf(36)
+    assert result == {"publication_year": None, "publication_era": None, "genre_hints": []}

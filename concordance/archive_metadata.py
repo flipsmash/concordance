@@ -181,6 +181,83 @@ def year_to_era(year: int) -> str:
     return f"{part} {century}{suffix} century"
 
 
+# Both dcterms:subject (LCSH free-text subject headings, but ALSO -- same
+# element, distinguished only by memberOf -- LCC call-number codes like
+# "PR", which are a shelving code, not genre information) and
+# pgterms:bookshelf (Gutenberg's own curated shelf categories, e.g.
+# "Science Fiction", "Category: Novels") share this shape. Confirmed live
+# against 3 sample books' real RDF (ids 36, 76, 1400).
+_RDF_SUBJECT_RE = re.compile(
+    r'<(?:dcterms:subject|pgterms:bookshelf)>\s*<rdf:Description[^>]*>\s*'
+    r'<dcam:memberOf rdf:resource="([^"]*)"\s*/>\s*'
+    r'<rdf:value[^>]*>(.*?)</rdf:value>',
+    re.DOTALL,
+)
+
+
+def genre_hints_from_rdf(rdf_text: str) -> list[str]:
+    """Free-text subject/bookshelf strings from a book's Gutenberg RDF --
+    fed to genre.py's LLM classifier as a *hint* it prunes/confirms
+    against (mirrors wndomains.usas_prior's role in classify.py), not
+    ground truth: these raw strings don't map 1:1 onto this app's fixed
+    genre list (e.g. "Category: Novels" isn't one of the 40 tags, and
+    "Science-Fiction & Fantasy" would need splitting). LCC call-number
+    subjects (memberOf .../LCC) are dropped -- a shelving code, not genre
+    signal. Order-preserving de-dupe since the same value sometimes
+    appears under both dcterms:subject and pgterms:bookshelf."""
+    import html
+
+    seen: set[str] = set()
+    hints: list[str] = []
+    for member_of, value in _RDF_SUBJECT_RE.findall(rdf_text):
+        if member_of.rstrip("/").endswith("/LCC"):
+            continue
+        text = html.unescape(value).strip()
+        if text and text not in seen:
+            seen.add(text)
+            hints.append(text)
+    return hints
+
+
+def fetch_gutenberg_rdf(gutenberg_id: int, timeout: float = 15.0) -> dict:
+    """One request, all three signals: (publication_year, publication_era,
+    genre_hints) -- the combined fetch concordance/genre.py's backfill uses
+    so a book that has never had a successful RDF lookup (the common case
+    for the historical backlog -- see cli.py's book-genres command
+    docstring) gets both pieces of info from a single network round trip
+    instead of two independent passes each re-fetching the same document.
+    fetch_publication_info stays separate (unchanged, still used by
+    compute_book_metadata's ingest-time path) since threading hints through
+    that call chain for the rare freshly-ingested book isn't worth the
+    churn -- the genre backfill re-fetching RDF for the trickle of new
+    books ingest already looked up is a negligible, one-off cost, not the
+    23k-book-backlog cost this function exists to avoid."""
+    import requests
+
+    url = f"https://www.gutenberg.org/cache/epub/{gutenberg_id}/pg{gutenberg_id}.rdf"
+    try:
+        resp = requests.get(url, timeout=timeout)
+        if not resp.ok:
+            return {"publication_year": None, "publication_era": None, "genre_hints": []}
+    except requests.RequestException:
+        return {"publication_year": None, "publication_era": None, "genre_hints": []}
+
+    m = re.search(r"<pgterms:marc520>(.*?)</pgterms:marc520>", resp.text, re.DOTALL)
+    year = era = None
+    if m:
+        summary = m.group(1)
+        year_match = _YEAR_RE.search(summary)
+        year = int(year_match.group(1)) if year_match else None
+        era_match = _ERA_RE.search(summary)
+        era = era_match.group(1).strip() if era_match else None
+
+    return {
+        "publication_year": year,
+        "publication_era": era,
+        "genre_hints": genre_hints_from_rdf(resp.text),
+    }
+
+
 def fetch_publication_info(gutenberg_id: int, timeout: float = 15.0) -> tuple[int | None, str | None]:
     """(publication_year, publication_era) from Gutenberg's per-book RDF
     catalog metadata -- see this module's own docstring for why both exist

@@ -33,6 +33,7 @@ function QuizConfig() {
   const [difficultyMax, setDifficultyMax] = useState('')
   const [pos, setPos] = useState([])
   const [domains, setDomains] = useState([])
+  const [genres, setGenres] = useState([])
   const [authors, setAuthors] = useState([])   // [{id: authorString, label: authorString, sublabel: word_count}]
   const [books, setBooks] = useState([])       // [{id: bookId, label: title, sublabel: word_count}]
   const [smartRatio, setSmartRatio] = useState(70)
@@ -107,6 +108,7 @@ function QuizConfig() {
         difficulty_max: difficultyMax === '' ? null : Number(difficultyMax),
         pos: pos.length ? pos : null,
         domains: domains.length ? domains : null,
+        genres: genres.length ? genres : null,
         authors: authors.length ? authors.map((a) => a.id) : null,
         book_ids: books.length ? books.map((b) => b.id) : null,
         spaced_repetition_enabled: srEnabled,
@@ -224,6 +226,7 @@ function QuizConfig() {
                 setDomains(names.map((name) => meta?.domains?.find((d) => d.name === name)?.bucket).filter(Boolean))
               }
             />
+            <MultiSelect label="Genre" options={meta?.genres ?? []} selected={genres} onChange={setGenres} />
           </div>
           <div className="quiz-difficulty-row">
             <label>

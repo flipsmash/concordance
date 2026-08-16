@@ -121,6 +121,11 @@ class QuizStartRequest(BaseModel):
                                         # these authors OR these specific books" is one pool,
                                         # not a narrowing intersection (unlike browse.py's
                                         # author/book_id filters, which DO intersect).
+    genres: list[str] | None = None  # concordance.genre.GENRE_LIST values (book_genre.genre);
+                                      # word must appear in ANY book tagged with ANY of these --
+                                      # ANDed against authors/book_ids, not folded into their OR
+                                      # pool (see _add_genre_filter) -- genre is an orthogonal
+                                      # content facet, not another way of picking the same books.
     direction: Literal["definition_to_word", "word_to_definition"] = "definition_to_word"
     smart_vs_random_ratio: float = Field(0.7, ge=0.0, le=1.0)
     strategy_weights: dict[str, float] = Field(
@@ -230,6 +235,7 @@ class DomainOption(BaseModel):
 class QuizMeta(BaseModel):
     pos_values: list[str]
     domains: list[DomainOption]
+    genres: list[str]
 
 
 class AdminSettingsResponse(BaseModel):
@@ -285,6 +291,7 @@ def _select_target_words(conn, body: QuizStartRequest, count: int, exclude_ids: 
             )
             params.append(codes)
     _add_book_author_filter(body, filters, params)
+    _add_genre_filter(body, filters, params)
     where = " AND ".join(filters)
 
     # Spaced repetition is a preference, never a hard filter: eligible (or
@@ -340,6 +347,22 @@ def _add_book_author_filter(body: QuizStartRequest, filters: list[str], params: 
     )
 
 
+def _add_genre_filter(body: QuizStartRequest, filters: list[str], params: list) -> None:
+    """AND-ed against the rest of `filters` (narrows), unlike
+    _add_book_author_filter's authors/book_ids OR-pool: genre is an
+    orthogonal book-content facet, not another way of picking the same
+    books, so "Fantasy books by Mark Twain" should mean the intersection of
+    the two filters, not their union."""
+    if not body.genres:
+        return
+    filters.append(
+        f"""EXISTS (SELECT 1 FROM {_main.SCHEMA}.word_book wb
+                    JOIN {_main.SCHEMA}.book_genre bg ON bg.book_id = wb.book_id
+                    WHERE wb.word_id = w.id AND bg.genre = ANY(%s))"""
+    )
+    params.append(body.genres)
+
+
 def _select_analogy_targets(conn, body: QuizStartRequest, count: int, exclude_ids: set[int],
                              user_id: int) -> list[dict]:
     """Same shape/filters as _select_target_words, PLUS a restriction to words
@@ -370,6 +393,7 @@ def _select_analogy_targets(conn, body: QuizStartRequest, count: int, exclude_id
                     WHERE t.word_id = w.id AND e.verification_status = 'verified')"""
     )
     _add_book_author_filter(body, filters, params)
+    _add_genre_filter(body, filters, params)
     where = " AND ".join(filters)
 
     order_by = "random()"
@@ -674,8 +698,8 @@ def _mc_or_tf_correct_label(qtype: str, payload: dict) -> str:
 
 @router.get("/api/quiz/meta", response_model=QuizMeta)
 def quiz_meta(_: dict = Depends(_main.require_user)) -> QuizMeta:
-    """POS/domain option lists for the quiz config form. Separate from the
-    admin-only /api/pos-values (this is require_user, not require_admin --
+    """POS/domain/genre option lists for the quiz config form. Separate from
+    the admin-only /api/pos-values (this is require_user, not require_admin --
     any logged-in quiz-taker needs it, not just the curation UI)."""
     with _main.get_conn() as conn, conn.cursor() as cur:
         cur.execute(
@@ -685,8 +709,23 @@ def quiz_meta(_: dict = Depends(_main.require_user)) -> QuizMeta:
                 ORDER BY 1"""
         )
         pos_values = [r[0] for r in cur.fetchall()]
+        # Genres actually present on a quizzable word's book, not the full
+        # static GENRE_LIST -- most of that list has no data until
+        # `concordance book-genres` finishes its backlog, and a filter
+        # option that always returns zero words is worse than not offering
+        # it yet (same reasoning pos_values queries DISTINCT rather than a
+        # fixed list).
+        cur.execute(
+            f"""SELECT DISTINCT bg.genre FROM {_main.SCHEMA}.book_genre bg
+                JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = bg.book_id
+                JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id
+                JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
+                WHERE w.active AND wd.quizzable = true
+                ORDER BY 1"""
+        )
+        genres = [r[0] for r in cur.fetchall()]
     domains = [DomainOption(bucket=e["bucket"], name=e["name"]) for e in usas_domains.legend_entries()]
-    return QuizMeta(pos_values=pos_values, domains=domains)
+    return QuizMeta(pos_values=pos_values, domains=domains, genres=genres)
 
 
 @router.post("/api/quiz/start", response_model=QuizSessionStart)

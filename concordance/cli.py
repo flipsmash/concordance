@@ -706,6 +706,58 @@ def archive_metadata_cmd(
                   + (f", {stats['errors']} skipped on error" if stats["errors"] else ""))
 
 
+@app.command("book-genres")
+def book_genres_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    model: Optional[Path] = typer.Option(None, "--model", "-m", help="Model (defaults to the 14B)."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Only classify the first N books (0 = all)."),
+    only_missing: bool = typer.Option(False, "--only-missing",
+                                       help="Only classify books that have no genre tag yet."),
+    batch: int = typer.Option(0, "--batch", help="Override the batch size (smaller = fewer omissions)."),
+    skip_rdf: bool = typer.Option(False, "--skip-rdf",
+                                   help="Skip the Gutenberg RDF fetch; classify from title/author alone."),
+    delay: float = typer.Option(0.3, "--delay", help="Seconds to wait between Gutenberg RDF requests."),
+    commit_every: int = typer.Option(200, "--commit-every",
+                                      help="Commit to the DB after every N books, not just once at the end."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Tag every book in the DB with genre labels from concordance.genre.GENRE_LIST
+    (LLM classification from title/author + Gutenberg RDF subject/bookshelf
+    hints -- see genre.py's own docstring for the model and the
+    fiction/nonfiction-redundancy rule). Same shape as `classify`
+    (USAS word tagging): LLM + validated-against-a-fixed-list output,
+    chunked commits, --only-missing resume.
+
+    Also backfills publication_year/publication_era (NULL-only) for any
+    book whose RDF gets fetched here -- one network round trip serving
+    both, since most of the corpus has never had a successful Gutenberg
+    lookup at all (archive-metadata's own resume logic only re-scans
+    books that were never archived, so it never revisits this backlog).
+
+    Deliberately NOT part of `maintain`, same reasoning as archive-metadata/
+    wordnik-pron/commons-download: this is a book-level, network-heavy pass
+    (~11.5k Gutenberg RDF requests at a --delay-paced full-corpus scale),
+    not incremental per-word maintenance. Run standalone, expect hours on
+    a fresh backlog; --only-missing makes a re-run after that cheap."""
+    from .genre import classify_and_store_genres
+
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    cfg = Config()
+    if model:
+        cfg.model_path = str(model)
+    stats = classify_and_store_genres(conn, schema, cfg, limit, only_missing=only_missing, batch=batch or None,
+                                      commit_every=commit_every, fetch_rdf=not skip_rdf, delay=delay)
+    conn.close()
+    console.print(f"[green]✓[/green] book-genres: [bold]{stats['classified']}[/bold]/{stats['books']} books "
+                  f"-> {stats['assignments']} genre tags ({stats['rdf_fetched']} RDF fetches, "
+                  f"{stats['publication_info_backfilled']} publication dates backfilled)"
+                  + (f" ({stats['vanished']} vanished mid-run)" if stats.get("vanished") else ""))
+
+
 @app.command("book-merge")
 def book_merge_cmd(
     archive_dir: Path = typer.Option(ARCHIVE_DIR, "--archive-dir", help="Directory of full-text files."),

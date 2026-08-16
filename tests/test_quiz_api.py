@@ -262,6 +262,86 @@ def test_select_target_words_filters_by_author_and_book_id_as_or():
         conn.close()
 
 
+@pg
+def test_select_target_words_filters_by_genre_and_intersects_with_author_book():
+    # Genre is ANDed against authors/book_ids (_add_genre_filter), unlike
+    # authors/book_ids' own OR-with-each-other relationship
+    # (_add_book_author_filter) -- "Fantasy books by Author One" should be
+    # the intersection, not a third pool unioned in.
+    from webapp.backend import main
+    from webapp.backend import quiz as quiz_module
+
+    schema = "cc_test_quiz_genre_select"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    def _word(lemma):
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""INSERT INTO {schema}.word (lemma, definition, quiz_definition, part_of_speech, active)
+                    VALUES (%s, %s, %s, 'noun', true) RETURNING id""",
+                (lemma, f"definition {lemma}", f"quiz definition {lemma}"),
+            )
+            wid = cur.fetchone()[0]
+            cur.execute(
+                f"INSERT INTO {schema}.word_difficulty (word_id, quizzable, difficulty) VALUES (%s, true, 50.0)",
+                (wid,))
+        return wid
+
+    with conn.cursor() as cur:
+        cur.execute(f"INSERT INTO {schema}.book (title, author) VALUES ('Fantasy Book', 'Author One') RETURNING id")
+        fantasy_book_id = cur.fetchone()[0]
+        cur.execute(f"INSERT INTO {schema}.book (title, author) VALUES ('History Book', 'Author One') RETURNING id")
+        history_book_id = cur.fetchone()[0]
+        cur.execute(f"INSERT INTO {schema}.book (title, author) VALUES ('Other Fantasy', 'Author Two') RETURNING id")
+        other_fantasy_book_id = cur.fetchone()[0]
+        cur.execute(f"INSERT INTO {schema}.book_genre (book_id, genre, source) VALUES (%s,'Fantasy','llm')",
+                    (fantasy_book_id,))
+        cur.execute(f"INSERT INTO {schema}.book_genre (book_id, genre, source) VALUES (%s,'History','llm')",
+                    (history_book_id,))
+        cur.execute(f"INSERT INTO {schema}.book_genre (book_id, genre, source) VALUES (%s,'Fantasy','llm')",
+                    (other_fantasy_book_id,))
+
+    word_fantasy = _word("wordinfantasybook")
+    word_history = _word("wordinhistorybook")
+    word_other_fantasy = _word("wordinotherfantasybook")
+    with conn.cursor() as cur:
+        cur.execute(f"INSERT INTO {schema}.word_book (word_id, book_id) VALUES (%s, %s)",
+                    (word_fantasy, fantasy_book_id))
+        cur.execute(f"INSERT INTO {schema}.word_book (word_id, book_id) VALUES (%s, %s)",
+                    (word_history, history_book_id))
+        cur.execute(f"INSERT INTO {schema}.word_book (word_id, book_id) VALUES (%s, %s)",
+                    (word_other_fantasy, other_fantasy_book_id))
+        cur.execute(f"INSERT INTO {schema}.users (username, password_hash) VALUES ('genreuser', %s) RETURNING id",
+                    (auth.hash_password("password123"),))
+        user_id = cur.fetchone()[0]
+    conn.commit()
+
+    old_schema = main.SCHEMA
+    main.SCHEMA = schema
+    try:
+        # genre alone: every Fantasy-tagged book's words, across both authors.
+        body_genre = quiz_module.QuizStartRequest(length=1, genres=["Fantasy"])
+        pool_genre = quiz_module._select_target_words(conn, body_genre, 100, set(), user_id)
+        assert {w["lemma"] for w in pool_genre} == {"wordinfantasybook", "wordinotherfantasybook"}
+
+        # genre + author together: AND, not OR -- narrows to just the
+        # intersection (Author One's Fantasy book), excluding both Author
+        # One's non-Fantasy book AND Author Two's Fantasy book.
+        body_both = quiz_module.QuizStartRequest(length=1, genres=["Fantasy"], authors=["Author One"])
+        pool_both = quiz_module._select_target_words(conn, body_both, 100, set(), user_id)
+        assert [w["lemma"] for w in pool_both] == ["wordinfantasybook"]
+    finally:
+        main.SCHEMA = old_schema
+        with conn.cursor() as cur:
+            cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        conn.commit()
+        conn.close()
+
+
 def _seed_corpus_at_difficulty(conn, schema: str, prefix: str, n: int, difficulty: float) -> None:
     with conn.cursor() as cur:
         for i in range(n):
