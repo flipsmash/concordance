@@ -249,3 +249,85 @@ def test_select_analogy_edge_two_hop_transitive_closure_exclusion():
     finally:
         with conn.cursor() as cur:
             cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+
+
+def test_too_generic_for_trap_matches_entitys_own_direct_hyponyms():
+    # _TOO_GENERIC_FOR_TRAP should be exactly {"entity"} union entity.n.01's
+    # own direct hyponym lemmas (confirmed against nltk's wordnet, not
+    # hand-picked) -- every non-"entity" member must actually be a direct
+    # hyponym, not merely overlap with one; this would have caught leaving
+    # a real hyponym (like "thing") off the list without erroring.
+    try:
+        from nltk.corpus import wordnet as wn
+        hyponym_lemmas = {l.replace("_", " ") for h in wn.synset("entity.n.01").hyponyms()
+                          for l in h.lemma_names()}
+    except LookupError:
+        pytest.skip("nltk wordnet corpus not downloaded")
+    assert asel._TOO_GENERIC_FOR_TRAP - {"entity"} <= hyponym_lemmas
+
+
+@pg
+def test_select_analogy_edge_strips_wordnet_root_lemmas_from_trap_pool():
+    # Regression test for a live-reported bug: "abstraction"/"abstract
+    # entity" showing up as an analogy distractor on nearly every is_a
+    # question, because entity.n.01 (WordNet's sole noun-hierarchy root)
+    # and its direct hyponyms sit atop virtually every noun's transitive
+    # hypernym closure -- confirmed live against the real corpus: 'entity'
+    # appears in 80% of terms' hypernym fanout, 'abstraction'/'abstract
+    # entity' in 45%. trap_lemmas must exclude them (too generic to be a
+    # meaningful "plausible wrong answer") while still keeping a real,
+    # specific trap candidate from the same fanout.
+    schema = "cc_test_analogies_generic_trap"
+    conn = db.connect(_URL)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    db.apply_schema(conn, schema)
+    try:
+        with conn.cursor() as cur:
+            wid = {}
+            for lemma in ("fetter", "shackle", "gauntlet", "vambrace"):
+                wid[lemma] = _seed_word(cur, schema, lemma, f"{lemma} definition")
+
+            def add_term(lemma, word_id=None):
+                cur.execute(
+                    f"""INSERT INTO {schema}.wn_relation_term (word_id, lemma, wn_pos, synset_name, gloss, is_common)
+                        VALUES (%s, %s, 'n', %s, %s, %s) RETURNING id""",
+                    (word_id, lemma, f"{lemma}.n.01", f"{lemma} gloss", word_id is None),
+                )
+                return cur.fetchone()[0]
+
+            t_fetter = add_term("fetter", wid["fetter"])
+            t_shackle = add_term("shackle", wid["shackle"])
+            t_gauntlet = add_term("gauntlet", wid["gauntlet"])
+            t_vambrace = add_term("vambrace", wid["vambrace"])
+
+            cur.execute(
+                f"""INSERT INTO {schema}.word_relation_edge
+                        (term_a_id, term_b_id, relation_type, relation_family, pos_a, pos_b, source, verification_status)
+                    VALUES (%s,%s,'hypernym','is_a','noun','noun','wordnet_hypernym','verified')""",
+                (t_fetter, t_shackle),
+            )
+            cur.execute(
+                f"""INSERT INTO {schema}.word_relation_edge
+                        (term_a_id, term_b_id, relation_type, relation_family, pos_a, pos_b, source, verification_status)
+                    VALUES (%s,%s,'hypernym','is_a','noun','noun','wordnet_hypernym','verified')""",
+                (t_gauntlet, t_vambrace),
+            )
+            # gauntlet (the anchor's A side) has both a real, specific
+            # trap candidate (armor) AND the generic root cluster in its
+            # hypernym fanout -- the fix must drop only the latter.
+            for lemma in ("armor", "entity", "abstraction", "abstract entity", "physical entity"):
+                cur.execute(
+                    f"""INSERT INTO {schema}.wn_relation_fanout (term_id, relation_type, target_lemma, target_pos)
+                        VALUES (%s, 'hypernym', %s, 'n')""",
+                    (t_gauntlet, lemma),
+                )
+
+        assembly = asel.select_analogy_edge(conn, schema, wid["fetter"], exclude_ids=set())
+        assert assembly is not None
+        assert not (assembly.trap_lemmas and set(assembly.trap_lemmas) & asel._TOO_GENERIC_FOR_TRAP)
+        assert "armor" in assembly.trap_lemmas
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")

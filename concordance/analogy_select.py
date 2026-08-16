@@ -46,12 +46,36 @@ parent, so C's ancestor closure = {D} union D's ancestors.
 Conversely, trap_lemmas -- real completions of the SAME relation using A or B
 instead of C -- are the authentic MAT "wrong term, right relation" distractor
 and are explicitly NOT excluded; see distractors.select_analogy_distractors.
+
+trap_lemmas draws from the SAME transitive fanout as exclusion_lemmas
+(_fanout_lemmas), which is correct for exclusion (every ancestor really is a
+valid alternate answer, so all of them must be caught) but wrong for a trap:
+WordNet's noun hierarchy has one root, entity.n.01, with direct hyponyms
+abstraction.n.06 (lemma names "abstraction"/"abstract entity") and
+physical_entity.n.01 -- both sit atop virtually every noun's hypernym chain
+(confirmed live: 'entity' in 80% of terms' hypernym fanout, 'abstraction'/
+'abstract entity' in 45%). Reused as traps, they show up as a distractor on
+nearly every is_a-family analogy regardless of what's actually being tested
+-- reported live as "abstraction"/"abstract entity" appearing constantly.
+A trap is supposed to be a plausible, SPECIFIC wrong answer; these are
+satisfied by nearly every noun in English, so they test nothing.
+_TOO_GENERIC_FOR_TRAP strips them from the trap pool only, not from
+exclusion_lemmas -- they're still legitimate completions, just useless ones.
 """
 
 from __future__ import annotations
 
 import random
 from dataclasses import dataclass
+
+# entity.n.01 (WordNet's sole noun-hierarchy root) and its direct hyponyms
+# -- abstraction.n.06, physical_entity.n.01, thing.n.08 -- see module
+# docstring for why these are stripped from trap_lemmas specifically, not
+# exclusion_lemmas. "thing" appears far less often than the other two in
+# this corpus's fanout (thing.n.08's own subtree is narrow), but it's
+# structurally the same near-root, information-free case, not a better
+# trap for being rarer -- included on that basis, not frequency.
+_TOO_GENERIC_FOR_TRAP = {"entity", "abstraction", "abstract entity", "physical entity", "thing"}
 
 
 @dataclass
@@ -189,6 +213,7 @@ def select_analogy_edge(conn, schema: str, target_word_id: int, exclude_ids: set
                     if row:
                         trap_lemmas |= _fanout_lemmas(cur, schema, row[0], tested["relation_type"])
                 trap_lemmas -= exclusion_lemmas
+                trap_lemmas -= _TOO_GENERIC_FOR_TRAP
                 trap_lemmas -= {a_lemma.lower(), b_lemma.lower(), target_term["lemma"].lower(),
                                 tested["d_lemma"].lower()}
 
