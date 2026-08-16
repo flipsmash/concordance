@@ -174,6 +174,15 @@ function WorkDetail() {
               Goodreads ↗
             </a>
           )}
+          {book?.genres?.length > 0 && (
+            <div className="work-detail-genres">
+              {book.genres.map((g) => (
+                <span key={g} className="work-detail-genre-tag">
+                  {g}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
         <button type="button" className="authors-surprise" onClick={surpriseMe}>
           🎲 Surprise me

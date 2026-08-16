@@ -787,6 +787,8 @@ class BookRow(BaseModel):
                              # exclusivity semantics as ?exclusive=true and the
                              # unique-word-histogram, always a real count (never
                              # null -- a book contributing zero is still 0, not absent)
+    genres: list[str]  # concordance.genre.GENRE_LIST tags, from `concordance book-genres`
+                        # -- [] for a book not yet classified, not null
 
 
 class BookPage(BaseModel):
@@ -971,6 +973,16 @@ def browse_books(
                 FROM single_book_words
                 GROUP BY book_id
             ),
+            book_genres AS (
+                -- Pre-aggregated to one row per book, same reasoning as
+                -- book_unique_counts above: joining book_genre directly into
+                -- book_base's per-word GROUP BY would fan out one row per
+                -- genre tag, corrupting avg(wd.difficulty)/stddev_samp
+                -- (not DISTINCT-safe like count(DISTINCT w.id) is).
+                SELECT book_id, array_agg(genre ORDER BY genre) AS genres
+                FROM {_main.SCHEMA}.book_genre
+                GROUP BY book_id
+            ),
             book_base AS (
                 SELECT b.id, b.title, b.author, b.archive_path, b.distinct_nonstop_word_count,
                        count(DISTINCT w.id) AS word_count,
@@ -981,16 +993,18 @@ def browse_books(
                             THEN count(DISTINCT w.id)::float / b.distinct_nonstop_word_count END AS density,
                        bf.fame_score, bf.fame_reasoning,
                        {_SORT_TITLE_EXPR} AS sort_title,
-                       coalesce(buc.unique_word_count, 0) AS unique_word_count
+                       coalesce(buc.unique_word_count, 0) AS unique_word_count,
+                       coalesce(bg.genres, '{{}}') AS genres
                 FROM {_main.SCHEMA}.book b
                 JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
                 JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id
                 LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
                 LEFT JOIN {_main.SCHEMA}.book_fame bf ON bf.book_id = b.id
                 LEFT JOIN book_unique_counts buc ON buc.book_id = b.id
+                LEFT JOIN book_genres bg ON bg.book_id = b.id
                 WHERE {where}
                 GROUP BY b.id, b.title, b.author, b.archive_path, b.distinct_nonstop_word_count,
-                         bf.fame_score, bf.fame_reasoning, buc.unique_word_count
+                         bf.fame_score, bf.fame_reasoning, buc.unique_word_count, bg.genres
             ),
             diff_rank AS (
                 SELECT id, percent_rank() OVER (ORDER BY mean_difficulty) AS diff_pct
@@ -1006,14 +1020,14 @@ def browse_books(
                        CASE WHEN dr.diff_pct IS NOT NULL AND de.dens_pct IS NOT NULL
                             THEN round((((dr.diff_pct + de.dens_pct) / 2) * 100)::numeric, 1)
                        END AS overall_difficulty,
-                       bb.fame_score, bb.fame_reasoning, bb.unique_word_count, bb.sort_title
+                       bb.fame_score, bb.fame_reasoning, bb.unique_word_count, bb.sort_title, bb.genres
                 FROM book_base bb
                 LEFT JOIN diff_rank dr ON dr.id = bb.id
                 LEFT JOIN dens_rank de ON de.id = bb.id
             )
             SELECT id, title, author, word_count, scored_word_count, mean_difficulty,
                    stddev_difficulty, density, archive_path, overall_difficulty,
-                   fame_score, fame_reasoning, unique_word_count
+                   fame_score, fame_reasoning, unique_word_count, genres
             FROM scored
             WHERE true{overall_diff_where}
             ORDER BY {order_by}
@@ -1026,7 +1040,7 @@ def browse_books(
         BookRow(id=r[0], title=r[1], author=r[2], word_count=r[3],
                 scored_word_count=r[4], mean_difficulty=r[5], stddev_difficulty=r[6],
                 density=r[7], archive_path=r[8], overall_difficulty=r[9],
-                fame_score=r[10], fame_reasoning=r[11], unique_word_count=r[12])
+                fame_score=r[10], fame_reasoning=r[11], unique_word_count=r[12], genres=r[13] or [])
         for r in rows
     ]
     return BookPage(items=items, total=total, page=page, page_size=page_size)

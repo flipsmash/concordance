@@ -843,6 +843,46 @@ def test_browse_books_and_authors_sort_by_unique_word_count():
 
 
 @pg
+def test_browse_books_returns_genre_tags_without_corrupting_difficulty_aggregates():
+    # Regression test: book_genre is a 1:many join on book_id (like
+    # word_book), joined into book_base's per-word GROUP BY -- if it were
+    # joined directly (not pre-aggregated into book_genres first), each
+    # difficulty-scored word row would fan out once per genre tag, inflating
+    # avg(wd.difficulty)/stddev_samp (not DISTINCT-safe the way
+    # count(DISTINCT w.id) is). Book Two has 3 genre tags and 2
+    # difficulty-scored words specifically to catch that: a buggy fanout
+    # join would multiply mean_difficulty's denominator by 3.
+    schema = "cc_test_browse_genres"
+    client, conn, restore = _setup(schema)
+    try:
+        b2 = _insert_book(conn, schema, "Book Two", author="Author Two")
+        b3 = _insert_book(conn, schema, "Book Three (untagged)", author="Author Three")
+
+        w1 = _insert_word(conn, schema, "w1", difficulty=40.0)
+        w2 = _insert_word(conn, schema, "w2", difficulty=60.0)
+        w3 = _insert_word(conn, schema, "w3")
+        _link(conn, schema, w1, b2)
+        _link(conn, schema, w2, b2)
+        _link(conn, schema, w3, b3)
+
+        with conn.cursor() as cur:
+            for genre in ("Fantasy", "Science Fiction", "Young Adult"):
+                cur.execute(f"INSERT INTO {schema}.book_genre (book_id, genre, source) VALUES (%s,%s,'llm')",
+                            (b2, genre))
+        conn.commit()
+
+        books = {b["title"]: b for b in client.get("/api/browse/books").json()["items"]}
+        assert books["Book Two"]["genres"] == ["Fantasy", "Science Fiction", "Young Adult"]
+        assert books["Book Three (untagged)"]["genres"] == []
+        # The actual regression check: mean of 40.0/60.0 is 50.0 regardless
+        # of the 3 genre tags -- a fanout bug would corrupt this.
+        assert books["Book Two"]["mean_difficulty"] == 50.0
+        assert books["Book Two"]["scored_word_count"] == 2
+    finally:
+        restore()
+
+
+@pg
 def test_combined_facets_intersect_regardless_of_which_is_set_first():
     schema = "cc_test_browse_combined"
     client, conn, restore = _setup(schema)
