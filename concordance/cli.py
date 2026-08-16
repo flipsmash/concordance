@@ -1667,9 +1667,8 @@ def oed_lemma_cmd(
     (OED's own POS tag when present, spaCy's context-free guess otherwise).
 
     Standalone like `oed-ipa`/`oed-ingest` -- not part of `maintain`, re-run
-    periodically as new volumes land. Not load-bearing for anything yet; this
-    is prep for a future cross-reference into concordance.word (limiting
-    that eventual import to lemma entries only, for manageability)."""
+    periodically as new volumes land. Feeds `oed-concordance-match`, which
+    limits its cross-reference to lemma entries only, for manageability."""
     try:
         conn = db.connect(database_url)
     except Exception as exc:  # noqa: BLE001
@@ -1681,6 +1680,50 @@ def oed_lemma_cmd(
     conn.close()
     console.print(f"[green]✓[/green] oed-lemma: [bold]{stats['entries']}[/bold] entries checked — "
                   f"{stats['lemma']} lemma, {stats['not_lemma']} not")
+
+
+@app.command("oed-concordance-match")
+def oed_concordance_match_cmd(
+    schema: str = typer.Option("oed", "--schema", help="Postgres schema for the oed tables."),
+    main_schema: str = typer.Option(db.DEFAULT_SCHEMA, "--main-schema", help="Postgres schema for concordance's own tables."),
+    refetch: bool = typer.Option(False, "--refetch", help="Recheck every lemma entry (default: only "
+                                  "never-checked or previously-'unique' ones)."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of entries processed."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Cross-references every lemma-flagged oed.entry (run `oed-lemma` first)
+    against concordance's own vocabulary, tagging oed.entry.concordance_match:
+    'accepted' (an active concordance.word row), 'pruned' (a concordance.word
+    row that's since been deactivated), 'rejected' (no word row, but a match
+    in concordance.rejected_lemma_index -- run `refresh-rejected-index` first
+    if that's stale), or 'unique' (no match anywhere in concordance).
+
+    Only lemma entries are checked -- an inflected-form headword OED gave
+    its own entry (see oed-lemma) isn't a meaningful vocabulary-overlap
+    question. Pure indexed SQL lookups, no LLM/network/GPU -- fast even at
+    this corpus's full lemma-entry count, unlike book-genres.
+
+    Default is incremental: never-checked entries, plus any previously
+    tagged 'unique' (concordance's vocabulary keeps growing via ingest, so
+    a 'unique' verdict can become stale in a way 'accepted'/'pruned'/
+    'rejected' can't -- those are settled once matched). --refetch
+    recomputes every lemma entry from scratch.
+
+    Standalone like `oed-lemma`/`oed-ipa` -- not part of `maintain`, re-run
+    periodically as new volumes land via `oed-ingest` and new books land
+    via `ingest`."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    from .oed import db as oed_db
+    oed_db.apply_schema(conn, schema)
+    with console.status("[bold]Cross-referencing oed lemmas against concordance…"):
+        stats = oed_db.compute_concordance_match(conn, schema, main_schema, only_missing=not refetch, limit=limit)
+    conn.close()
+    console.print(f"[green]✓[/green] oed-concordance-match: [bold]{stats['entries']}[/bold] lemma entries checked — "
+                  f"{stats['accepted']} accepted, {stats['pruned']} pruned, "
+                  f"{stats['rejected']} rejected, {stats['unique']} unique")
 
 
 @app.command()

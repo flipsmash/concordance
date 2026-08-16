@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
+import OedMatchBadge from './OedMatchBadge'
 import './Authors.css'
 import './OedEntryDetail.css'
 
@@ -48,6 +49,12 @@ function OedEntryDetail() {
         )}
         {entry.pronunciation_needs_review && (
           <span className="oed-review-badge">needs review</span>
+        )}
+        <OedMatchBadge match={entry.concordance_match} />
+        {entry.concordance_word_id != null && (
+          <Link to={`/words/${entry.concordance_word_id}`} className="oed-back-link">
+            View matching concordance word →
+          </Link>
         )}
       </section>
 

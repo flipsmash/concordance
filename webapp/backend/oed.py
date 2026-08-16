@@ -63,6 +63,8 @@ class OedEntryRow(BaseModel):
     pronunciation_ipa: str | None
     pronunciation_needs_review: bool
     first_definition: str | None
+    concordance_match: str | None  # 'accepted' | 'pruned' | 'rejected' | 'unique' | null (not yet
+                                    # checked, or not a lemma entry -- see oed-concordance-match)
 
 
 class OedEntryPage(BaseModel):
@@ -85,6 +87,7 @@ def oed_entries(
     volume_id: int | None = None,
     letter: str | None = Query(None, min_length=1, max_length=1),
     needs_review: bool | None = None,
+    concordance_match: Literal["accepted", "pruned", "rejected", "unique", "unchecked"] | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     sort: Literal["headword", "page_number", "created_at"] = "headword",
@@ -108,6 +111,11 @@ def oed_entries(
     if needs_review is not None:
         filters.append("e.pronunciation_needs_review = %s")
         params.append(needs_review)
+    if concordance_match == "unchecked":
+        filters.append("e.lemma AND e.concordance_match IS NULL")
+    elif concordance_match is not None:
+        filters.append("e.concordance_match = %s")
+        params.append(concordance_match)
     where = " AND ".join(filters) if filters else "true"
 
     order_col = _SORT_COLUMNS[sort]
@@ -120,7 +128,7 @@ def oed_entries(
         cur.execute(
             f"""SELECT e.id, e.headword, e.homograph_number, e.part_of_speech,
                        e.page_number, e.volume_id, e.pronunciation_ipa,
-                       e.pronunciation_needs_review
+                       e.pronunciation_needs_review, e.concordance_match
                 FROM {OED_SCHEMA}.entry e
                 WHERE {where}
                 ORDER BY {order_col} {order_dir}, e.id ASC
@@ -150,6 +158,7 @@ def oed_entries(
             id=r[0], headword=r[1], homograph_number=r[2], part_of_speech=r[3],
             page_number=r[4], volume_id=r[5], pronunciation_ipa=r[6],
             pronunciation_needs_review=r[7], first_definition=first_def_by_entry.get(r[0]),
+            concordance_match=r[8],
         )
         for r in rows
     ]
@@ -186,6 +195,9 @@ class OedEntryDetail(BaseModel):
     pronunciation_ipa: str | None
     pronunciation_raw: str | None
     pronunciation_needs_review: bool
+    concordance_match: str | None
+    concordance_word_id: int | None  # set only for 'accepted'/'pruned' -- links to the matching
+                                      # concordance.word row; null for 'rejected'/'unique'/unchecked
     definitions: list[OedDefinitionOut]
 
 
@@ -195,13 +207,20 @@ def oed_entry_detail(entry_id: int, _: dict = Depends(_main.require_admin)) -> O
         cur.execute(
             f"""SELECT id, volume_id, headword, homograph_number, part_of_speech,
                        etymology, entry_type, page_number, raw_text,
-                       pronunciation_ipa, pronunciation_raw, pronunciation_needs_review
+                       pronunciation_ipa, pronunciation_raw, pronunciation_needs_review,
+                       concordance_match, headword_norm
                 FROM {OED_SCHEMA}.entry WHERE id = %s""",
             (entry_id,),
         )
         entry_row = cur.fetchone()
         if entry_row is None:
             raise HTTPException(status_code=404, detail="entry not found")
+
+        concordance_word_id = None
+        if entry_row[12] in ("accepted", "pruned"):
+            cur.execute(f"SELECT id FROM {_main.SCHEMA}.word WHERE lemma_lc = %s", (entry_row[13],))
+            match_row = cur.fetchone()
+            concordance_word_id = match_row[0] if match_row else None
 
         cur.execute(
             f"""SELECT id, sense_label, definition_text
@@ -242,5 +261,6 @@ def oed_entry_detail(entry_id: int, _: dict = Depends(_main.require_admin)) -> O
         etymology=entry_row[5], entry_type=entry_row[6], page_number=entry_row[7],
         raw_text=entry_row[8], pronunciation_ipa=entry_row[9],
         pronunciation_raw=entry_row[10], pronunciation_needs_review=entry_row[11],
+        concordance_match=entry_row[12], concordance_word_id=concordance_word_id,
         definitions=definitions,
     )

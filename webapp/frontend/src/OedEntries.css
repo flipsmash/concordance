@@ -44,3 +44,39 @@
   border-radius: 4px;
   padding: 1px 6px;
 }
+
+/* concordance_match badge -- see oed-concordance-match. Color follows the
+   same semantics as the rest of the app: accept-green for a currently
+   active word, danger-red for a rejected one, accent-blue for 'unique'
+   (novel, not yet in concordance at all -- the interesting case, not a
+   problem), and a plain neutral border for 'pruned' (was accepted, isn't
+   any more -- neither good nor bad news on its own). */
+.oed-match-badge {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-radius: 4px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+.oed-match-badge.match-accepted {
+  color: var(--accept);
+  border: 1px solid var(--accept);
+}
+
+.oed-match-badge.match-pruned {
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.oed-match-badge.match-rejected {
+  color: var(--danger);
+  border: 1px solid var(--danger);
+}
+
+.oed-match-badge.match-unique {
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}

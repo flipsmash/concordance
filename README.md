@@ -808,6 +808,27 @@ are acquired. One exception to "not merged into" the vocabulary pipeline
 above: `oed-ipa` (see "Pronunciation audio") reads this schema's verified
 pronunciations back into `word.ipa` for words that still lack one.
 
+- **`oed-lemma`** — flags each entry's `lemma` column: is its headword the
+  base/citation form, or an inflected form OED gave its own entry (e.g.
+  "abandoned"/"ppl. a" derived from "abandon")? Two-tier: OED's own POS tag
+  when present, spaCy's context-free guess otherwise.
+- **`oed-concordance-match`** — cross-references every lemma-flagged entry
+  against concordance's own vocabulary, tagging `oed.entry.concordance_match`
+  as `accepted` (active `concordance.word` row), `pruned` (deactivated
+  `concordance.word` row), `rejected` (matches `rejected_lemma_index`, no
+  word row), or `unique` (no match anywhere in concordance). Incremental by
+  default — only never-checked entries and previously-`unique` ones are
+  re-run, since a `unique` verdict can go stale as concordance's vocabulary
+  grows via `ingest`, while the other three states are settled once matched.
+  Surfaced admin-side as a filter + badge on the OED entries browser and
+  detail page, with a link back to the matching `concordance.word` when one
+  exists.
+
+```bash
+concordance oed-lemma               # flag lemma vs. inflected-form entries
+concordance oed-concordance-match   # cross-reference lemma entries against concordance
+```
+
 ## Running the local model (RTX 3060, 12 GB)
 
 The judge talks to `llama.cpp` through the `llama-cpp-python` bindings — no

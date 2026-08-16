@@ -123,6 +123,25 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> None
         cur.execute(f"CREATE INDEX IF NOT EXISTS entry_lemma_idx ON {schema}.entry (lemma) WHERE lemma")
         cur.execute(f"CREATE INDEX IF NOT EXISTS entry_lemma_uncomputed_idx ON {schema}.entry (id) "
                     f"WHERE lemma_computed_at IS NULL")
+
+        # Cross-reference against concordance.word (both active and pruned
+        # rows) / concordance.rejected_word (via the precomputed
+        # rejected_lemma_index) for lemma entries only -- see
+        # compute_concordance_match. NULL concordance_match_checked_at means
+        # not yet checked, same convention as lemma_computed_at above.
+        # 'unique' (no match anywhere in concordance) is the one state that
+        # isn't permanent -- concordance's vocabulary keeps growing, so a
+        # 'unique' entry today may gain a match later; 'accepted'/'pruned'/
+        # 'rejected' are treated as settled once found. The partial index
+        # below encodes that exact re-check rule so the incremental query
+        # in compute_concordance_match can use it directly.
+        cur.execute(f"ALTER TABLE {schema}.entry ADD COLUMN IF NOT EXISTS concordance_match text "
+                    f"CHECK (concordance_match IN ('accepted', 'pruned', 'rejected', 'unique'))")
+        cur.execute(f"ALTER TABLE {schema}.entry ADD COLUMN IF NOT EXISTS concordance_match_checked_at timestamptz")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS entry_concordance_match_idx "
+                    f"ON {schema}.entry (concordance_match)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS entry_concordance_match_todo_idx ON {schema}.entry (id) "
+                    f"WHERE lemma AND (concordance_match_checked_at IS NULL OR concordance_match = 'unique')")
     conn.commit()
 
 
@@ -327,6 +346,76 @@ def compute_lemma_flags(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA, 
             cur.execute(
                 f"UPDATE {schema}.entry SET lemma = %s, lemma_computed_at = now() WHERE id = %s",
                 (is_lemma, entry_id))
+            if i % commit_every == 0:
+                conn.commit()
+    conn.commit()
+    return stats
+
+
+def compute_concordance_match(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA,
+                              main_schema: str = "concordance", *,
+                              only_missing: bool = True, limit: int = 0,
+                              commit_every: int = 500) -> dict:
+    """Cross-references every lemma-flagged oed.entry against
+    concordance.word (both active and pruned rows) and concordance's
+    precomputed rejected_lemma_index, tagging entry.concordance_match /
+    concordance_match_checked_at. Only entries with lemma=true are
+    checked -- see cli.py's oed-concordance-match docstring for why
+    (inflected-form headwords are noise for this cross-reference).
+
+    Priority when a headword_norm could match more than one source: a row
+    in concordance.word wins over rejected_lemma_index -- a word can
+    legitimately be BOTH (once accepted then later pruned, AND separately
+    rejected for the same lemma in a different book's ingest), and
+    word-table presence is the more specific, more current signal.
+    'accepted' (word.active) vs 'pruned' (word row exists but inactive)
+    is a deliberate third state, not collapsed into either neighbor --
+    this project already treats pruned/inactive words as meaningful
+    signal elsewhere (difficulty modeling), not noise.
+
+    only_missing=True (default) re-checks entries never checked OR whose
+    last verdict was 'unique' -- concordance.word/rejected_word both keep
+    growing via ingest, so 'unique' isn't a permanent fact the way
+    'accepted'/'pruned'/'rejected' are (once matched, a word's history in
+    concordance doesn't un-happen). entry_concordance_match_todo_idx (see
+    apply_schema) is this exact WHERE clause as a partial index, so this
+    stays cheap to re-run after the first full pass, the same shape as
+    every other only_missing backfill in this project."""
+    where = ("WHERE lemma AND (concordance_match_checked_at IS NULL OR concordance_match = 'unique')"
+             if only_missing else "WHERE lemma")
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT id, headword_norm FROM {schema}.entry {where} ORDER BY id"
+                    + (f" LIMIT {int(limit)}" if limit else ""))
+        rows = cur.fetchall()
+
+    stats = {"entries": len(rows), "accepted": 0, "pruned": 0, "rejected": 0, "unique": 0}
+    if not rows:
+        return stats
+
+    # Bulk lookups, not one query per entry -- same "one query for every
+    # candidate, not N+1" shape pronunciation_lexicon already uses for this
+    # exact cross-schema (oed -> concordance) direction.
+    headwords = sorted({hw for _id, hw in rows})
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT lemma_lc, active FROM {main_schema}.word WHERE lemma_lc = ANY(%s)", (headwords,))
+        word_active = dict(cur.fetchall())
+        cur.execute(f"SELECT lemma_lc FROM {main_schema}.rejected_lemma_index WHERE lemma_lc = ANY(%s)",
+                    (headwords,))
+        rejected = {r[0] for r in cur.fetchall()}
+
+    with conn.cursor() as cur:
+        for i, (entry_id, headword_norm) in enumerate(rows, 1):
+            if headword_norm in word_active:
+                match = "accepted" if word_active[headword_norm] else "pruned"
+            elif headword_norm in rejected:
+                match = "rejected"
+            else:
+                match = "unique"
+            stats[match] += 1
+            cur.execute(
+                f"UPDATE {schema}.entry SET concordance_match = %s, concordance_match_checked_at = now() "
+                f"WHERE id = %s",
+                (match, entry_id))
             if i % commit_every == 0:
                 conn.commit()
     conn.commit()

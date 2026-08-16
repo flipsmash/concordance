@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import AlphabetStrip from './AlphabetStrip'
+import OedMatchBadge from './OedMatchBadge'
 import SortControl from './SortControl'
 import { usePagedTable } from './usePagedTable'
 import './Authors.css'
@@ -8,6 +9,15 @@ import './OedEntries.css'
 
 const API_BASE = ''
 const PAGE_SIZE = 50
+
+const MATCH_FILTER_OPTIONS = [
+  { value: '', label: 'Any concordance match' },
+  { value: 'unchecked', label: 'Not yet checked' },
+  { value: 'accepted', label: 'In concordance' },
+  { value: 'pruned', label: 'Pruned from concordance' },
+  { value: 'rejected', label: 'Rejected in concordance' },
+  { value: 'unique', label: 'Not in concordance' },
+]
 
 const SORT_FIELDS = [
   { key: 'headword', label: 'Headword (A–Z)' },
@@ -27,6 +37,7 @@ function OedEntries() {
   const [letter, setLetter] = useState(null)
   const [volumeId, setVolumeId] = useState('')
   const [needsReview, setNeedsReview] = useState(false)
+  const [concordanceMatch, setConcordanceMatch] = useState('')
   const [volumes, setVolumes] = useState([])
 
   useEffect(() => {
@@ -46,7 +57,11 @@ function OedEntries() {
     pageSize: PAGE_SIZE,
     defaultSort: 'headword',
     defaultDir: 'asc',
-    extraParams: { q: debounced, volume_id: volumeId, letter, needs_review: needsReview || undefined },
+    extraParams: {
+      q: debounced, volume_id: volumeId, letter,
+      needs_review: needsReview || undefined,
+      concordance_match: concordanceMatch || undefined,
+    },
   })
 
   function changeLetter(l) {
@@ -61,6 +76,11 @@ function OedEntries() {
 
   function changeNeedsReview(v) {
     setNeedsReview(v)
+    setPage(1)
+  }
+
+  function changeConcordanceMatch(v) {
+    setConcordanceMatch(v)
     setPage(1)
   }
 
@@ -95,6 +115,11 @@ function OedEntries() {
           />
           Needs pronunciation review
         </label>
+        <select value={concordanceMatch} onChange={(e) => changeConcordanceMatch(e.target.value)}>
+          {MATCH_FILTER_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
         <SortControl fields={SORT_FIELDS} sort={sort} dir={dir} onSort={handleSort} />
       </div>
 
@@ -129,6 +154,7 @@ function OedEntries() {
               {e.pronunciation_needs_review && (
                 <span className="oed-review-badge">needs review</span>
               )}
+              <OedMatchBadge match={e.concordance_match} />
             </span>
           </li>
         ))}

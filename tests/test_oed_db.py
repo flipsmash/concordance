@@ -162,3 +162,89 @@ def test_compute_lemma_flags_backfills_only_uncomputed_entries():
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
     conn.close()
+
+
+@pg
+def test_compute_concordance_match_all_four_states_and_recheck_policy():
+    oed_schema = "oed_test_match"
+    main_schema = "cc_test_oedmatch_main"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {oed_schema} CASCADE")
+        cur.execute(f"DROP SCHEMA IF EXISTS {main_schema} CASCADE")
+    conn.commit()
+    oed_db.apply_schema(conn, oed_schema)
+    db.apply_schema(conn, main_schema)
+
+    volume_id = oed_db.upsert_volume(conn, file_name="test.pdf", file_hash_="matchtest",
+                                      volume_label="Test Volume", page_count=1, schema=oed_schema)
+
+    def _lemma_entry(headword):
+        eid = oed_db.insert_entry(
+            conn, volume_id=volume_id, headword=headword, homograph_number=None,
+            part_of_speech=None, etymology=None, entry_type="main", parent_entry_id=None,
+            page_number=1, raw_text="raw", schema=oed_schema)
+        with conn.cursor() as cur:
+            cur.execute(f"UPDATE {oed_schema}.entry SET lemma = true, lemma_computed_at = now() WHERE id = %s",
+                        (eid,))
+        return eid
+
+    accepted_id = _lemma_entry("keeper")     # active concordance.word row
+    pruned_id = _lemma_entry("archaism")     # concordance.word row, active=false
+    rejected_id = _lemma_entry("misprint")   # only in rejected_lemma_index
+    unique_id = _lemma_entry("zyzzyva")      # nowhere in concordance
+    not_lemma_id = oed_db.insert_entry(      # lemma=false (default) -- must be skipped entirely
+        conn, volume_id=volume_id, headword="running", homograph_number=None,
+        part_of_speech=None, etymology=None, entry_type="main", parent_entry_id=None,
+        page_number=1, raw_text="raw", schema=oed_schema)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(f"INSERT INTO {main_schema}.word (lemma, definition, active) VALUES ('keeper', 'def', true)")
+        cur.execute(f"INSERT INTO {main_schema}.word (lemma, definition, active) VALUES ('archaism', 'def', false)")
+        cur.execute(f"INSERT INTO {main_schema}.book (title) VALUES ('Test Book') RETURNING id")
+        book_id = cur.fetchone()[0]
+        cur.execute(f"INSERT INTO {main_schema}.rejected_word (book_id, lemma, reason) VALUES (%s, 'misprint', 'not_a_word')",
+                    (book_id,))
+    conn.commit()
+    db.refresh_rejected_lemma_index(conn, main_schema)
+
+    stats = oed_db.compute_concordance_match(conn, oed_schema, main_schema)
+    assert stats == {"entries": 4, "accepted": 1, "pruned": 1, "rejected": 1, "unique": 1}
+
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT concordance_match FROM {oed_schema}.entry WHERE id = %s", (accepted_id,))
+        assert cur.fetchone()[0] == "accepted"
+        cur.execute(f"SELECT concordance_match FROM {oed_schema}.entry WHERE id = %s", (pruned_id,))
+        assert cur.fetchone()[0] == "pruned"
+        cur.execute(f"SELECT concordance_match FROM {oed_schema}.entry WHERE id = %s", (rejected_id,))
+        assert cur.fetchone()[0] == "rejected"
+        cur.execute(f"SELECT concordance_match FROM {oed_schema}.entry WHERE id = %s", (unique_id,))
+        assert cur.fetchone()[0] == "unique"
+        # Never touched -- lemma=false entries aren't in this cross-reference's scope at all.
+        cur.execute(f"SELECT concordance_match FROM {oed_schema}.entry WHERE id = %s", (not_lemma_id,))
+        assert cur.fetchone()[0] is None
+
+    # Re-run with only_missing=True (the default): settled states
+    # (accepted/pruned/rejected) are left alone; only 'unique' is re-checked.
+    stats2 = oed_db.compute_concordance_match(conn, oed_schema, main_schema)
+    assert stats2["entries"] == 1
+    assert stats2["unique"] == 1
+
+    # Concordance gains the word that used to be 'unique' -- next run picks
+    # it up and flips it, proving 'unique' really is re-checked, not just
+    # re-selected-and-ignored.
+    with conn.cursor() as cur:
+        cur.execute(f"INSERT INTO {main_schema}.word (lemma, definition, active) VALUES ('zyzzyva', 'def', true)")
+    conn.commit()
+    stats3 = oed_db.compute_concordance_match(conn, oed_schema, main_schema)
+    assert stats3 == {"entries": 1, "accepted": 1, "pruned": 0, "rejected": 0, "unique": 0}
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT concordance_match FROM {oed_schema}.entry WHERE id = %s", (unique_id,))
+        assert cur.fetchone()[0] == "accepted"
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {oed_schema} CASCADE")
+        cur.execute(f"DROP SCHEMA {main_schema} CASCADE")
+    conn.commit()
+    conn.close()
