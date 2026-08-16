@@ -113,6 +113,14 @@ class QuizStartRequest(BaseModel):
     pos: list[str] | None = None
     domains: list[str] | None = None  # usas_domains.DOMAIN_BUCKETS keys (the same 6
                                        # buckets /api/graph/legend uses), not raw USAS codes
+    authors: list[str] | None = None  # book.author values (plain text, no author table --
+                                       # see db.py); a word qualifies if it's in ANY book by
+                                       # ANY of these authors
+    book_ids: list[int] | None = None  # word must appear in ANY of these specific books.
+                                        # Combined with `authors` as OR, not AND -- "words from
+                                        # these authors OR these specific books" is one pool,
+                                        # not a narrowing intersection (unlike browse.py's
+                                        # author/book_id filters, which DO intersect).
     direction: Literal["definition_to_word", "word_to_definition"] = "definition_to_word"
     smart_vs_random_ratio: float = Field(0.7, ge=0.0, le=1.0)
     strategy_weights: dict[str, float] = Field(
@@ -276,6 +284,7 @@ def _select_target_words(conn, body: QuizStartRequest, count: int, exclude_ids: 
                             WHERE wc.word_id = w.id AND left(c.code, 1) = ANY(%s))"""
             )
             params.append(codes)
+    _add_book_author_filter(body, filters, params)
     where = " AND ".join(filters)
 
     # Spaced repetition is a preference, never a hard filter: eligible (or
@@ -303,6 +312,32 @@ def _select_target_words(conn, body: QuizStartRequest, count: int, exclude_ids: 
         )
         rows = cur.fetchall()
     return [{"id": r[0], "lemma": r[1], "quiz_definition": r[2], "pos": r[3]} for r in rows]
+
+
+def _add_book_author_filter(body: QuizStartRequest, filters: list[str], params: list) -> None:
+    """Shared by _select_target_words/_select_analogy_targets (everything
+    else in those two is deliberately duplicated rather than factored out --
+    see _select_analogy_targets' own docstring -- but this one filter is
+    identical in both, so it's pulled out rather than copy-pasted a third
+    time). `authors`/`book_ids` combine as OR within this one EXISTS, not
+    AND against the rest of `filters`: a word qualifies if it's in ANY
+    book by ANY of `authors`, OR in ANY of `book_ids` -- one combined pool,
+    not an intersection (unlike browse.py's author/book_id filters, which
+    narrow each other)."""
+    if not (body.authors or body.book_ids):
+        return
+    or_clauses = []
+    if body.authors:
+        or_clauses.append("b.author = ANY(%s)")
+        params.append(body.authors)
+    if body.book_ids:
+        or_clauses.append("wb.book_id = ANY(%s)")
+        params.append(body.book_ids)
+    filters.append(
+        f"""EXISTS (SELECT 1 FROM {_main.SCHEMA}.word_book wb
+                    JOIN {_main.SCHEMA}.book b ON b.id = wb.book_id
+                    WHERE wb.word_id = w.id AND ({' OR '.join(or_clauses)}))"""
+    )
 
 
 def _select_analogy_targets(conn, body: QuizStartRequest, count: int, exclude_ids: set[int],
@@ -334,6 +369,7 @@ def _select_analogy_targets(conn, body: QuizStartRequest, count: int, exclude_id
                     JOIN {_main.SCHEMA}.word_relation_edge e ON e.term_a_id = t.id
                     WHERE t.word_id = w.id AND e.verification_status = 'verified')"""
     )
+    _add_book_author_filter(body, filters, params)
     where = " AND ".join(filters)
 
     order_by = "random()"

@@ -182,6 +182,86 @@ def test_quiz_round_trip_and_admin_settings_http():
         cleanup.close()
 
 
+@pg
+def test_select_target_words_filters_by_author_and_book_id_as_or():
+    # Whitebox, same rationale as the personal-difficulty test above:
+    # _select_target_words is where the author/book_id filter actually
+    # lives, so exercise it directly rather than through the full HTTP
+    # question-build pipeline.
+    from webapp.backend import main
+    from webapp.backend import quiz as quiz_module
+
+    schema = "cc_test_quiz_author_book_select"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    def _word(lemma):
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""INSERT INTO {schema}.word (lemma, definition, quiz_definition, part_of_speech, active)
+                    VALUES (%s, %s, %s, 'noun', true) RETURNING id""",
+                (lemma, f"definition {lemma}", f"quiz definition {lemma}"),
+            )
+            wid = cur.fetchone()[0]
+            cur.execute(
+                f"INSERT INTO {schema}.word_difficulty (word_id, quizzable, difficulty) VALUES (%s, true, 50.0)",
+                (wid,))
+        return wid
+
+    with conn.cursor() as cur:
+        cur.execute(f"INSERT INTO {schema}.book (title, author) VALUES ('Book One', 'Author One') RETURNING id")
+        book1_id = cur.fetchone()[0]
+        cur.execute(f"INSERT INTO {schema}.book (title, author) VALUES ('Book Two', 'Author Two') RETURNING id")
+        book2_id = cur.fetchone()[0]
+
+    word_book1 = _word("wordinbookone")
+    word_book2 = _word("wordinbooktwo")
+    word_unlinked = _word("wordwithnobook")
+    with conn.cursor() as cur:
+        cur.execute(f"INSERT INTO {schema}.word_book (word_id, book_id) VALUES (%s, %s)", (word_book1, book1_id))
+        cur.execute(f"INSERT INTO {schema}.word_book (word_id, book_id) VALUES (%s, %s)", (word_book2, book2_id))
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(f"INSERT INTO {schema}.users (username, password_hash) VALUES ('authorbookuser', %s) RETURNING id",
+                    (auth.hash_password("password123"),))
+        user_id = cur.fetchone()[0]
+    conn.commit()
+
+    old_schema = main.SCHEMA
+    main.SCHEMA = schema
+    try:
+        # No author/book_id filter -- baseline, everything qualifies.
+        body_all = quiz_module.QuizStartRequest(length=1)
+        pool_all = quiz_module._select_target_words(conn, body_all, 100, set(), user_id)
+        assert {w["lemma"] for w in pool_all} == {"wordinbookone", "wordinbooktwo", "wordwithnobook"}
+
+        # authors alone: only the word from that author's book.
+        body_author = quiz_module.QuizStartRequest(length=1, authors=["Author One"])
+        pool_author = quiz_module._select_target_words(conn, body_author, 100, set(), user_id)
+        assert [w["lemma"] for w in pool_author] == ["wordinbookone"]
+
+        # book_ids alone: only the word from that specific book.
+        body_book = quiz_module.QuizStartRequest(length=1, book_ids=[book2_id])
+        pool_book = quiz_module._select_target_words(conn, body_book, 100, set(), user_id)
+        assert [w["lemma"] for w in pool_book] == ["wordinbooktwo"]
+
+        # both together: OR, not AND -- the union of both, not their intersection
+        # (which would be empty here, since neither word is in both).
+        body_both = quiz_module.QuizStartRequest(length=1, authors=["Author One"], book_ids=[book2_id])
+        pool_both = quiz_module._select_target_words(conn, body_both, 100, set(), user_id)
+        assert {w["lemma"] for w in pool_both} == {"wordinbookone", "wordinbooktwo"}
+    finally:
+        main.SCHEMA = old_schema
+        with conn.cursor() as cur:
+            cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        conn.commit()
+        conn.close()
+
+
 def _seed_corpus_at_difficulty(conn, schema: str, prefix: str, n: int, difficulty: float) -> None:
     with conn.cursor() as cur:
         for i in range(n):
@@ -733,6 +813,55 @@ def _seed_analogy_fixture(conn, schema: str, n_plain: int = 6) -> dict:
             )
     conn.commit()
     return wid
+
+
+@pg
+def test_select_analogy_targets_also_respects_author_book_filter():
+    # Same filter, same helper (_add_book_author_filter) as
+    # _select_target_words -- confirms it's actually wired into THIS
+    # function too, not just copy-paste-missed.
+    from webapp.backend import main
+    from webapp.backend import quiz as quiz_module
+
+    schema = "cc_test_quiz_analogy_author_book_select"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+    wid = _seed_analogy_fixture(conn, schema, n_plain=0)
+
+    with conn.cursor() as cur:
+        cur.execute(f"INSERT INTO {schema}.book (title, author) VALUES ('Fetter Book', 'Fetter Author') RETURNING id")
+        book_id = cur.fetchone()[0]
+        cur.execute(f"INSERT INTO {schema}.word_book (word_id, book_id) VALUES (%s, %s)", (wid["fetter"], book_id))
+        cur.execute(f"INSERT INTO {schema}.users (username, password_hash) VALUES ('analogyauthoruser', %s) RETURNING id",
+                    (auth.hash_password("password123"),))
+        user_id = cur.fetchone()[0]
+    conn.commit()
+
+    old_schema = main.SCHEMA
+    main.SCHEMA = schema
+    try:
+        # Unfiltered: both term_a-side words (the eligibility clause only
+        # matches e.term_a_id, so "shackle"/"vambrace" -- term_b only in
+        # this fixture -- are never in this pool regardless of filtering).
+        body_all = quiz_module.QuizStartRequest(length=1, types=["analogy"])
+        pool_all = quiz_module._select_analogy_targets(conn, body_all, 100, set(), user_id)
+        assert {w["lemma"] for w in pool_all} == {"fetter", "gauntlet"}
+
+        # Filtered to the author whose only linked word is "fetter" -- the
+        # unlinked "gauntlet" must drop out too, same as it would for a
+        # plain mc/true_false pool.
+        body_author = quiz_module.QuizStartRequest(length=1, types=["analogy"], authors=["Fetter Author"])
+        pool_author = quiz_module._select_analogy_targets(conn, body_author, 100, set(), user_id)
+        assert {w["lemma"] for w in pool_author} == {"fetter"}
+    finally:
+        main.SCHEMA = old_schema
+        with conn.cursor() as cur:
+            cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        conn.commit()
+        conn.close()
 
 
 @pg

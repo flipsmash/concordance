@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import MultiSelect from './MultiSelect'
+import TypeaheadMultiChips from './TypeaheadMultiChips'
+import './Browse.css' // .author-select* -- reused here for the author/book multi-select
 import './QuizConfig.css'
 
 const API_BASE = ''
@@ -31,6 +33,8 @@ function QuizConfig() {
   const [difficultyMax, setDifficultyMax] = useState('')
   const [pos, setPos] = useState([])
   const [domains, setDomains] = useState([])
+  const [authors, setAuthors] = useState([])   // [{id: authorString, label: authorString, sublabel: word_count}]
+  const [books, setBooks] = useState([])       // [{id: bookId, label: title, sublabel: word_count}]
   const [smartRatio, setSmartRatio] = useState(70)
   const [weights, setWeights] = useState({ orthographic: 34, semantic: 33, domain: 33 })
   const [srEnabled, setSrEnabled] = useState(false)
@@ -44,6 +48,25 @@ function QuizConfig() {
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error('failed to load options'))))
       .then(setMeta)
       .catch((err) => setMetaError(err.message))
+  }, [])
+
+  // Same endpoints AuthorSelect/BookSelect already use elsewhere; a corpus
+  // this size (thousands of authors/books) rules out a flat MultiSelect
+  // fetch-everything list, so this stays typeahead-driven like those two.
+  const fetchAuthorItems = useCallback((q) => {
+    const params = new URLSearchParams({ page_size: '20' })
+    if (q) params.set('q', q)
+    return fetch(`${API_BASE}/api/browse/authors?${params}`)
+      .then((res) => res.json())
+      .then((data) => data.items.map((a) => ({ id: a.author, label: a.author, sublabel: a.word_count })))
+  }, [])
+
+  const fetchBookItems = useCallback((q) => {
+    const params = new URLSearchParams({ page_size: '20', sort: 'word_count', dir: 'desc' })
+    if (q) params.set('q', q)
+    return fetch(`${API_BASE}/api/browse/books?${params}`)
+      .then((res) => res.json())
+      .then((data) => data.items.map((b) => ({ id: b.id, label: b.title, sublabel: b.word_count })))
   }, [])
 
   function handleWeightChange(key, value) {
@@ -84,6 +107,8 @@ function QuizConfig() {
         difficulty_max: difficultyMax === '' ? null : Number(difficultyMax),
         pos: pos.length ? pos : null,
         domains: domains.length ? domains : null,
+        authors: authors.length ? authors.map((a) => a.id) : null,
+        book_ids: books.length ? books.map((b) => b.id) : null,
         spaced_repetition_enabled: srEnabled,
         spaced_repetition_frequency: srFrequency,
         smart_vs_random_ratio: smartRatio / 100,
@@ -224,6 +249,31 @@ function QuizConfig() {
               />
             </label>
           </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Source</legend>
+          <div className="quiz-filter-row">
+            <TypeaheadMultiChips
+              label="Authors"
+              placeholder="Add an author…"
+              fetchItems={fetchAuthorItems}
+              selected={authors}
+              onChange={setAuthors}
+            />
+            <TypeaheadMultiChips
+              label="Books"
+              placeholder="Add a book…"
+              fetchItems={fetchBookItems}
+              selected={books}
+              onChange={setBooks}
+            />
+          </div>
+          <p className="quiz-config-hint">
+            Leave both empty to draw from the whole vocabulary. Pick either or both to limit
+            questions to words appearing in books by these authors, or in these specific books
+            (combined together, not narrowed against each other).
+          </p>
         </fieldset>
 
         <fieldset>

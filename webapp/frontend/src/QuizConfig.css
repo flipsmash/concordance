@@ -101,6 +101,28 @@
   gap: 10px;
 }
 
+/* TypeaheadMultiChips wrapper -- the chip/input/dropdown pieces themselves
+   reuse Browse.css's .author-select* rules (imported in QuizConfig.jsx). */
+.typeahead-multi {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 220px;
+}
+
+.typeahead-multi-label {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.typeahead-multi-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
 .quiz-difficulty-row {
   display: flex;
   gap: 16px;
