@@ -59,8 +59,8 @@ function Home() {
       <div className="home-title-block">
         <LogoMark width={340} className="home-logo" />
         <p className="home-subtitle">
-          concordance, <em>n.</em> — an alphabetical list of the principal words in a body of work,
-          with the passages in which they occur.
+          concordance, <em>n.</em> — a state of agreement or harmony, or an alphabetical list of the
+          principal words in a body of work, with the passages in which they occur.
         </p>
       </div>
 
