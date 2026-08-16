@@ -883,6 +883,44 @@ def test_browse_books_returns_genre_tags_without_corrupting_difficulty_aggregate
 
 
 @pg
+def test_browse_books_filters_by_genre():
+    schema = "cc_test_browse_genre_filter"
+    client, conn, restore = _setup(schema)
+    try:
+        fantasy_book = _insert_book(conn, schema, "Fantasy Book", author="Author One")
+        history_book = _insert_book(conn, schema, "History Book", author="Author One")
+        both_book = _insert_book(conn, schema, "Both Genres Book", author="Author Two")
+
+        w1 = _insert_word(conn, schema, "w1")
+        w2 = _insert_word(conn, schema, "w2")
+        w3 = _insert_word(conn, schema, "w3")
+        _link(conn, schema, w1, fantasy_book)
+        _link(conn, schema, w2, history_book)
+        _link(conn, schema, w3, both_book)
+
+        with conn.cursor() as cur:
+            cur.execute(f"INSERT INTO {schema}.book_genre (book_id, genre, source) VALUES (%s,'Fantasy','llm')",
+                        (fantasy_book,))
+            cur.execute(f"INSERT INTO {schema}.book_genre (book_id, genre, source) VALUES (%s,'History','llm')",
+                        (history_book,))
+            cur.execute(f"INSERT INTO {schema}.book_genre (book_id, genre, source) VALUES (%s,'Fantasy','llm')",
+                        (both_book,))
+            cur.execute(f"INSERT INTO {schema}.book_genre (book_id, genre, source) VALUES (%s,'History','llm')",
+                        (both_book,))
+        conn.commit()
+
+        fantasy_titles = {b["title"] for b in client.get("/api/browse/books", params={"genre": "Fantasy"}).json()["items"]}
+        assert fantasy_titles == {"Fantasy Book", "Both Genres Book"}
+
+        # Multiple genre values are OR'd, not AND'd -- matches ANY of them.
+        either_titles = {b["title"] for b in
+                         client.get("/api/browse/books", params={"genre": ["Fantasy", "History"]}).json()["items"]}
+        assert either_titles == {"Fantasy Book", "History Book", "Both Genres Book"}
+    finally:
+        restore()
+
+
+@pg
 def test_combined_facets_intersect_regardless_of_which_is_set_first():
     schema = "cc_test_browse_combined"
     client, conn, restore = _setup(schema)

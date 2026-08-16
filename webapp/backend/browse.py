@@ -812,6 +812,8 @@ def browse_books(
     archaic: list[str] = Query([]),
     pos: list[str] = Query([]),
     quizzable_only: bool = False,
+    genre: list[str] = Query([]),  # concordance.genre.GENRE_LIST tags -- ANY match, deep-linked
+                                    # from WorkDetail.jsx's clickable genre pills
     unique_word_bucket: str | None = None,
     overall_difficulty_band: str | None = None,  # a label /api/browse/overall-difficulty-histogram
                                                    # emitted, e.g. "40-60" or "Not enough data" --
@@ -852,6 +854,14 @@ def browse_books(
     if book_id:
         filters.append("b.id = ANY(%s)")
         params.append(book_id)
+    if genre:
+        # Own alias (bgf, not book_genres' `bg`) -- this filter is a plain
+        # EXISTS against `b`, evaluated in `where` before either query's
+        # book_genres CTE exists, so it can't reference that CTE anyway.
+        filters.append(
+            f"EXISTS (SELECT 1 FROM {_main.SCHEMA}.book_genre bgf WHERE bgf.book_id = b.id AND bgf.genre = ANY(%s))"
+        )
+        params.append(genre)
     if q:
         filters.append("b.title ILIKE %s")
         params.append(f"%{q}%")

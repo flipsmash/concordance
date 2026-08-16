@@ -177,9 +177,9 @@ function WorkDetail() {
           {book?.genres?.length > 0 && (
             <div className="work-detail-genres">
               {book.genres.map((g) => (
-                <span key={g} className="work-detail-genre-tag">
+                <Link key={g} to={`/app/books?genre=${encodeURIComponent(g)}`} className="work-detail-genre-tag">
                   {g}
-                </span>
+                </Link>
               ))}
             </div>
           )}

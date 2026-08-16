@@ -33,6 +33,13 @@
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 3px 10px;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.work-detail-genre-tag:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .work-detail-section {

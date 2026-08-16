@@ -49,6 +49,9 @@ function Books() {
   // itself (e.g. "40-60" or "Not enough data") is the whole filter, so
   // there's no min/max pair to seed like fame's.
   const overallDifficultyBand = searchParams.get('overall_difficulty_band')
+  // Same one-way-in pattern, deep-linked from a clickable genre pill on
+  // WorkDetail.jsx (?genre=<tag>).
+  const genre = searchParams.get('genre')
 
   useEffect(() => {
     const handle = setTimeout(() => setDebounced(query.trim()), 200)
@@ -68,6 +71,7 @@ function Books() {
       fame_unscored_only: fameUnscoredOnly,
       unique_word_bucket: uniqueWordBucket,
       overall_difficulty_band: overallDifficultyBand,
+      genre,
     },
   })
 
@@ -89,6 +93,15 @@ function Books() {
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev)
       next.delete('overall_difficulty_band')
+      return next
+    })
+    setPage(1)
+  }
+
+  function clearGenre() {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      next.delete('genre')
       return next
     })
     setPage(1)
@@ -161,7 +174,7 @@ function Books() {
         <SortControl fields={SORT_FIELDS} sort={sort} dir={dir} onSort={handleSort} />
       </div>
 
-      {(uniqueWordBucket || fameUnscoredOnly || overallDifficultyBand) && (
+      {(uniqueWordBucket || fameUnscoredOnly || overallDifficultyBand || genre) && (
         <div className="browse-shelf">
           {uniqueWordBucket && (
             <button type="button" className="browse-chip" onClick={clearUniqueWordBucket}>
@@ -176,6 +189,11 @@ function Books() {
           {overallDifficultyBand && (
             <button type="button" className="browse-chip" onClick={clearOverallDifficultyBand}>
               Difficulty: {overallDifficultyBand} ×
+            </button>
+          )}
+          {genre && (
+            <button type="button" className="browse-chip" onClick={clearGenre}>
+              Genre: {genre} ×
             </button>
           )}
         </div>
