@@ -45,6 +45,18 @@ _SEMANTIC_BAND_MAX = 0.45
 # rather than just a coincidental trigram overlap.
 _ORTHOGRAPHIC_MIN_SIMILARITY = 0.3
 
+# Hard exclusion floor applied to EVERY strategy's candidates (not just "semantic"),
+# distinct from and stricter than _SEMANTIC_BAND_MIN above. word.synonyms (the OTHER
+# synonym-exclusion mechanism -- see module docstring) is empty for many rare/obscure
+# words, so a genuine near-synonym can still slip through: confirmed live, "noctambule"/
+# "noctambulist" (both meaning "sleepwalker", both with an empty synonyms column) --
+# orthographic trigram similarity 0.6 (well past _ORTHOGRAPHIC_MIN_SIMILARITY, which has
+# no meaning-awareness of its own at all) AND definition-embedding distance 0.151 (a hair
+# inside the OLD 0.15 semantic near-miss floor). This floor is checked regardless of which
+# strategy proposed the candidate, precisely because orthographic similarity proved just as
+# capable of surfacing a true synonym as the semantic band was.
+_NEAR_SYNONYM_DISTANCE_FLOOR = 0.20
+
 # How far a last-resort difficulty-band widen reaches, symmetrically, when even random
 # can't fill the requested count under the original band.
 _DEGRADED_WIDEN_POINTS = 15.0
@@ -80,6 +92,46 @@ def _target_info(conn, schema: str, word_id: int) -> tuple[str, list[str]]:
     if row is None:
         raise ValueError(f"word {word_id} not found")
     return row[0], list(row[1] or [])
+
+
+def _embedding_signal(conn, schema: str, word_id: int) -> tuple[object | None, str | None]:
+    """(vector, column_name) for word_id's definition_vector, or its
+    fasttext_vector if that's missing, or (None, None) if neither exists --
+    same column-priority _semantic_band_candidates already uses."""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT definition_vector, fasttext_vector FROM {schema}.word_embedding WHERE word_id = %s",
+                    (word_id,))
+        row = cur.fetchone()
+    if row is None:
+        return None, None
+    for i, col in enumerate(_SIGNAL_COLUMNS):
+        if row[i] is not None:
+            return row[i], col
+    return None, None
+
+
+def _too_similar_ids(conn, schema: str, target_word_id: int, candidate_ids: list,
+                      floor: float = _NEAR_SYNONYM_DISTANCE_FLOOR) -> set[int]:
+    """Candidate word ids whose meaning is too close to the target to be a
+    fair distractor -- checked regardless of which strategy proposed them
+    (see _NEAR_SYNONYM_DISTANCE_FLOOR's own comment). A candidate that
+    doesn't share the target's embedding column (missing data on either
+    side) can't be evaluated and is never included here -- consistent with
+    this module's existing stance elsewhere of not blocking on missing
+    signal (an under-strict check, never an over-strict one)."""
+    ids = [c for c in candidate_ids if c is not None]
+    if not ids:
+        return set()
+    target_vec, col = _embedding_signal(conn, schema, target_word_id)
+    if target_vec is None:
+        return set()
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT word_id FROM {schema}.word_embedding
+                WHERE word_id = ANY(%s) AND {col} IS NOT NULL AND ({col} <=> %s::vector) < %s""",
+            (ids, target_vec, floor),
+        )
+        return {r[0] for r in cur.fetchall()}
 
 
 def _base_filters(pos: str, cfg: DistractorConfig, exclude_ids: set[int], exclude_lemmas: list[str],
@@ -238,6 +290,28 @@ def _select_candidates(conn, schema: str, target_word_id: int, pos: str, cfg: Di
     exclude_ids = set(exclude_word_ids) | {target_word_id}
     picked: list[dict] = []
 
+    def _accept(got: list[dict], strategy: str) -> int:
+        # Checked for every strategy's output, not just "semantic" -- see
+        # _NEAR_SYNONYM_DISTANCE_FLOOR's own comment (orthographic and even
+        # random candidates can turn out to be true synonyms of the target
+        # too, and word.synonyms -- the OTHER exclusion mechanism -- is
+        # empty for many rare/obscure words). Returns the count actually
+        # accepted (not len(got)) -- callers must use this, not len(got),
+        # to track remaining need, or a rejected candidate's slot silently
+        # never gets filled instead of spilling to the next strategy/random
+        # per this function's own documented fallback rule.
+        too_close = _too_similar_ids(conn, schema, target_word_id, [c["id"] for c in got])
+        accepted = 0
+        for c in got:
+            if c["id"] in exclude_ids or c["id"] in too_close:
+                exclude_ids.add(c["id"])
+                continue
+            c["strategy"] = strategy
+            picked.append(c)
+            exclude_ids.add(c["id"])
+            accepted += 1
+        return accepted
+
     smart_count = round(count * cfg.smart_vs_random_ratio)
     active_weights = {k: v for k, v in cfg.strategy_weights.items() if v and v > 0 and k in _STRATEGY_FUNCS}
     total_w = sum(active_weights.values()) or 1.0
@@ -251,24 +325,26 @@ def _select_candidates(conn, schema: str, target_word_id: int, pos: str, cfg: Di
             continue
         got = _STRATEGY_FUNCS[strat](conn, schema, target_word_id, target_lemma, pos, cfg,
                                       exclude_ids, synonyms, require_quiz_definition, alloc)
-        for c in got:
-            if c["id"] in exclude_ids:
-                continue
-            c["strategy"] = strat
-            picked.append(c)
-            exclude_ids.add(c["id"])
-        remaining_smart -= len(got)
+        remaining_smart -= _accept(got, strat)
 
+    # Retried (not just one shot): _random_candidates' own LIMIT is computed
+    # BEFORE the too-similar filter runs, so a batch that happens to include
+    # a near-synonym comes back short after _accept rejects it -- each
+    # retry's exclude_ids already covers everything the previous attempt
+    # saw (accepted or rejected), so it always asks for candidates not yet
+    # tried, converging to either `count` or a genuinely exhausted pool.
+    # Bounded attempts as a defensive cap only; the empty-`got` break is
+    # what actually guarantees termination.
     random_count = (count - len(picked))
     degraded = False
-    if random_count > 0:
+    for _ in range(5):
+        if random_count <= 0:
+            break
         got = _random_candidates(conn, schema, pos, cfg, exclude_ids, synonyms,
                                   require_quiz_definition, random_count)
-        for c in got:
-            c["strategy"] = "random"
-            picked.append(c)
-            exclude_ids.add(c["id"])
-        random_count -= len(got)
+        if not got:
+            break
+        random_count -= _accept(got, "random")
 
     if random_count > 0 and (cfg.difficulty_min is not None or cfg.difficulty_max is not None):
         widened = replace(
@@ -276,13 +352,14 @@ def _select_candidates(conn, schema: str, target_word_id: int, pos: str, cfg: Di
             difficulty_min=None if cfg.difficulty_min is None else max(0.0, cfg.difficulty_min - _DEGRADED_WIDEN_POINTS),
             difficulty_max=None if cfg.difficulty_max is None else min(100.0, cfg.difficulty_max + _DEGRADED_WIDEN_POINTS),
         )
-        got = _random_candidates(conn, schema, pos, widened, exclude_ids, synonyms,
-                                  require_quiz_definition, random_count)
-        for c in got:
-            c["strategy"] = "random"
-            picked.append(c)
-            exclude_ids.add(c["id"])
-        random_count -= len(got)
+        for _ in range(5):
+            if random_count <= 0:
+                break
+            got = _random_candidates(conn, schema, pos, widened, exclude_ids, synonyms,
+                                      require_quiz_definition, random_count)
+            if not got:
+                break
+            random_count -= _accept(got, "random")
         degraded = True
 
     return DistractorResult(candidates=picked, degraded=degraded or random_count > 0)
@@ -450,24 +527,41 @@ def _random_ordinary_candidates(cur, schema: str, d_pos: str, exclude_lemmas: se
 def select_analogy_distractors(conn, schema: str, style: str, d_pos: str, a_lemma: str, b_lemma: str,
                                 c_word_id: int, d_term_id: int, exclusion_lemmas: set[str],
                                 trap_lemmas: list[str], count: int,
-                                exclude_word_ids: set[int] | None = None) -> DistractorResult:
+                                exclude_word_ids: set[int] | None = None,
+                                d_word_id: int | None = None) -> DistractorResult:
     """`count` wrong D-options for an analogy item. `d_pos` is the canonical
     POS (noun/verb/adjective/adverb) of the correct answer D, used to
     POS-match every strategy. `c_word_id` feeds the vocab_only style's
     embedding-offset heuristic; `d_term_id` (D's wn_relation_term id, NOT its
     word id -- D is frequently an ordinary term with no word row at all in
     the one_hard_term style) feeds that style's precomputed sibling-fanout
-    lookup. Every candidate, regardless of source, is checked against
-    `exclusion_lemmas` -- trap and plausibility strategies are equally
-    capable of accidentally proposing a second right answer, and the
-    exclusion set is what polices that (see module docstring above)."""
+    lookup. `d_word_id` is D's own word id when it has one (None for an
+    ordinary WordNet term with no word row, same case as above) -- feeds the
+    near-synonym distance floor below, skipped entirely when None since
+    there's no embedding to check against. Every candidate, regardless of
+    source, is checked against `exclusion_lemmas` (trap and plausibility
+    strategies are equally capable of accidentally proposing a second right
+    answer -- see module docstring above) AND this same distance floor
+    _select_candidates uses for mc/true_false/matching (see
+    _NEAR_SYNONYM_DISTANCE_FLOOR): a trap/plausibility candidate that
+    happens to mean the same thing as D is just as bad a distractor here as
+    it would be anywhere else."""
     exclude_ids = set(exclude_word_ids or set())
     exclusion_lemmas = {l.lower() for l in exclusion_lemmas}
     picked: list[dict] = []
 
+    def _too_close(cands: list[dict]) -> set[int]:
+        if d_word_id is None:
+            return set()
+        return _too_similar_ids(conn, schema, d_word_id, [c["id"] for c in cands])
+
     with conn.cursor() as cur:
-        for c in _trap_candidates(cur, schema, trap_lemmas, d_pos, exclude_ids, count):
+        trap_batch = _trap_candidates(cur, schema, trap_lemmas, d_pos, exclude_ids, count)
+        too_close = _too_close(trap_batch)
+        for c in trap_batch:
             if c["lemma"].lower() in exclusion_lemmas or c["lemma"].lower() in {p["lemma"].lower() for p in picked}:
+                continue
+            if c["id"] in too_close:
                 continue
             picked.append(c)
             if c["id"]:
@@ -484,8 +578,11 @@ def select_analogy_distractors(conn, schema: str, style: str, d_pos: str, a_lemm
             else:
                 more = _sibling_fanout_candidates(cur, schema, d_term_id, d_pos, exclusion_lemmas,
                                                    exclude_ids, remaining)
+            too_close = _too_close(more)
             for c in more:
                 if c["lemma"].lower() in {p["lemma"].lower() for p in picked}:
+                    continue
+                if c["id"] in too_close:
                     continue
                 picked.append(c)
                 if c["id"]:
@@ -496,16 +593,22 @@ def select_analogy_distractors(conn, schema: str, style: str, d_pos: str, a_lemm
             if style == "vocab_only":
                 cfg = DistractorConfig(strategy_weights={"orthographic": 0, "semantic": 0, "domain": 0, "antonym": 0})
                 more = _random_candidates(conn, schema, d_pos, cfg, exclude_ids, [], False, remaining)
+                too_close = _too_close(more)
                 for c in more:
                     c["strategy"] = "random"
                     if c["lemma"].lower() in exclusion_lemmas or c["lemma"].lower() in {p["lemma"].lower() for p in picked}:
+                        continue
+                    if c["id"] in too_close:
                         continue
                     picked.append(c)
                     exclude_ids.add(c["id"])
             else:
                 more = _random_ordinary_candidates(cur, schema, d_pos, exclusion_lemmas, remaining)
+                too_close = _too_close(more)
                 for c in more:
                     if c["lemma"].lower() in {p["lemma"].lower() for p in picked}:
+                        continue
+                    if c["id"] in too_close:
                         continue
                     picked.append(c)
             degraded = degraded or (len(picked) < count)

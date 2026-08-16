@@ -73,7 +73,9 @@ def seeded():
         "target":       ("noun", 50.0, ["targetsyn"], ["B"], vec((0, 1.0))),
         "targetsyn":    ("noun", 40.0, [], ["B"], vec((0, 1.0))),          # excluded: is a synonym
         "toosclose":    ("noun", 40.0, [], ["B"], vec((0, 0.99), (1, 0.14107))),  # distance ~0.01
-        "nearmiss":     ("noun", 40.0, [], ["B"], vec((0, 0.8), (1, 0.6))),        # distance = 0.2
+        # distance = 0.25 -- comfortably clear of _NEAR_SYNONYM_DISTANCE_FLOOR (0.20)
+        # with margin for float rounding, not sitting right on the boundary.
+        "nearmiss":     ("noun", 40.0, [], ["B"], vec((0, 0.75), (1, 0.661438))),
         "toofar":       ("noun", 40.0, [], [], vec((1, 1.0))),                    # distance = 1.0
         "samedomain":   ("noun", 40.0, [], ["B"], vec((2, 1.0))),          # domain match, far vector
         "otherdomain":  ("noun", 40.0, [], ["S"], vec((3, 1.0))),
@@ -172,6 +174,30 @@ def test_domain_strategy_matches_shared_category(seeded):
 
 
 @pg
+def test_near_synonym_floor_excludes_across_every_strategy_and_random_backfills(seeded):
+    # Regression: live bug where "noctambule"/"noctambulist" (both meaning
+    # "sleepwalker", both with an empty word.synonyms -- the only other
+    # exclusion mechanism) appeared together as MC options. "toosclose" is
+    # an embedding near-duplicate of "target" (distance ~0.01, same as that
+    # real pair's ~0.15) but shares no lemma spelling and no synonyms entry
+    # with it -- only a strategy with zero meaning-awareness of its own
+    # (domain, here) can surface it, proving the floor is checked regardless
+    # of *why* a strategy proposed the candidate, not just for "semantic".
+    # Also confirms the rejected slot gets backfilled by random rather than
+    # silently shrinking the result by one.
+    conn, ids = seeded
+    cfg = dx.DistractorConfig(smart_vs_random_ratio=1.0,
+                               strategy_weights={"orthographic": 0, "semantic": 0, "domain": 1.0, "antonym": 0})
+    exclude = {ids["targetsyn"], ids["nearmiss"], ids["samedomain"]}  # leaves "toosclose" as domain's only match
+    result = dx.select_mc_distractors(conn, _SCHEMA, ids["target"], "noun", cfg, count=1,
+                                       exclude_word_ids=exclude)
+    picked_ids = {c["id"] for c in result.candidates}
+    assert ids["toosclose"] not in picked_ids
+    assert len(result.candidates) == 1
+    assert result.candidates[0]["strategy"] == "random"
+
+
+@pg
 def test_orthographic_strategy_matches_similar_lemma(seeded):
     conn, ids = seeded
     cfg = dx.DistractorConfig(smart_vs_random_ratio=1.0,
@@ -238,3 +264,100 @@ def test_select_matching_set_returns_set_size_minus_one_words(seeded):
     result = dx.select_matching_set(conn, _SCHEMA, ids["target"], "noun", cfg, set_size=4)
     assert len(result.candidates) == 3
     assert all(c["quiz_definition"] for c in result.candidates)
+
+
+# --- analogy distractors: same near-synonym floor, own code path ------------
+
+@pg
+def test_analogy_distractors_apply_near_synonym_floor_to_trap_candidates():
+    # d_word_id threads the same _NEAR_SYNONYM_DISTANCE_FLOOR check into
+    # select_analogy_distractors -- a trap candidate (A/B reused in D's slot,
+    # normally deliberately PREFERRED, see module docstring) that happens to
+    # also be a near-synonym of D is just as bad a distractor here as it
+    # would be for mc/true_false/matching.
+    from pgvector.psycopg import register_vector
+
+    schema = "cc_test_analogy_near_synonym"
+    conn = db.connect(_URL)
+    register_vector(conn)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    def vec(*nonzero):
+        v = [0.0] * 300
+        for i, val in nonzero:
+            v[i] = val
+        return v
+
+    ids = {}
+    with conn.cursor() as cur:
+        for lemma, vector in [
+            ("dword", vec((0, 1.0))),
+            ("closeword", vec((0, 0.99), (1, 0.14107))),  # distance ~0.01 from dword
+            ("farword", vec((1, 1.0))),                    # distance 1.0 from dword
+        ]:
+            cur.execute(
+                f"""INSERT INTO {schema}.word (lemma, definition, quiz_definition, part_of_speech, active)
+                    VALUES (%s,%s,%s,'noun',true) RETURNING id""",
+                (lemma, f"def {lemma}", f"quizdef {lemma}"))
+            wid = cur.fetchone()[0]
+            ids[lemma] = wid
+            cur.execute(f"INSERT INTO {schema}.word_difficulty (word_id, quizzable, difficulty) VALUES (%s,true,50.0)",
+                        (wid,))
+            cur.execute(f"INSERT INTO {schema}.word_embedding (word_id, fasttext_vector, fasttext_model) "
+                        f"VALUES (%s,%s,'test')", (wid, vector))
+    conn.commit()
+
+    result = dx.select_analogy_distractors(
+        conn, schema, "vocab_only", "noun", "a_lemma", "b_lemma",
+        c_word_id=ids["farword"], d_term_id=0, exclusion_lemmas=set(),
+        trap_lemmas=["closeword", "farword"], count=1,
+        exclude_word_ids={ids["dword"]}, d_word_id=ids["dword"],
+    )
+    picked_lemmas = {c["lemma"] for c in result.candidates}
+    assert "closeword" not in picked_lemmas
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_analogy_distractors_skip_floor_check_when_d_has_no_word_row():
+    # one_hard_term style's D is frequently an ordinary WordNet term with no
+    # word row at all (d_word_id=None, see the function's own docstring) --
+    # must degrade gracefully (no crash, no filtering attempted) rather than
+    # erroring on a missing embedding to compare against.
+    schema = "cc_test_analogy_no_d_word"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""INSERT INTO {schema}.word (lemma, definition, quiz_definition, part_of_speech, active)
+                VALUES ('trapword','def','quizdef','noun',true) RETURNING id""")
+        trap_id = cur.fetchone()[0]
+        cur.execute(f"INSERT INTO {schema}.word_difficulty (word_id, quizzable, difficulty) VALUES (%s,true,50.0)",
+                    (trap_id,))
+        cur.execute(
+            f"""INSERT INTO {schema}.wn_relation_term (word_id, lemma, wn_pos, is_common)
+                VALUES (NULL, 'ordinaryword', 'n', true)""")
+    conn.commit()
+
+    result = dx.select_analogy_distractors(
+        conn, schema, "one_hard_term", "noun", "a_lemma", "b_lemma",
+        c_word_id=None, d_term_id=0, exclusion_lemmas=set(),
+        trap_lemmas=["trapword"], count=1, d_word_id=None,
+    )
+    assert len(result.candidates) == 1  # no crash, trap candidate accepted normally
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()

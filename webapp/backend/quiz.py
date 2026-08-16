@@ -566,7 +566,7 @@ def _build_analogy_payload(conn, target: dict, body: QuizStartRequest,
     result = dx.select_analogy_distractors(
         conn, _main.SCHEMA, assembly.style, assembly.d_pos, assembly.a_lemma, assembly.b_lemma,
         assembly.target_word_id, assembly.d_term_id, assembly.exclusion_lemmas, assembly.trap_lemmas,
-        distractor_count, exclude_word_ids=exclude_ids,
+        distractor_count, exclude_word_ids=exclude_ids, d_word_id=assembly.d_word_id,
     )
     if len(result.candidates) < distractor_count:
         if not result.candidates:
