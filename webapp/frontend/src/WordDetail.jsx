@@ -5,6 +5,7 @@ import { useAuth } from './AuthContext'
 import GraphView from './GraphView'
 import LinkedDefinition from './LinkedDefinition'
 import { colorForBucket } from './domainColors'
+import { googleSearchUrl } from './externalLinks'
 import './WordDetail.css'
 
 const API_BASE = ''
@@ -194,6 +195,14 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
         {hasAudio && (
           <audio controls src={`${API_BASE}/api/words/${id}/audio`} className="word-detail-audio" />
         )}
+        <a
+          href={googleSearchUrl(word.lemma)}
+          className="word-detail-google-link"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          🔍 Google
+        </a>
         <AddToSetMenu wordIds={[word.id]} />
         <button
           type="button"

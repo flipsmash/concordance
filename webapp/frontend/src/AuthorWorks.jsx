@@ -4,6 +4,7 @@ import AddToSetMenu from './AddToSetMenu'
 import { difficultySummary } from './bookDifficulty'
 import DifficultyHistogram from './DifficultyHistogram'
 import DomainDistribution from './DomainDistribution'
+import { wikipediaSearchUrl } from './externalLinks'
 import Pagination from './Pagination'
 import SharedWordsPanel from './SharedWordsPanel'
 import { buildQueryParams, usePagedTable } from './usePagedTable'
@@ -152,7 +153,17 @@ function AuthorWorks() {
   return (
     <div className="authors-page">
       <header className="authors-header">
-        <h1>{author}</h1>
+        <div>
+          <h1>{author}</h1>
+          <a
+            href={wikipediaSearchUrl(author)}
+            className="work-detail-source-link"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Wikipedia ↗
+          </a>
+        </div>
         <button type="button" className="authors-surprise" onClick={surpriseMe}>
           🎲 Surprise me
         </button>

@@ -72,6 +72,21 @@
   border-color: var(--accent);
 }
 
+.word-detail-google-link {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-h);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.word-detail-google-link:hover {
+  border-color: var(--accent);
+}
+
 .word-detail-surprise:disabled {
   opacity: 0.6;
   cursor: default;

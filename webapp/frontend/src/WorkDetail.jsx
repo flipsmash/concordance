@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import AddToSetMenu from './AddToSetMenu'
 import DifficultyHistogram from './DifficultyHistogram'
 import DomainDistribution from './DomainDistribution'
+import { wikipediaSearchUrl } from './externalLinks'
 import Pagination from './Pagination'
 import SharedWordsPanel from './SharedWordsPanel'
 import { buildQueryParams, usePagedTable } from './usePagedTable'
@@ -151,6 +152,16 @@ function WorkDetail() {
               rel="noopener noreferrer"
             >
               View source text
+            </a>
+          )}
+          {book?.title && (
+            <a
+              href={wikipediaSearchUrl(book.title)}
+              className="work-detail-source-link"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Wikipedia ↗
             </a>
           )}
         </div>
