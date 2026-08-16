@@ -32,7 +32,7 @@
 
 .word-detail-header {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 12px;
   flex-wrap: wrap;
   border-bottom: 1px solid var(--border);
