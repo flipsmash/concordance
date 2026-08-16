@@ -4,7 +4,7 @@ import AddToSetMenu from './AddToSetMenu'
 import { difficultySummary } from './bookDifficulty'
 import DifficultyHistogram from './DifficultyHistogram'
 import DomainDistribution from './DomainDistribution'
-import { wikipediaSearchUrl } from './externalLinks'
+import { goodreadsSearchUrl, wikipediaSearchUrl } from './externalLinks'
 import Pagination from './Pagination'
 import SharedWordsPanel from './SharedWordsPanel'
 import { buildQueryParams, usePagedTable } from './usePagedTable'
@@ -162,6 +162,14 @@ function AuthorWorks() {
             rel="noopener noreferrer"
           >
             Wikipedia ↗
+          </a>
+          <a
+            href={goodreadsSearchUrl(author)}
+            className="work-detail-source-link"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Goodreads ↗
           </a>
         </div>
         <button type="button" className="authors-surprise" onClick={surpriseMe}>

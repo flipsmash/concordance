@@ -10,3 +10,11 @@ export function wikipediaSearchUrl(query) {
 export function googleSearchUrl(query) {
   return `https://www.google.com/search?q=${encodeURIComponent(query)}`
 }
+
+// Plain Goodreads search rather than a scoped search_type=books/people param
+// -- unverified param values risk silently landing on the wrong tab, where
+// the bare query is guaranteed to work and Goodreads' own results page
+// already splits Books/Authors into tabs.
+export function goodreadsSearchUrl(query) {
+  return `https://www.goodreads.com/search?q=${encodeURIComponent(query)}`
+}
