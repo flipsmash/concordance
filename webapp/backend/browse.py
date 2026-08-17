@@ -798,6 +798,18 @@ class BookPage(BaseModel):
     page_size: int
 
 
+@router.get("/api/browse/genres", response_model=list[str])
+def browse_genres(_: dict = Depends(_main.require_viewer)) -> list[str]:
+    """Genres actually present on at least one book, not the full static
+    concordance.genre.GENRE_LIST -- most of that list has no data until
+    `concordance book-genres` finishes its backlog, and a filter option that
+    always returns zero books is worse than not offering it yet (same
+    DISTINCT-over-fixed-list reasoning as quiz.py's quiz_meta genres)."""
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"SELECT DISTINCT genre FROM {_main.SCHEMA}.book_genre ORDER BY 1")
+        return [r[0] for r in cur.fetchall()]
+
+
 @router.get("/api/browse/books", response_model=BookPage)
 def browse_books(
     author: str | None = None,

@@ -49,9 +49,20 @@ function Books() {
   // itself (e.g. "40-60" or "Not enough data") is the whole filter, so
   // there's no min/max pair to seed like fame's.
   const overallDifficultyBand = searchParams.get('overall_difficulty_band')
-  // Same one-way-in pattern, deep-linked from a clickable genre pill on
-  // WorkDetail.jsx (?genre=<tag>).
+  // Deep-linked from a clickable genre pill on WorkDetail.jsx (?genre=<tag>),
+  // but also settable directly below via the genre dropdown -- unlike
+  // fame/unique_word_bucket/overall_difficulty_band, this one stays
+  // URL-driven both ways instead of shadowing into local state, since the
+  // deep-link and the picker both just need to agree on one query param.
   const genre = searchParams.get('genre')
+  const [genreOptions, setGenreOptions] = useState([])
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/browse/genres`)
+      .then((res) => res.json())
+      .then(setGenreOptions)
+      .catch(() => {})
+  }, [])
 
   useEffect(() => {
     const handle = setTimeout(() => setDebounced(query.trim()), 200)
@@ -102,6 +113,16 @@ function Books() {
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev)
       next.delete('genre')
+      return next
+    })
+    setPage(1)
+  }
+
+  function changeGenre(value) {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      if (value) next.set('genre', value)
+      else next.delete('genre')
       return next
     })
     setPage(1)
@@ -170,6 +191,15 @@ function Books() {
             disabled={fameUnscoredOnly}
             onChange={(e) => changeFameMax(e.target.value)}
           />
+        </label>
+        <label className="authors-fame-filter">
+          Genre:
+          <select value={genre || ''} onChange={(e) => changeGenre(e.target.value)}>
+            <option value="">All</option>
+            {genreOptions.map((g) => (
+              <option key={g} value={g}>{g}</option>
+            ))}
+          </select>
         </label>
         <SortControl fields={SORT_FIELDS} sort={sort} dir={dir} onSort={handleSort} />
       </div>

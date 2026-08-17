@@ -921,6 +921,34 @@ def test_browse_books_filters_by_genre():
 
 
 @pg
+def test_browse_genres_returns_distinct_present_genres_only():
+    # Regression guard for the Books-page genre picker: the option list must
+    # be what's actually in book_genre, not concordance.genre.GENRE_LIST --
+    # most of that fixed list has no data until `concordance book-genres`
+    # finishes its backlog, and an option that always returns zero books is
+    # worse than not offering it yet (same reasoning as quiz.py's quiz_meta).
+    schema = "cc_test_browse_genres_meta"
+    client, conn, restore = _setup(schema)
+    try:
+        b1 = _insert_book(conn, schema, "Book One", author="Author One")
+        b2 = _insert_book(conn, schema, "Book Two", author="Author One")
+        with conn.cursor() as cur:
+            cur.execute(f"INSERT INTO {schema}.book_genre (book_id, genre, source) VALUES (%s,'Fantasy','llm')",
+                        (b1,))
+            cur.execute(f"INSERT INTO {schema}.book_genre (book_id, genre, source) VALUES (%s,'History','llm')",
+                        (b2,))
+            cur.execute(f"INSERT INTO {schema}.book_genre (book_id, genre, source) VALUES (%s,'Fantasy','llm')",
+                        (b2,))
+        conn.commit()
+
+        resp = client.get("/api/browse/genres")
+        assert resp.status_code == 200
+        assert resp.json() == ["Fantasy", "History"]  # distinct, alphabetical, no duplicate
+    finally:
+        restore()
+
+
+@pg
 def test_combined_facets_intersect_regardless_of_which_is_set_first():
     schema = "cc_test_browse_combined"
     client, conn, restore = _setup(schema)
