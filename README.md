@@ -228,6 +228,7 @@ python scripts/lookup_mw.py concordance --no-fallback   # API tier only, skip th
 
 ```bash
 concordance load-taxonomy          # once: load the USAS category tables
+concordance load-gazetteer         # once: load the names/places gazetteer (validity gate's proper-noun check)
 concordance classify               # tag every word with 1-3 USAS domain codes
 concordance normalize-pos          # fold part_of_speech into one clean vocabulary
 concordance ngram                  # cache Google Books Ngram rarity/recency per word
@@ -248,6 +249,14 @@ mutable upstream columns with no separate staleness signal.
 `calibrate-difficulty` writes to a **separate** `word_personal_difficulty`
 table, never the shared `word_difficulty.difficulty` column — see DESIGN.md
 for why a single-rater deployment can't do population-level calibration.
+
+`load-gazetteer` needs its two source files downloaded first (US Census
+surnames + GeoNames populated places — see `concordance/gazetteer.py`'s
+module docstring for the exact URLs); given names come from NLTK's `names`
+corpus, already a dependency. Not needed for `ingest` to run — the validity
+gate degrades to a no-op proper-noun check without it, same as every other
+optional data source here — but see DESIGN.md for why it's the single
+highest-leverage piece of the proper-noun-pollution defenses.
 
 ### Pronunciation audio
 

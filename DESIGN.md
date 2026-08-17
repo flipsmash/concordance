@@ -240,12 +240,61 @@ load-bearing boundary the whole time (verified end-to-end by
 `tests/test_auth.py`), so removing Access didn't expose anything it had been
 reliably protecting.
 
-## The one known, unclosed gap: proper-noun pollution
+## Proper-noun pollution
 
 Every validity authority this pipeline checks — SymSpell, WordNet, wordfreq,
 even the local Wiktionary dump to a lesser degree — is itself somewhat
 polluted by real names with a large-enough web/corpus footprint to look like
-ordinary vocabulary. There is no curated names/gazetteer exclusion list yet;
-this is a known, deliberately-unstarted gap, not an oversight — see
-`concordance/validity.py`'s module docstring for the shape of the problem if
-picking it up.
+ordinary vocabulary. Confirmed live (2026-08-17): 1,816 active words carry a
+tagger-guessed `proper noun` part of speech with no definition at all —
+exactly the profile of a name that survived `propernouns.py` (no mid-sentence
+capitalization evidence, usually a one-off occurrence) and that nothing else
+in the cascade could resolve. Of the fraction already scored by `deepen`'s
+validity estimate, only ~4% were correctly flagged `likely-artifact`; the
+rest read as `uncertain` or even `likely-valid`, since frequency/morphology
+signals can't tell a real name from a real rare word — spelled correctly,
+real corpus footprint, no dominant misspelling twin.
+
+**Shipped, small piece**: `ValidityGate._wordnet_instance_only` (step 1.5)
+disqualifies a word whose *only* WordNet synsets are instance-hypernyms — a
+specific named individual/place (Ahasuerus, Rahab, Coventry), not a
+common-noun category — reusing data already loaded, no new sourcing. Auto-
+drops when no other authority vouches either; flags for human review (via
+the same `variant_flag_reason` mechanism the foreign/misspelling-variant
+detector uses) when one does, since that's a genuine collision this signal
+alone can't resolve. **Measured impact is small**: checked live against the
+current 621-word undefined-proper-noun bucket, it resolves only 2 of them.
+WordNet's instance entries lean toward well-known geographic/historical
+entities (continents, geologic eras, famous cities) — confirmed directly
+that `ahasuerus`/`oisin`/`rahab` have *zero* WordNet synsets at all, not
+instance-only ones, so this fix doesn't touch the exact cases the original
+2026-07-12 audit found. It's correct and free, just not where the real
+leverage is.
+
+**Shipped, the real leverage (2026-08-17)**: a curated names/places
+gazetteer (`concordance/gazetteer.py`, `db.gazetteer_name`) — US Census
+2010 surnames (≥100 occurrences, ~162k), NLTK's census-derived given names
+(~7.6k), and GeoNames `cities1000` populated places (~110k single-word
+entries) — loaded once (`concordance load-gazetteer`, not part of
+`maintain`, same one-time/occasional shape as `load-taxonomy`) and checked
+in the same step 1.5 slot as the WordNet-instance signal, with identical
+collision handling: auto-drop only when SymSpell/NLTK words don't
+independently vouch, flag for review otherwise. Measured live against the
+same 621-word bucket: **143 matches (22.9%)**, 122 with no competing vouch
+at all (safe auto-drop) and 21 genuine collisions (correctly flagged, not
+dropped — e.g. `sackman`, and `godel` again). Manually sampled 30 of the
+122 clean-drops: every one looks like a genuine surname or obscure place
+name, no plausible false positives found. Confirmed the collision guard
+holds even for words this project explicitly wants to keep: `house` and
+`armiger` (the audit's own canonical "don't lose this" example) are both
+also real Census surnames, and both correctly stayed `KEEP` with only a
+review flag.
+
+`ValidityGate` takes an optional `gazetteer_names: frozenset[str]`,
+loaded once per batch run (`db.fetch_gazetteer_names`, mirroring how the
+~9GB judge model / spaCy / SymSpell / WordNet are all loaded once and
+reused across every book) rather than per book — a repeat of the
+`fetch_known_verdicts` mistake (a heavy, unbounded query re-run on every
+single book of a multi-thousand-book batch) was the one real risk in
+wiring this in, and `pipeline.process()` only fetches it at all when no
+pre-built `gate` was already handed in.

@@ -166,7 +166,7 @@ def ingest(
     from . import judge as _judge, tokenize as _tokenize, validity as _validity
     with console.status("[bold]Loading model + resources…"):
         nlp = _tokenize.load_nlp()
-        gate = _validity.ValidityGate(cfg)
+        gate = _validity.ValidityGate(cfg, gazetteer_names=db.fetch_gazetteer_names(conn, schema))
         judge_obj = _judge.get_judge(cfg)
 
     for i, b in enumerate(books, 1):
@@ -382,6 +382,38 @@ def load_taxonomy(
     conn.close()
     console.print(f"[green]✓[/green] loaded [bold]{stats['categories']}[/bold] USAS categories "
                   f"({stats['top_level']} top-level fields) into {schema}.category")
+
+
+@app.command("load-gazetteer")
+def load_gazetteer_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    census_path: Optional[Path] = typer.Option(None, "--census-path",
+                                                help="Path to Names_2010Census.csv (default: concordance/gazetteer.py's DEFAULT_CENSUS_PATH)."),
+    geonames_path: Optional[Path] = typer.Option(None, "--geonames-path",
+                                                  help="Path to cities1000.txt (default: concordance/gazetteer.py's DEFAULT_GEONAMES_PATH)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """One-time/occasional: load the names/places gazetteer (US Census
+    surnames + given names, GeoNames populated places) that validity.py's
+    proper-noun check uses -- see concordance/gazetteer.py for the source
+    files this needs downloaded first, and DESIGN.md for why this exists.
+    Not part of `maintain` -- same one-time/occasional shape as
+    `load-taxonomy`; re-run whenever you refresh the source files."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}")
+        raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    try:
+        stats = db.load_gazetteer(conn, schema, census_path=census_path, geonames_path=geonames_path)
+    except FileNotFoundError as exc:
+        console.print(f"[red]✗[/red] {exc}")
+        console.print("[dim]see concordance/gazetteer.py's module docstring for where to download it[/dim]")
+        raise typer.Exit(code=1)
+    conn.close()
+    console.print(f"[green]✓[/green] load-gazetteer: [bold]{stats['given_name']}[/bold] given names, "
+                  f"[bold]{stats['surname']}[/bold] surnames, [bold]{stats['place']}[/bold] places")
 
 
 @app.command("import-defined")

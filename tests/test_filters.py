@@ -101,6 +101,64 @@ def test_english_sentence_context_unaffected():
     assert c.verdict is Verdict.KEEP
 
 
+def test_wordnet_instance_only_word_dropped_when_nothing_else_vouches():
+    # 'abdias' -- WordNet's only synset for it is an instance (a specific
+    # named biblical figure), and it's absent from both the 82k wordlist
+    # and the NLTK words corpus, so nothing else offers a competing
+    # common-noun vouch. This is the clean case: safe to drop outright.
+    c = _cand("abdias", zipf=0.0, count=1)
+    ValidityGate(Config()).judge(c)
+    assert c.verdict is Verdict.DROP
+    assert c.reject_reason is RejectReason.PROPER_NOUN
+
+
+def test_wordnet_instance_only_collision_flagged_not_dropped():
+    # 'godel' -- WordNet only catalogues it as a specific named entity (the
+    # mathematician), but it's also in the 82k wordlist (a real collision:
+    # some other authority DOES think it's a common word). Real ambiguity
+    # this signal alone can't resolve -- keep-biased means flag for human
+    # review, not auto-drop, same as the foreign/misspelling-variant flag.
+    c = _cand("godel", count=1)
+    ValidityGate(Config()).judge(c)
+    assert c.verdict is Verdict.KEEP
+    assert c.variant_flag_reason == RejectReason.PROPER_NOUN.value
+    assert "godel" in c.variant_flag_note
+
+
+def test_gazetteer_word_dropped_when_nothing_else_vouches():
+    # Isolates the gazetteer path from WordNet's own instance-only signal --
+    # a nonsense string has zero WordNet synsets (not instance-only ones)
+    # and no dictionary presence, so only the gazetteer membership check
+    # can be responsible for a DROP here.
+    gate = ValidityGate(Config(), gazetteer_names=frozenset({"zzqwortk"}))
+    c = _cand("zzqwortk", zipf=0.0, count=1)
+    gate.judge(c)
+    assert c.verdict is Verdict.DROP
+    assert c.reject_reason is RejectReason.PROPER_NOUN
+
+
+def test_gazetteer_collision_flagged_not_dropped():
+    # 'house' is unambiguously a real common word (SymSpell/NLTK words
+    # corpus both vouch) -- forcing it into a fake gazetteer set is a
+    # synthetic way to isolate the collision-handling branch: a name-list
+    # hit must never auto-drop a word something else independently vouches
+    # for, regardless of source.
+    gate = ValidityGate(Config(), gazetteer_names=frozenset({"house"}))
+    c = _cand("house")
+    gate.judge(c)
+    assert c.verdict is Verdict.KEEP
+    assert c.variant_flag_reason == RejectReason.PROPER_NOUN.value
+
+
+def test_gazetteer_absent_is_a_silent_no_op():
+    # No gazetteer_names passed at all (the default) -- must behave exactly
+    # like before the gazetteer existed, not raise or drop anything.
+    c = _cand("house")
+    ValidityGate(Config()).judge(c)
+    assert c.verdict is Verdict.KEEP
+    assert c.variant_flag_reason == ""
+
+
 # --- frequency floor (§03.4) --------------------------------------------
 
 def test_floor_drops_common_word():

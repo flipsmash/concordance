@@ -39,9 +39,20 @@ _CORPUS_PRESENT = 0.0  # wordfreq returns 0.0 for tokens it has never seen
 
 
 class ValidityGate:
-    def __init__(self, cfg: Config, local_dict: dict | None = None):
+    def __init__(self, cfg: Config, local_dict: dict | None = None,
+                gazetteer_names: frozenset[str] | None = None):
         self.cfg = cfg
         self.local_dict = local_dict or {}
+        # A curated names/places gazetteer (db.fetch_gazetteer_names) --
+        # loaded ONCE by the caller and passed in, same pattern as
+        # local_dict, since it's a static reference table (unlike
+        # local_dict's per-book slice of vocab.wiktionary, this doesn't
+        # change book to book, so a batch run loads it once here rather
+        # than swapping it in per call the way local_dict is). Empty,
+        # never None, when the caller has no conn/hasn't run
+        # `load-gazetteer` yet -- degrades to a no-op, same convention as
+        # every other optional data source in this file.
+        self._gazetteer = gazetteer_names or frozenset()
         self._sym = self._load_symspell()
         self._wn = self._load_wordnet()
         self._words = self._load_word_corpus()
@@ -88,6 +99,19 @@ class ValidityGate:
             return False
         synsets = self._wn.synsets(word)
         return any(not s.instance_hypernyms() for s in synsets)
+
+    def _wordnet_instance_only(self, word: str) -> bool:
+        """True if WordNet has synsets for this word AND every one of them
+        is an instance (Rahab, Ahasuerus, Coventry) -- i.e. WordNet itself
+        thinks this word IS a specific named entity, with no competing
+        generic sense at all. Distinct from `not _in_wordnet(word)`, which
+        is also true for a word with NO synsets whatsoever (no evidence
+        either way) -- only the instance-only case is real disqualifying
+        evidence."""
+        if not self._wn:
+            return False
+        synsets = self._wn.synsets(word)
+        return bool(synsets) and all(s.instance_hypernyms() for s in synsets)
 
     @staticmethod
     def _load_word_corpus() -> frozenset[str]:
@@ -160,6 +184,53 @@ class ValidityGate:
                     cand.reject_reason = RejectReason.FOREIGN_LANGUAGE
                 return
 
+        # 1.5. Two independent signals that this word IS a specific named
+        #      entity, not a common-noun category -- disqualifying evidence
+        #      step 2 below can't see on its own, since step 2's authorities
+        #      (SymSpell's 82k wordlist, the NLTK 234k-word corpus) are
+        #      frequency-derived from general web text and vouch for real
+        #      names anyway (confirmed live: ahasuerus/oisin/fecit are all
+        #      in the 82k wordlist, which fires first and would otherwise
+        #      KEEP them before either signal below gets a say):
+        #        - WordNet itself has synsets for this word and EVERY one is
+        #          an instance-hypernym (Rahab, Ahasuerus, Coventry) -- no
+        #          generic sense at all. _in_wordnet (step 2) already
+        #          refuses to VOUCH for an instance-only word; this is the
+        #          complementary DISQUALIFYING read of the same data.
+        #          Measured live (2026-08-17): only 2 of 621 undefined
+        #          proper-noun-tagged active words matched this signal --
+        #          WordNet's instance coverage leans toward well-known
+        #          geographic/historical entities, not the long tail of
+        #          obscure names this corpus actually leaks.
+        #        - The word is in the curated names/places gazetteer
+        #          (db.fetch_gazetteer_names -- US Census surnames/given
+        #          names, GeoNames populated places; see DESIGN.md and
+        #          concordance/gazetteer.py). Measured live: 143 of the
+        #          same 621-word bucket matched, 122 with no competing
+        #          vouch at all -- this is where the real leverage is.
+        #      Either signal only auto-drops when NEITHER SymSpell nor the
+        #      NLTK words corpus independently vouches either -- a genuine
+        #      collision (name-shaped AND a real competing common-noun
+        #      entry elsewhere, e.g. "godel"/"sackman") is real ambiguity
+        #      neither signal alone can resolve, so it's flagged for human
+        #      review via the same variant_flag_reason mechanism
+        #      validity_score.py's foreign/misspelling-variant detector
+        #      uses, not auto-rejected -- same reasoning: a detector with an
+        #      unproven false-positive rate stays advisory (see that
+        #      detector's own real ~21%-of-corpus false-positive finding).
+        name_signal = self._wordnet_instance_only(word) or word in self._gazetteer
+        if name_signal:
+            if word in self._sym.words or word in self._words:
+                cand.variant_flag_reason = RejectReason.PROPER_NOUN.value
+                cand.variant_flag_note = f"'{word}' looks like a specific named entity (name/place)"
+                # falls through to step 2, which will KEEP it via whichever
+                # authority just vouched
+            else:
+                cand.verdict = Verdict.DROP
+                cand.reject_reason = RejectReason.PROPER_NOUN
+                cand.interesting_reason = f"'{word}' looks like a specific named entity (name/place)"
+                return
+
         # 2. Curated headword in ANY authority — checked before the misspelling
         #    verdict so a real archaic word (armiger, abash, cangue) is never
         #    branded a typo just for being absent from one small wordlist.
@@ -212,13 +283,18 @@ class ValidityGate:
 
 
 def apply_validity(candidates: dict[str, Candidate], cfg: Config, local_dict: dict | None = None,
-                   gate: "ValidityGate | None" = None) -> None:
+                   gate: "ValidityGate | None" = None,
+                   gazetteer_names: frozenset[str] | None = None) -> None:
     """Run the validity gate over every candidate. A batch run can build one
-    gate (which loads SymSpell + WordNet + the 234k-word corpus once) and pass
-    it in for every book; only the per-book `local_dict` (that book's slice of
-    vocab.wiktionary) changes, so it's swapped in per call."""
+    gate (which loads SymSpell + WordNet + the 234k-word corpus + the
+    gazetteer once) and pass it in for every book; only the per-book
+    `local_dict` (that book's slice of vocab.wiktionary) changes, so it's
+    swapped in per call. `gazetteer_names` is only consulted when building a
+    fresh gate here (the caller's own db.fetch_gazetteer_names(conn, schema)
+    result) -- an already-built `gate` keeps whatever gazetteer it loaded at
+    construction, same as its SymSpell/WordNet/word-corpus resources."""
     if gate is None:
-        gate = ValidityGate(cfg, local_dict=local_dict)
+        gate = ValidityGate(cfg, local_dict=local_dict, gazetteer_names=gazetteer_names)
     else:
         gate.local_dict = local_dict or {}
     for cand in candidates.values():

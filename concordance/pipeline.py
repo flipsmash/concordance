@@ -150,7 +150,14 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
 
     propernouns.strip_proper_nouns(candidates, cfg)
     with console.status("[bold]Checking validity…"):
-        validity.apply_validity(candidates, cfg, local_dict=lexicon, gate=gate)
+        # Only fetched when there's no pre-built gate to reuse -- a batch
+        # run already loaded this once into `gate` (see cli.py's ingest
+        # loop); re-querying gazetteer_name's ~280k rows on every book of a
+        # multi-thousand-book batch would be the exact per-book-repeated-
+        # heavy-query mistake fetch_known_verdicts already made once
+        # (2026-08-16/17).
+        gaz = db.fetch_gazetteer_names(conn, schema) if gate is None else None
+        validity.apply_validity(candidates, cfg, local_dict=lexicon, gate=gate, gazetteer_names=gaz)
     survivors = [c for c in candidates.values() if c.verdict in (Verdict.KEEP, Verdict.UNSURE)]
     console.print(f"[bold]{len(survivors)}[/bold] candidates survived the floor + validity gate.")
 

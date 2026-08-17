@@ -109,6 +109,20 @@ CREATE TABLE IF NOT EXISTS {s}.category (
     UNIQUE (taxonomy, code)
 );
 
+-- Curated names/places, checked as a DISQUALIFYING signal in validity.py
+-- (not a vouch -- see DESIGN.md's "still-mostly-unclosed gap" section for
+-- why: SymSpell/WordNet/wordfreq are all frequency-derived from general web
+-- text, so a real name with any web footprint still looks "attested" to
+-- every one of them). (name_lc, kind) as the key rather than name_lc alone
+-- -- a name can legitimately be more than one kind (Washington: both
+-- surname and place), and re-running one source's loader independently
+-- shouldn't fight over the same row a different source already owns.
+CREATE TABLE IF NOT EXISTS {s}.gazetteer_name (
+    name_lc text NOT NULL,
+    kind    text NOT NULL,   -- 'given_name' | 'surname' | 'place'
+    PRIMARY KEY (name_lc, kind)
+);
+
 CREATE TABLE IF NOT EXISTS {s}.word_category (
     word_id     integer NOT NULL REFERENCES {s}.word(id) ON DELETE CASCADE,
     category_id integer NOT NULL REFERENCES {s}.category(id) ON DELETE CASCADE,
@@ -2319,6 +2333,52 @@ def load_taxonomy(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA,
                         (pid, code_to_id[c["code"]]))
     conn.commit()
     return {"categories": len(cats), "top_level": sum(1 for c in cats if c["parent_code"] is None)}
+
+
+def load_gazetteer(conn, schema: str = DEFAULT_SCHEMA, *,
+                   census_path=None, geonames_path=None) -> dict:
+    """Bulk-load the names/places gazetteer into {schema}.gazetteer_name --
+    see concordance/gazetteer.py for sourcing. Idempotent (truncate + reload
+    per kind, not an incremental upsert -- the source files are occasional,
+    whole-file re-downloads, not something to merge row by row) and safe to
+    re-run after a fresh download to pick up an updated source file. COPY,
+    not executemany -- this is ~300k rows (162k surnames + 140k places + 8k
+    given names), the same bulk-load-scale reasoning as every other
+    multi-hundred-thousand-row load in this file."""
+    from . import gazetteer as _gaz
+    s = _safe_schema(schema)
+
+    sources: list[tuple[str, set[str]]] = [
+        ("given_name", _gaz.load_given_names()),
+        ("surname", _gaz.load_surnames(census_path) if census_path else _gaz.load_surnames()),
+        ("place", _gaz.load_places(geonames_path) if geonames_path else _gaz.load_places()),
+    ]
+
+    counts: dict[str, int] = {}
+    with conn.cursor() as cur:
+        for kind, names in sources:
+            cur.execute(f"DELETE FROM {s}.gazetteer_name WHERE kind = %s", (kind,))
+            with cur.copy(f"COPY {s}.gazetteer_name (name_lc, kind) FROM STDIN") as copy:
+                for name in names:
+                    copy.write_row((name, kind))
+            counts[kind] = len(names)
+    conn.commit()
+    return counts
+
+
+def fetch_gazetteer_names(conn, schema: str = DEFAULT_SCHEMA) -> frozenset[str]:
+    """Every name/place in {schema}.gazetteer_name -- a plain set (the
+    validity gate's own check only ever needs membership, not which kind).
+    Degrades to empty (same convention as vocab.wiktionary elsewhere in
+    this file) if `load-gazetteer` was never run -- a fresh checkout must
+    still be able to ingest without this optional table existing yet."""
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute("select to_regclass(%s)", (f"{s}.gazetteer_name",))
+        if cur.fetchone()[0] is None:
+            return frozenset()
+        cur.execute(f"SELECT name_lc FROM {s}.gazetteer_name")
+        return frozenset(r[0] for r in cur.fetchall())
 
 
 def compute_archaic(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> dict:
