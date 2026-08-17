@@ -2748,9 +2748,18 @@ def compute_book_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 
         cur.execute(f"""SELECT wb.word_id, wb.book_id FROM {s}.word_book wb
                         JOIN {s}.word w ON w.id = wb.word_id
                         WHERE w.active AND wb.word_id = ANY(%s)""", (list(idf.keys()),))
+        # Both directions of the same (word, book) rows, kept as two separate
+        # indexes rather than one -- books_by_word answers "who else shares
+        # this word" (needed once per word while scoring a book's own
+        # candidates below), words_by_book answers "what are this book's own
+        # words" (needed once per book, as the outer loop's starting point).
+        # Combined size is O(sum of df over qualifying words), same order as
+        # word_book itself -- nowhere near the O(sum of df^2) blowup below.
         books_by_word: dict[int, list[int]] = defaultdict(list)
+        words_by_book: dict[int, list[int]] = defaultdict(list)
         for wid, bid in cur.fetchall():
             books_by_word[wid].append(bid)
+            words_by_book[bid].append(wid)
 
     norm_sq: dict[int, float] = defaultdict(float)
     for wid, books in books_by_word.items():
@@ -2758,17 +2767,6 @@ def compute_book_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 
         for bid in books:
             norm_sq[bid] += w
     norm = {bid: math.sqrt(v) for bid, v in norm_sq.items()}
-
-    dot: dict[int, dict[int, float]] = defaultdict(lambda: defaultdict(float))
-    shared: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
-    for wid, books in books_by_word.items():
-        w2 = idf[wid] ** 2
-        for i, a in enumerate(books):
-            for b in books[i + 1:]:
-                dot[a][b] += w2
-                dot[b][a] += w2
-                shared[a][b] += 1
-                shared[b][a] += 1
 
     book_ids = list(norm.keys())
     if limit:
@@ -2788,10 +2786,35 @@ def compute_book_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 
             cur.execute(f"DELETE FROM {s}.book_similarity WHERE book_a_id = ANY(%s)", (book_ids,))
         else:
             cur.execute(f"DELETE FROM {s}.book_similarity")
+        # One book at a time, not one corpus-wide dot[a][b]/shared[a][b] pair
+        # of dicts covering every book simultaneously (what used to live
+        # here): at 26.5k+ books, a handful of words sitting just under
+        # max_df_fraction's cutoff (still tens of thousands of books each)
+        # made that structure's key count approach the full O(books^2) pair
+        # space -- measured live at ~29GB RSS and climbing, dragging the
+        # host into swap and taking Postgres's own I/O down with it
+        # (2026-08-16). This local dot_a/shared_a pair covers only the
+        # current book's candidates and is discarded every iteration, so
+        # peak memory is bounded by one book's neighborhood instead of the
+        # whole corpus's. Total arithmetic is NOT reduced -- a pair (a, b)
+        # sharing a word gets its idf^2 contribution added once while
+        # visiting a and again while visiting b, versus the old code's
+        # single combined pass -- this trades runtime for a bounded,
+        # predictable memory ceiling, which is the actual scarce resource
+        # here.
         for i, a in enumerate(book_ids, 1):
+            dot_a: dict[int, float] = defaultdict(float)
+            shared_a: dict[int, int] = defaultdict(int)
+            for wid in words_by_book[a]:
+                w2 = idf[wid] ** 2
+                for b in books_by_word[wid]:
+                    if b == a:
+                        continue
+                    dot_a[b] += w2
+                    shared_a[b] += 1
             candidates = [
-                (b, dot[a][b] / (norm[a] * norm[b]), shared[a][b])
-                for b in dot[a] if shared[a][b] >= min_shared_words and norm[b] > 0
+                (b, dot_a[b] / (norm[a] * norm[b]), shared_a[b])
+                for b in dot_a if shared_a[b] >= min_shared_words and norm.get(b, 0) > 0
             ]
             candidates.sort(key=lambda t: t[1], reverse=True)
             for b, score, shared_count in candidates[:top_k]:
@@ -2884,9 +2907,17 @@ def compute_author_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int 
                         WHERE w.active AND b.author IS NOT NULL AND b.author <> ''
                           AND NOT (b.author = ANY(%s))
                           AND wb.word_id = ANY(%s)""", (placeholders, list(idf.keys())))
+        # See compute_book_similarity's identical books_by_word/words_by_book
+        # split for why this is two indexes, not one -- authors_by_word for
+        # "who else shares this word" while scoring an author's candidates
+        # below, words_by_author for "what are this author's own words" as
+        # the outer loop's starting point. Same O(sum of df) size either way,
+        # nowhere near the O(sum of df^2) pairwise structure removed below.
         authors_by_word: dict[int, list[str]] = defaultdict(list)
+        words_by_author: dict[str, list[int]] = defaultdict(list)
         for wid, author in cur.fetchall():
             authors_by_word[wid].append(author)
+            words_by_author[author].append(wid)
 
     norm_sq: dict[str, float] = defaultdict(float)
     for wid, authors in authors_by_word.items():
@@ -2894,17 +2925,6 @@ def compute_author_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int 
         for a in authors:
             norm_sq[a] += w
     norm = {a: math.sqrt(v) for a, v in norm_sq.items()}
-
-    dot: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
-    shared: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    for wid, authors in authors_by_word.items():
-        w2 = idf[wid] ** 2
-        for i, a in enumerate(authors):
-            for b in authors[i + 1:]:
-                dot[a][b] += w2
-                dot[b][a] += w2
-                shared[a][b] += 1
-                shared[b][a] += 1
 
     author_names = list(norm.keys())
     if limit:
@@ -2922,10 +2942,27 @@ def compute_author_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int 
             cur.execute(f"DELETE FROM {s}.author_similarity WHERE author_a = ANY(%s)", (author_names,))
         else:
             cur.execute(f"DELETE FROM {s}.author_similarity")
+        # One author at a time, not one corpus-wide dot[a][b]/shared[a][b]
+        # pair of dicts covering every author simultaneously -- see
+        # compute_book_similarity's identical fix (2026-08-16/17) for why:
+        # same O(books^2)-shaped blowup, just against ~3,500 authors today
+        # instead of 26.5k+ books, so it hadn't bitten yet. Same tradeoff
+        # applies: peak memory bounded by one author's neighborhood instead
+        # of the whole corpus, at the cost of recomputing each shared pair's
+        # contribution once per side instead of once combined.
         for i, a in enumerate(author_names, 1):
+            dot_a: dict[str, float] = defaultdict(float)
+            shared_a: dict[str, int] = defaultdict(int)
+            for wid in words_by_author[a]:
+                w2 = idf[wid] ** 2
+                for b in authors_by_word[wid]:
+                    if b == a:
+                        continue
+                    dot_a[b] += w2
+                    shared_a[b] += 1
             candidates = [
-                (b, dot[a][b] / (norm[a] * norm[b]), shared[a][b])
-                for b in dot[a] if shared[a][b] >= min_shared_words and norm[b] > 0
+                (b, dot_a[b] / (norm[a] * norm[b]), shared_a[b])
+                for b in dot_a if shared_a[b] >= min_shared_words and norm.get(b, 0) > 0
             ]
             candidates.sort(key=lambda t: t[1], reverse=True)
             for b, score, shared_count in candidates[:top_k]:
