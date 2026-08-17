@@ -869,6 +869,41 @@ def test_sync_book_results_writes_the_variant_review_flag():
 
 
 @pg
+def test_sync_book_results_skips_the_db_write_for_frequency_floor_but_still_counts_it():
+    # FREQUENCY_FLOOR is deterministic per-lemma (zipf doesn't vary by book),
+    # unlike every other reject reason -- persisting it in rejected_word was
+    # pure duplication with no reader (confirmed live: 76.3M rows behind
+    # 58,413 distinct lemmas). sync_book_results must skip the DB write for
+    # it while still counting it in stats["rejected"], so the printed
+    # per-book summary ("N kept, M rejected") stays accurate even though only
+    # some of M actually land in the table.
+    from concordance.model import Candidate, RejectReason
+
+    schema = "cc_test_frequency_floor_skip"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    floored = Candidate(lemma="the", pos="DET")
+    floored.reject_reason = RejectReason.FREQUENCY_FLOOR
+    not_interesting = Candidate(lemma="wobble", pos="VERB")
+    not_interesting.reject_reason = RejectReason.NOT_INTERESTING
+
+    stats = db.sync_book_results(conn, "Book One", kept=[], rejected=[floored, not_interesting], schema=schema)
+    assert stats["rejected"] == 2   # both counted, even though only one is persisted
+
+    with conn.cursor() as cur:
+        cur.execute(f"select lemma, reason from {schema}.rejected_word order by lemma")
+        assert cur.fetchall() == [("wobble", "not_interesting")]   # "the" never written
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
 def test_fill_definitions_flags_but_does_not_cast_out_a_variant_hit(monkeypatch):
     # The reverted design: a foreign word / archaic-spelling variant that a
     # source successfully defines gets FLAGGED for human review, not cast

@@ -26,7 +26,7 @@ from concordance import db as cdb
 from concordance import localdict
 from concordance import usas_domains
 from concordance.dictionary import enrich as dictionary_enrich
-from concordance.model import Candidate, junk_pos_reason, normalize_pos
+from concordance.model import Candidate, RejectReason, junk_pos_reason, normalize_pos
 from webapp.backend import auth
 
 app = FastAPI(title="Concordance Review API")
@@ -512,20 +512,31 @@ def list_rejected(
 
 @app.get("/api/rejected/reasons", response_model=list[str])
 def rejected_reasons(_: dict = Depends(require_admin)) -> list[str]:
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            f"""SELECT DISTINCT r.reason FROM {SCHEMA}.rejected_word r
-                WHERE r.reason IS NOT NULL ORDER BY 1"""
-        )
-        return [r[0] for r in cur.fetchall()]
+    # The fixed RejectReason enum, not a DB query -- reasons are an
+    # application-level constant (concordance/model.py), so a DISTINCT scan
+    # of rejected_word to rediscover the same ~8 values every page load was
+    # pure waste, and at scale (106M+ rows) an expensive one: the exact
+    # unfiltered-DISTINCT-over-the-whole-table shape that OOM-killed a live
+    # ingest run elsewhere in this codebase (db.py's fetch_known_verdicts,
+    # 2026-08-16), just not yet triggered here since this page hadn't been
+    # opened. FREQUENCY_FLOOR excluded: sync_book_results no longer persists
+    # it (db.py:1191 -- deterministic per-lemma, never book-specific, and
+    # never surfaced as a reason to review/rescue a word), so it would always
+    # return zero rows now -- same "don't offer an option that can't match
+    # anything" reasoning as browse_genres.
+    return sorted(r.value for r in RejectReason if r is not RejectReason.FREQUENCY_FLOOR)
 
 
 @app.get("/api/rejected/books", response_model=list[str])
 def rejected_books(_: dict = Depends(require_admin)) -> list[str]:
     with get_conn() as conn, conn.cursor() as cur:
+        # EXISTS from the tiny `book` table (thousands of rows) rather than
+        # DISTINCT-through-rejected_word (106M+): a semi-join probes
+        # rejected_word once per book via its book_id-leading index instead
+        # of scanning/deduping the whole table to answer the same question.
         cur.execute(
-            f"""SELECT DISTINCT b.title FROM {SCHEMA}.rejected_word r
-                JOIN {SCHEMA}.book b ON b.id = r.book_id
+            f"""SELECT b.title FROM {SCHEMA}.book b
+                WHERE EXISTS (SELECT 1 FROM {SCHEMA}.rejected_word rw WHERE rw.book_id = b.id)
                 ORDER BY 1"""
         )
         return [r[0] for r in cur.fetchall()]

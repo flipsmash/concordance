@@ -1190,6 +1190,24 @@ def sync_book_results(conn, book_title: str, kept: list, rejected: list,
 
         for c in rejected:
             rep = c.representative
+            stats["rejected"] += 1
+            # FREQUENCY_FLOOR is the one reject reason that's NOT book-specific
+            # -- a lemma's zipf frequency doesn't vary by book, so this verdict
+            # is the same everywhere and recomputable in <1ms (floor.py:29),
+            # unlike every other reason here (judge/human/junk-POS calls that
+            # can genuinely differ book to book, which is why rejected_word is
+            # deliberately one row per (book, lemma) rather than deduped --
+            # see its own table comment). Persisting it anyway was pure
+            # duplication with no reader: confirmed live at 76.3M rows behind
+            # just 58,413 distinct lemmas (a 1,307x duplication factor) before
+            # this was skipped, ~21GB of the table's ~40GB, and nothing
+            # queries rejected_word by this reason except the admin reason-
+            # filter dropdown (now sourced from the RejectReason enum
+            # directly instead, see /api/rejected/reasons). Still counted in
+            # stats["rejected"] above so the per-book console summary stays
+            # accurate -- only the DB write is skipped.
+            if c.reject_reason is RejectReason.FREQUENCY_FLOOR:
+                continue
             cur.execute(
                 f"""INSERT INTO {s}.rejected_word
                     (book_id, lemma, reason, detail, count, zipf, pos, as_seen, sentence, chapter)
@@ -1203,7 +1221,6 @@ def sync_book_results(conn, book_title: str, kept: list, rejected: list,
                  c.interesting_reason or None, c.count, c.zipf,
                  c.pos, rep.surface if rep else None,
                  rep.sentence if rep else None, rep.chapter if rep else None))
-            stats["rejected"] += 1
 
             # A symbol/proper-noun rejection can happen for a lemma that's
             # already an active word from an earlier book (pipeline.py's
