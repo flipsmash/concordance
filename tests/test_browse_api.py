@@ -949,6 +949,68 @@ def test_browse_genres_returns_distinct_present_genres_only():
 
 
 @pg
+def test_browse_growth_zero_fills_quiet_days_and_excludes_placeholder_authors():
+    # Regression guard for the Visualizations page's "Corpus growth" charts:
+    # every day in [min, max] must get a row (0 for a quiet day) so the
+    # frontend never mistakes an omitted day for "didn't happen yet", and
+    # 'authors' must count a real author's FIRST book only, never a
+    # PLACEHOLDER_AUTHORS aggregation label (same exclusion every other
+    # author-scoped endpoint here already applies).
+    schema = "cc_test_browse_growth"
+    client, conn, restore = _setup(schema)
+    try:
+        with conn.cursor() as cur:
+            # Day 1: two books, one new real author, one placeholder author.
+            cur.execute(f"""INSERT INTO {schema}.book (title, author, created_at)
+                            VALUES ('Book A', 'Real Author', '2026-01-01 00:00:00') RETURNING id""")
+            book_a = cur.fetchone()[0]
+            cur.execute(f"""INSERT INTO {schema}.book (title, author, created_at)
+                            VALUES ('Book B', 'Anonymous', '2026-01-01 00:00:00') RETURNING id""")
+            # Day 3 (day 2 deliberately quiet): a second book by the same
+            # real author -- must NOT count as a second "author added" day --
+            # plus a genuinely new author, so day 3's expected author count
+            # is 1 (the new one), not 0 or 2. Also establishes 2026-01-03 as
+            # the real max(first-book date) for bounds -- without a second
+            # real author, "Real Author" alone would bound the series to a
+            # single day (2026-01-01..2026-01-01), and this test wouldn't
+            # exercise the zero-fill gap at all.
+            cur.execute(f"""INSERT INTO {schema}.book (title, author, created_at)
+                            VALUES ('Book C', 'Real Author', '2026-01-03 00:00:00')""")
+            cur.execute(f"""INSERT INTO {schema}.book (title, author, created_at)
+                            VALUES ('Book D', 'Second Author', '2026-01-03 00:00:00')""")
+            # Words: two on day 1, one on day 3, day 2 quiet -- same shape as
+            # books, but keyed on first_added, a bare date.
+            cur.execute(f"""INSERT INTO {schema}.word (lemma, definition, part_of_speech, active, first_added)
+                            VALUES ('alpha', 'a definition', 'noun', true, '2026-01-01'),
+                                   ('beta', 'a definition', 'noun', true, '2026-01-01'),
+                                   ('gamma', 'a definition', 'noun', true, '2026-01-03')""")
+        conn.commit()
+
+        books = client.get("/api/browse/growth", params={"metric": "books"}).json()
+        assert books == [
+            {"date": "2026-01-01", "count": 2},
+            {"date": "2026-01-02", "count": 0},   # quiet day, present with count=0
+            {"date": "2026-01-03", "count": 2},   # Book C + Book D
+        ]
+
+        authors = client.get("/api/browse/growth", params={"metric": "authors"}).json()
+        assert authors == [
+            {"date": "2026-01-01", "count": 1},   # "Real Author" only -- "Anonymous" excluded
+            {"date": "2026-01-02", "count": 0},
+            {"date": "2026-01-03", "count": 1},   # "Second Author" -- Book C isn't a new author
+        ]
+
+        words = client.get("/api/browse/growth", params={"metric": "words"}).json()
+        assert words == [
+            {"date": "2026-01-01", "count": 2},
+            {"date": "2026-01-02", "count": 0},
+            {"date": "2026-01-03", "count": 1},
+        ]
+    finally:
+        restore()
+
+
+@pg
 def test_combined_facets_intersect_regardless_of_which_is_set_first():
     schema = "cc_test_browse_combined"
     client, conn, restore = _setup(schema)

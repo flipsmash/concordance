@@ -25,3 +25,29 @@
 .viz-graph-embed {
   margin-top: 4px;
 }
+
+.growth-chart-toggle {
+  display: flex;
+  gap: 8px;
+}
+
+.growth-chart-group {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 4px;
+}
+
+.growth-chart-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.growth-chart-row-label {
+  flex: 0 0 56px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  padding-bottom: 20px;
+}

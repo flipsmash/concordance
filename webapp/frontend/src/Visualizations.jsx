@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import AuthorSelect from './AuthorSelect'
 import BookSelect from './BookSelect'
 import DifficultyHistogram from './DifficultyHistogram'
+import GrowthChart from './GrowthChart'
 import './Browse.css'
 import './Visualizations.css'
 
@@ -53,6 +54,18 @@ function fameHistQuery(label) {
     : { fame_min: label, fame_max: label }
 }
 
+// GrowthChart's own {date, count} -> {date, value} (a running total in
+// cumulative mode, the raw count otherwise) -- named generically since the
+// chart itself doesn't know or care which mode produced its numbers.
+function toGrowthSeries(daily, mode) {
+  if (mode !== 'cumulative') return daily.map((d) => ({ date: d.date, value: d.count }))
+  let running = 0
+  return daily.map((d) => {
+    running += d.count
+    return { date: d.date, value: running }
+  })
+}
+
 function Visualizations() {
   const navigate = useNavigate()
   const [bookHist, setBookHist] = useState([])
@@ -61,8 +74,24 @@ function Visualizations() {
   const [authorFameHist, setAuthorFameHist] = useState([])
   const [bookDifficultyHist, setBookDifficultyHist] = useState([])
   const [authorDifficultyHist, setAuthorDifficultyHist] = useState([])
+  const [bookGrowth, setBookGrowth] = useState([])
+  const [authorGrowth, setAuthorGrowth] = useState([])
+  const [wordGrowth, setWordGrowth] = useState([])
+  const [growthMode, setGrowthMode] = useState('daily')
 
   useEffect(() => {
+    fetch(`${API_BASE}/api/browse/growth?metric=books`)
+      .then((res) => res.json())
+      .then(setBookGrowth)
+      .catch(() => {})
+    fetch(`${API_BASE}/api/browse/growth?metric=authors`)
+      .then((res) => res.json())
+      .then(setAuthorGrowth)
+      .catch(() => {})
+    fetch(`${API_BASE}/api/browse/growth?metric=words`)
+      .then((res) => res.json())
+      .then(setWordGrowth)
+      .catch(() => {})
     fetch(`${API_BASE}/api/browse/unique-word-histogram?scope=book`)
       .then((res) => res.json())
       .then((data) => setBookHist(toHistBands(data)))
@@ -98,6 +127,47 @@ function Visualizations() {
       <header className="browse-header">
         <h1>Visualizations</h1>
       </header>
+
+      <section className="browse-facets viz-section">
+        <h2 className="viz-heading">Corpus growth</h2>
+        <p className="viz-description">
+          Books, authors, and words added per day, over the corpus's whole history. Ingestion runs
+          in occasional batch passes rather than a steady trickle, so a bursty daily line is real,
+          not a rendering artifact. "Authors" counts a real author's first book (aggregation labels
+          like "Various" excluded); "words" counts each word's first-ever appearance, even across a
+          later re-ingest of the same book.
+        </p>
+        <div className="growth-chart-toggle">
+          <button
+            type="button"
+            className={growthMode === 'daily' ? 'browse-pill active' : 'browse-pill'}
+            onClick={() => setGrowthMode('daily')}
+          >
+            Daily
+          </button>
+          <button
+            type="button"
+            className={growthMode === 'cumulative' ? 'browse-pill active' : 'browse-pill'}
+            onClick={() => setGrowthMode('cumulative')}
+          >
+            Cumulative
+          </button>
+        </div>
+        <div className="growth-chart-group">
+          <div className="growth-chart-row">
+            <span className="growth-chart-row-label">Books</span>
+            <GrowthChart data={toGrowthSeries(bookGrowth, growthMode)} unit="books" />
+          </div>
+          <div className="growth-chart-row">
+            <span className="growth-chart-row-label">Authors</span>
+            <GrowthChart data={toGrowthSeries(authorGrowth, growthMode)} unit="authors" />
+          </div>
+          <div className="growth-chart-row">
+            <span className="growth-chart-row-label">Words</span>
+            <GrowthChart data={toGrowthSeries(wordGrowth, growthMode)} unit="words" />
+          </div>
+        </div>
+      </section>
 
       <section className="browse-facets viz-section">
         <h2 className="viz-heading">Books by vocabulary overlap</h2>

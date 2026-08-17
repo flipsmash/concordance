@@ -2357,6 +2357,75 @@ def browse_fame_histogram(
     return [UniqueWordBucket(label=label, count=counts.get(label, 0)) for label in labels]
 
 
+# --- /api/browse/growth -------------------------------------------------------
+
+class DailyCount(BaseModel):
+    date: str   # ISO yyyy-mm-dd
+    count: int
+
+
+@router.get("/api/browse/growth", response_model=list[DailyCount])
+def browse_growth(
+    metric: Literal["books", "authors", "words"] = "books",
+    _: dict = Depends(_main.require_viewer),
+) -> list[DailyCount]:
+    """How many books/authors/words were added per calendar day, over the
+    whole corpus's history -- a real time series (unlike every other
+    histogram endpoint in this file, whose x-axis is a value range, not a
+    date), so the day-to-day shape here is expected to be bursty rather than
+    smooth: ingestion happens in occasional multi-hundred-book batch runs,
+    not a steady daily trickle, and a chart that hid that would be
+    misleading rather than "cleaner." `date_trunc('day', ...)` in the
+    entity's own timezone (book.created_at's, since word.first_added is
+    already a bare date with no timezone to normalize).
+
+    'authors' counts a real author's FIRST book (PLACEHOLDER_AUTHORS
+    excluded, same as every other author-scoped endpoint here) -- there's no
+    separate author table, so "an author was added" only ever means "their
+    earliest book landed." 'words' uses word.first_added, which -- per its
+    own upsert (db.py's sync_book_results, LEAST() on conflict) -- only ever
+    moves earlier, never later, so grouping by it directly gives each word's
+    true first-seen day even across re-ingests.
+
+    Every day in [min, max] gets a row, count=0 for a quiet day rather than
+    the day being omitted -- so a bar chart built from this never silently
+    compresses a long gap between batch runs into what looks like back-to-
+    back days."""
+    s = _main.SCHEMA
+
+    if metric == "books":
+        date_expr = "b.created_at::date"
+        from_clause = f"{s}.book b"
+    elif metric == "words":
+        date_expr = "w.first_added"
+        from_clause = f"{s}.word w WHERE w.first_added IS NOT NULL"
+    else:
+        placeholders = list(PLACEHOLDER_AUTHORS)
+        date_expr = "fb.d"
+        from_clause = f"""(SELECT min(b.created_at)::date AS d
+                            FROM {s}.book b
+                            WHERE b.author IS NOT NULL AND b.author != ''
+                              AND b.author != ALL(%s)
+                            GROUP BY b.author) fb"""
+
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        query = f"""
+            WITH counted AS (
+                SELECT {date_expr} AS d, count(*) AS n FROM {from_clause} GROUP BY 1
+            ), bounds AS (
+                SELECT min(d) AS lo, max(d) AS hi FROM counted
+            )
+            SELECT gs.d::date, coalesce(counted.n, 0)
+            FROM bounds, generate_series(bounds.lo, bounds.hi, interval '1 day') AS gs(d)
+            LEFT JOIN counted ON counted.d = gs.d::date
+            ORDER BY gs.d
+        """
+        cur.execute(query, (placeholders,) if metric == "authors" else None)
+        rows = cur.fetchall()
+
+    return [DailyCount(date=d.isoformat(), count=n) for d, n in rows]
+
+
 # --- /api/browse/overall-difficulty-histogram -------------------------------
 
 @router.get("/api/browse/overall-difficulty-histogram", response_model=list[DifficultyBandCount])

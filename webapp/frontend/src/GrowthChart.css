@@ -1,0 +1,49 @@
+.growth-chart {
+  overflow-x: auto;
+}
+
+.growth-chart-svg {
+  display: block;
+  overflow: visible; /* the first/last point's hit-circle sits partly in the PADDING_X margin */
+}
+
+.growth-chart-baseline {
+  stroke: var(--text-h);
+  stroke-width: 2;
+}
+
+.growth-chart-area {
+  fill: color-mix(in srgb, var(--accent) 16%, transparent);
+  stroke: none;
+}
+
+.growth-chart-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.growth-chart-hit {
+  fill: transparent;
+}
+
+.growth-chart-hit:hover {
+  fill: var(--accent);
+}
+
+.growth-chart-labels {
+  position: relative;
+  height: 16px;
+  margin-top: 4px;
+}
+
+.growth-chart-label {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  font-size: 10px;
+  color: var(--text);
+  white-space: nowrap;
+}
