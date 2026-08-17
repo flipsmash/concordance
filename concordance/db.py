@@ -391,12 +391,21 @@ CREATE TABLE IF NOT EXISTS {s}.rejected_word (
 
 CREATE INDEX IF NOT EXISTS rejected_word_lemma_idx ON {s}.rejected_word (lemma_lc);
 
--- Backs load_verdict_cache's `WHERE reason IN (...)` scan (re-run once per
--- book during ingestion): without this the planner has no way to avoid a
--- sequential scan of the whole table, which only gets more expensive as the
--- corpus grows (measured: ~5.9s/full scan vs ~1.5s/index-only scan at ~40M
--- rows, and the gap widens with table size).
-CREATE INDEX IF NOT EXISTS rejected_word_reason_lemma_idx ON {s}.rejected_word (reason) INCLUDE (lemma_lc);
+-- Backs fetch_known_verdicts's `SELECT DISTINCT lemma_lc, reason ... WHERE
+-- reason IN (...)` scan (re-run once per book during ingestion). lemma_lc is
+-- a real key column here (not just INCLUDE'd) so the index is already sorted
+-- by (reason, lemma_lc) -- exactly the DISTINCT's grouping order -- letting
+-- the planner satisfy the query with a plain index-only scan + streaming
+-- Unique instead of a HashAggregate/sort over however many rows currently
+-- match. Superseded rejected_word_reason_lemma_idx ((reason) INCLUDE
+-- (lemma_lc)), which was already too expensive as the corpus grew (measured:
+-- ~5.9s/full scan vs ~1.5s/index-only scan at ~40M rows, gap widens with
+-- table size) and, without DISTINCT on the query side, was no defense
+-- against rejected_word's deliberate one-row-per-(book,lemma) duplication
+-- (see its own table comment) -- fetch_known_verdicts shipped 28M duplicate
+-- rows to Python for what collapsed to 862K distinct lemmas at 106M total
+-- rejected_word rows, OOM-killing a live ingest run on 2026-08-16.
+CREATE INDEX IF NOT EXISTS rejected_word_reason_lemma_key_idx ON {s}.rejected_word (reason, lemma_lc);
 
 -- App-level accounts, separate from Cloudflare Access (which gates the admin
 -- curation UI at the network edge). is_admin distinguishes the curation-side
@@ -786,6 +795,12 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
     s = _safe_schema(schema)
     with conn.cursor() as cur:
         cur.execute(_SCHEMA_DDL.format(s=s))
+        # rejected_word_reason_lemma_key_idx (created above) supersedes this --
+        # same leading column, plus lemma_lc as a real sort key instead of just
+        # an INCLUDE payload. IF NOT EXISTS above can't drop a pre-existing,
+        # differently-named index, so evolve it explicitly here, same as the
+        # ADD COLUMN IF NOT EXISTS lines below.
+        cur.execute(f"DROP INDEX IF EXISTS {s}.rejected_word_reason_lemma_idx")
         # idempotent column additions (CREATE TABLE IF NOT EXISTS won't alter an
         # existing table, so evolve columns explicitly)
         cur.execute(f"ALTER TABLE {s}.book ADD COLUMN IF NOT EXISTS author text")
@@ -2205,10 +2220,30 @@ def fetch_known_verdicts(conn, schema: str = DEFAULT_SCHEMA) -> dict[str, str]:
     s = _safe_schema(schema)
     verdicts: dict[str, str] = {}
     with conn.cursor() as cur:
+        # Both session-scoped (this connection is opened and closed once per
+        # book, see pipeline.process) -- neither touches the server default.
+        # work_mem: without this the Sort/HashAggregate over however many
+        # rows currently match spills to disk under the 4MB default (measured
+        # live: 47.7s with the default vs 9.9s at 128MB, same plan otherwise).
+        # random_page_cost: measured live that the planner otherwise picks a
+        # Bitmap Heap Scan over rejected_word_reason_lemma_key_idx (still
+        # ~9-10s) instead of the actually-fastest Parallel Index Only Scan
+        # (~4s) that same index supports -- its default (4.0, tuned for
+        # spinning disks) overweights random I/O relative to this machine's
+        # actual (SSD) storage. 1.1 is the standard SSD-tuning value and gets
+        # the planner to pick the fast plan on its own.
+        cur.execute("SET work_mem = '128MB'")
+        cur.execute("SET random_page_cost = 1.1")
         # The specific reason (not a generic "reject") so pipeline.py's
         # _VERDICT_MAP can restore the true original reason on a cached hit
-        # instead of relabeling every cached reject as not_interesting.
-        cur.execute(f"""SELECT lemma_lc, reason FROM {s}.rejected_word
+        # instead of relabeling every cached reject as not_interesting. DISTINCT
+        # because rejected_word is deliberately one row per (book, lemma) --
+        # a common lemma rejected the same way in thousands of books would
+        # otherwise ship one duplicate tuple per book instead of one per
+        # lemma, which is what blew this call up to tens of GB of client-side
+        # buffering (28M rows fetched here at ~106M total rejected_word rows)
+        # and OOM-killed a live ingest run on 2026-08-16.
+        cur.execute(f"""SELECT DISTINCT lemma_lc, reason FROM {s}.rejected_word
                         WHERE reason IN ('not_interesting', 'numeric_or_symbol', 'proper_noun')""")
         for lemma, reason in cur.fetchall():
             verdicts[lemma] = reason
