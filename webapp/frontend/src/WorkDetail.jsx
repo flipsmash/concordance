@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import AddToSetMenu from './AddToSetMenu'
+import { ARCHAIC_TOOLTIPS } from './archaicLabels'
 import DifficultyHistogram from './DifficultyHistogram'
 import DomainDistribution from './DomainDistribution'
 import { goodreadsSearchUrl, wikipediaSearchUrl } from './externalLinks'
@@ -318,8 +319,10 @@ function WorkDetail() {
               </span>
             )}
             <span className="browse-result-badges">
+              {w.archaic && w.archaic !== 'current' && (
+                <span className="browse-archaic-tag" title={ARCHAIC_TOOLTIPS[w.archaic]}>{w.archaic}</span>
+              )}
               {w.difficulty != null && <span className="browse-difficulty-pill">{Math.round(w.difficulty)}</span>}
-              {w.archaic && w.archaic !== 'current' && <span className="browse-archaic-tag">{w.archaic}</span>}
             </span>
             <span className="browse-result-add-to-set" onClick={(e) => e.stopPropagation()}>
               <AddToSetMenu wordIds={[w.id]} label="+" title="Add to set" />

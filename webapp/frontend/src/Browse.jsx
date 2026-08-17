@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import AddToSetMenu from './AddToSetMenu'
 import AlphabetStrip from './AlphabetStrip'
 import AuthorSelect from './AuthorSelect'
+import { ARCHAIC_TOOLTIPS } from './archaicLabels'
 import MultiSelect from './MultiSelect'
 import Pagination from './Pagination'
 import SortControl from './SortControl'
@@ -530,8 +531,10 @@ function Browse() {
               </span>
             )}
             <span className="browse-result-badges">
+              {w.archaic && w.archaic !== 'current' && (
+                <span className="browse-archaic-tag" title={ARCHAIC_TOOLTIPS[w.archaic]}>{w.archaic}</span>
+              )}
               {w.difficulty != null && <span className="browse-difficulty-pill">{Math.round(w.difficulty)}</span>}
-              {w.archaic && w.archaic !== 'current' && <span className="browse-archaic-tag">{w.archaic}</span>}
               {sort === 'book_count' && (
                 <span className="browse-difficulty-pill" title={`${w.book_count} source${w.book_count === 1 ? '' : 's'}`}>
                   {w.book_count}
