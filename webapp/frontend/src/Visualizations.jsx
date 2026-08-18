@@ -13,6 +13,7 @@ const API_BASE = ''
 // react-force-graph-2d's canvas/d3-force bundle only once this page is
 // actually opened.
 const GraphView = lazy(() => import('./GraphView'))
+const GenreOverlapGraph = lazy(() => import('./GenreOverlapGraph'))
 
 // A hub for every relatedness/graph view the app has, all of which
 // otherwise only exist as links buried behind a specific word/book/author's
@@ -200,6 +201,20 @@ function Visualizations() {
           <Link to="/app/authors/relatedness" className="browse-quiz-link">
             See the top authors at once →
           </Link>
+        </div>
+      </section>
+
+      <section className="browse-facets viz-section">
+        <h2 className="viz-heading">Genres by vocabulary overlap</h2>
+        <p className="viz-description">
+          How much rare vocabulary each genre shares with every other genre -- unlike books and
+          authors, there's no "top N" here: with concordance/genre.py's fixed genre list, every
+          genre that's been tagged at all fits in one graph.
+        </p>
+        <div className="viz-graph-embed">
+          <Suspense fallback={<div className="page-loading">Loading…</div>}>
+            <GenreOverlapGraph />
+          </Suspense>
         </div>
       </section>
 

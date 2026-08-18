@@ -68,6 +68,16 @@ function Browse() {
   const domains = searchParams.getAll('domain')
   const topCodes = searchParams.getAll('top_code')
   const allTopCodes = searchParams.getAll('all_top_code')
+  // AND-intersection one level up from all_top_code, same reasoning -- only
+  // ever arrives via CategoryOverlapGraph's own top-level (6-bucket)
+  // link-click, same shelf-only treatment, no facet-row control of its own
+  // (the facet-row bucket chips toggle plain `domain`, an OR).
+  const allDomains = searchParams.getAll('all_domain')
+  // AND-intersection, same shape/reasoning as all_top_code above -- only
+  // ever arrives via the Visualizations page's genre-overlap graph's own
+  // link-click (/app/words?all_genre=X&all_genre=Y), same shelf-only
+  // treatment, no facet-row control of its own here.
+  const allGenres = searchParams.getAll('all_genre')
   const difficultyMin = searchParams.get('difficulty_min') || ''
   const difficultyMax = searchParams.get('difficulty_max') || ''
   const archaic = searchParams.getAll('archaic')
@@ -144,6 +154,22 @@ function Browse() {
     })
   }
 
+  function removeAllDomain(bucket) {
+    updateParams((next) => {
+      const current = next.getAll('all_domain')
+      next.delete('all_domain')
+      current.filter((d) => d !== bucket).forEach((d) => next.append('all_domain', d))
+    })
+  }
+
+  function removeAllGenre(genre) {
+    updateParams((next) => {
+      const current = next.getAll('all_genre')
+      next.delete('all_genre')
+      current.filter((g) => g !== genre).forEach((g) => next.append('all_genre', g))
+    })
+  }
+
   function clearDefinitionContains() {
     updateParams((next) => next.delete('definition_contains'))
   }
@@ -190,6 +216,7 @@ function Browse() {
 
   const activeFacetCount =
     (author ? 1 : 0) + bookIds.length + domains.length + topCodes.length + allTopCodes.length +
+    allDomains.length + allGenres.length +
     (difficultyMin || difficultyMax ? 1 : 0) + archaic.length +
     (quizzableOnly ? 1 : 0) + (letter ? 1 : 0) + (definitionContains ? 1 : 0) + (q ? 1 : 0)
 
@@ -205,6 +232,8 @@ function Browse() {
     domains.forEach((d) => p.append('domain', d))
     topCodes.forEach((c) => p.append('top_code', c))
     allTopCodes.forEach((c) => p.append('all_top_code', c))
+    allDomains.forEach((d) => p.append('all_domain', d))
+    allGenres.forEach((g) => p.append('all_genre', g))
     if (difficultyMin !== '') p.set('difficulty_min', difficultyMin)
     if (difficultyMax !== '') p.set('difficulty_max', difficultyMax)
     archaic.forEach((a) => p.append('archaic', a))
@@ -319,6 +348,8 @@ function Browse() {
         domain: domains,
         top_code: topCodes,
         all_top_code: allTopCodes,
+        all_domain: allDomains,
+        all_genre: allGenres,
         difficulty_min: difficultyMin,
         difficulty_max: difficultyMax,
         archaic,
@@ -464,6 +495,16 @@ function Browse() {
             {allTopCodes.map((c) => (
               <button type="button" key={c} className="browse-chip" onClick={() => removeAllTopCode(c)}>
                 Field (all): {topCodeNames[c] || c} ×
+              </button>
+            ))}
+            {allDomains.map((d) => (
+              <button type="button" key={d} className="browse-chip" onClick={() => removeAllDomain(d)}>
+                Domain (all): {bucketName[d] || d} ×
+              </button>
+            ))}
+            {allGenres.map((g) => (
+              <button type="button" key={g} className="browse-chip" onClick={() => removeAllGenre(g)}>
+                Genre (all): {g} ×
               </button>
             ))}
             {(difficultyMin || difficultyMax) && (

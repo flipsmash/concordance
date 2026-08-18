@@ -151,6 +151,8 @@ def _build_word_filters(
     quizzable_only: bool,
     top_code: list[str] = [],
     all_top_code: list[str] = [],
+    all_domain: list[str] = [],
+    all_genre: list[str] = [],
     uncategorized: bool = False,
     unscored_only: bool = False,
     exclusive: bool = False,
@@ -178,6 +180,28 @@ def _build_word_filters(
     matching exactly what browse_category_overlap's own shared-word count
     computes). One EXISTS per code, so it composes with plain AND via the
     filters list below rather than needing new join/logic here.
+
+    `all_domain` is the identical AND-intersection fix one level up: `domain`
+    with multiple bucket values is an OR (matches _build_word_filters' own
+    long-standing behavior, correct for the facet-row bucket chips a user
+    toggles on to broaden a search), but the category-overlap graph's
+    TOP-LEVEL edge click (the 6 buckets themselves, not their member
+    fields) needs the same intersection every deeper level already gets
+    from `all_top_code` -- "a word tagged under a category in BOTH bucket A
+    and bucket B", matching browse_category_overlap's own shared-word count
+    at that tier. Found live (2026-08-17): the click-through was using
+    `domain` (OR) here, so two buckets sharing, say, 500 words by the
+    overlap graph's own count instead showed the ~40,000-word union of
+    both buckets' entire membership -- technically not wrong data, just not
+    what the edge the user clicked claimed to represent.
+
+    `all_genre` is genre's own AND-intersection filter, same shape as
+    `all_top_code` and for the same reason: browse_genres_overlap's
+    click-through needs "words appearing in a book tagged BOTH genre A and
+    genre B" (an intersection), not browse_books's own `genre` param (an
+    OR -- "in a book tagged ANY of these"). Genre is book-level, not
+    word-level like a USAS category, so each clause joins through
+    word_book/book_genre rather than word_category.
 
     `uncategorized`/`unscored_only` are the two SQL fragments
     /api/browse/domain-summary and /api/browse/difficulty-bands already
@@ -258,6 +282,23 @@ def _build_word_filters(
                         WHERE wc.word_id = w.id AND (c.code = %s OR c.code LIKE %s))"""
         )
         params.extend([exact, like])
+    for bucket in all_domain:
+        codes = usas_domains.DOMAIN_BUCKETS.get(bucket, {}).get("codes", [])
+        if not codes:
+            continue
+        filters.append(
+            f"""EXISTS (SELECT 1 FROM {_main.SCHEMA}.word_category wc
+                        JOIN {_main.SCHEMA}.category c ON c.id = wc.category_id
+                        WHERE wc.word_id = w.id AND left(c.code, 1) = ANY(%s))"""
+        )
+        params.append(codes)
+    for genre in all_genre:
+        filters.append(
+            f"""EXISTS (SELECT 1 FROM {_main.SCHEMA}.word_book wb
+                        JOIN {_main.SCHEMA}.book_genre bg ON bg.book_id = wb.book_id
+                        WHERE wb.word_id = w.id AND bg.genre = %s)"""
+        )
+        params.append(genre)
     if archaic:
         filters.append("wd.archaic = ANY(%s)")
         params.append(archaic)
@@ -808,6 +849,78 @@ def browse_genres(_: dict = Depends(_main.require_viewer)) -> list[str]:
     with _main.get_conn() as conn, conn.cursor() as cur:
         cur.execute(f"SELECT DISTINCT genre FROM {_main.SCHEMA}.book_genre ORDER BY 1")
         return [r[0] for r in cur.fetchall()]
+
+
+class GenreCount(BaseModel):
+    genre: str
+    word_count: int
+
+
+class GenreOverlapCell(BaseModel):
+    genre_a: str
+    genre_b: str
+    shared_words: int
+    ratio: float  # Jaccard (shared / union), same reasoning as
+                   # CategoryOverlapCell.ratio -- genres vary hugely in book
+                   # count, so a raw shared-word count would mostly just
+                   # track genre size, not how related two genres actually are
+
+
+class GenreOverlap(BaseModel):
+    sizes: list[GenreCount]         # one row per genre that has any active words at all
+    cells: list[GenreOverlapCell]   # only pairs that actually share at least one word
+
+
+@router.get("/api/browse/genre-overlap", response_model=GenreOverlap)
+def browse_genre_overlap(_: dict = Depends(_main.require_viewer)) -> GenreOverlap:
+    """How much active-word vocabulary each pair of genres shares -- feeds
+    GenreOverlapGraph on the Visualizations page. Unlike
+    browse_category_overlap (three drilldown tiers, since USAS categories
+    nest), genre is flat -- concordance/genre.py's GENRE_LIST has no
+    hierarchy -- so this is always the full set of genres actually in use,
+    never a bucket/parent-scoped subset.
+
+    Genre lives on `book`, not `word` (concordance book-genres tags a whole
+    book, not individual words), so a word's own genre membership is
+    derived here rather than looked up directly: a word belongs to a genre
+    if ANY of its books carries that genre tag. A word touching several
+    genres (its own book has multiple tags, or it appears in several
+    differently-tagged books) contributes to every one of them, same
+    "one row per sibling it touches" shape _overlap_matrix uses for
+    categories -- not factored out into a shared helper (see
+    CategoryOverlapGraph.jsx's own docstring for why this project
+    copy-adapts rather than forcing one abstraction over genuinely
+    different join shapes: category attaches to a word directly via
+    word_category, genre only reaches a word by way of word_book)."""
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT DISTINCT wb.word_id, bg.genre
+                FROM {_main.SCHEMA}.word_book wb
+                JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id AND w.active
+                JOIN {_main.SCHEMA}.book_genre bg ON bg.book_id = wb.book_id"""
+        )
+        word_genres: dict[int, set[str]] = defaultdict(set)
+        for word_id, genre in cur.fetchall():
+            word_genres[word_id].add(genre)
+
+    sizes: dict[str, int] = defaultdict(int)
+    shared: dict[tuple[str, str], int] = defaultdict(int)
+    for genres in word_genres.values():
+        for genre in genres:
+            sizes[genre] += 1
+        if len(genres) > 1:
+            for a, b in itertools.combinations(sorted(genres), 2):
+                shared[(a, b)] += 1
+
+    size_rows = [GenreCount(genre=g, word_count=n) for g, n in sorted(sizes.items())]
+    cells = [
+        GenreOverlapCell(
+            genre_a=a, genre_b=b, shared_words=n,
+            ratio=round(n / (sizes[a] + sizes[b] - n), 4) if (sizes[a] + sizes[b] - n) else 0.0,
+        )
+        for (a, b), n in shared.items()
+    ]
+    return GenreOverlap(sizes=size_rows, cells=cells)
 
 
 @router.get("/api/browse/books", response_model=BookPage)
@@ -1891,6 +2004,11 @@ def browse_words(
     domain: list[str] = Query([]),
     top_code: list[str] = Query([]),
     all_top_code: list[str] = Query([]),
+    all_domain: list[str] = Query([]),  # AND-intersection, one level up from all_top_code --
+                                         # see _build_word_filters' own docstring; deep-linked from
+                                         # CategoryOverlapGraph's top-level (6-bucket) link-click
+    all_genre: list[str] = Query([]),  # AND-intersection -- see _build_word_filters' own docstring;
+                                        # deep-linked from GenreOverlapGraph's link-click
     uncategorized: bool = False,
     difficulty_min: float | None = None,
     difficulty_max: float | None = None,
@@ -1916,8 +2034,8 @@ def browse_words(
     for code in all_top_code:
         if code not in _ALL_CODES:
             raise HTTPException(404, f"unknown category code {code!r}")
-    if uncategorized and (domain or top_code or all_top_code):
-        raise HTTPException(400, "uncategorized is mutually exclusive with domain/top_code/all_top_code")
+    if uncategorized and (domain or top_code or all_top_code or all_domain):
+        raise HTTPException(400, "uncategorized is mutually exclusive with domain/top_code/all_top_code/all_domain")
     if unscored_only and (difficulty_min is not None or difficulty_max is not None):
         raise HTTPException(400, "unscored_only is mutually exclusive with difficulty_min/difficulty_max")
     if q and definition_q:
@@ -1926,7 +2044,8 @@ def browse_words(
         raise HTTPException(400, "definition_contains is mutually exclusive with q/definition_q")
     filters, params = _build_word_filters(
         author, book_id, domain, difficulty_min, difficulty_max, archaic, pos, quizzable_only,
-        top_code=top_code, all_top_code=all_top_code, uncategorized=uncategorized, unscored_only=unscored_only,
+        top_code=top_code, all_top_code=all_top_code, all_domain=all_domain, all_genre=all_genre,
+        uncategorized=uncategorized, unscored_only=unscored_only,
         exclusive=exclusive,
     )
     if letter:

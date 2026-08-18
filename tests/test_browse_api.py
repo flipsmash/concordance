@@ -949,6 +949,56 @@ def test_browse_genres_returns_distinct_present_genres_only():
 
 
 @pg
+def test_genre_overlap_and_all_genre_intersection_filter():
+    # Mirrors test_category_overlap_at_parent_level's shape, but genre
+    # reaches a word through word_book/book_genre (book-level), not
+    # word_category (word-level) -- a word belongs to a genre if ANY of its
+    # books carries that tag.
+    schema = "cc_test_genre_overlap"
+    client, conn, restore = _setup(schema)
+    try:
+        book_fantasy = _insert_book(conn, schema, "Fantasy Only", author="Author A")
+        book_history = _insert_book(conn, schema, "History Only", author="Author B")
+        book_both = _insert_book(conn, schema, "Both Genres", author="Author C")
+        with conn.cursor() as cur:
+            cur.execute(f"INSERT INTO {schema}.book_genre (book_id, genre, source) VALUES (%s,'Fantasy','llm')",
+                        (book_fantasy,))
+            cur.execute(f"INSERT INTO {schema}.book_genre (book_id, genre, source) VALUES (%s,'History','llm')",
+                        (book_history,))
+            cur.execute(f"INSERT INTO {schema}.book_genre (book_id, genre, source) VALUES (%s,'Fantasy','llm')",
+                        (book_both,))
+            cur.execute(f"INSERT INTO {schema}.book_genre (book_id, genre, source) VALUES (%s,'History','llm')",
+                        (book_both,))
+        conn.commit()
+
+        only_fantasy = _insert_word(conn, schema, "onlyfantasy")
+        _link(conn, schema, only_fantasy, book_fantasy)
+        only_history = _insert_word(conn, schema, "onlyhistory")
+        _link(conn, schema, only_history, book_history)
+        both = _insert_word(conn, schema, "bothgenres")
+        _link(conn, schema, both, book_both)
+        conn.commit()
+
+        data = client.get("/api/browse/genre-overlap").json()
+        sizes = {s["genre"]: s["word_count"] for s in data["sizes"]}
+        assert sizes["Fantasy"] == 2   # onlyfantasy + bothgenres
+        assert sizes["History"] == 2   # onlyhistory + bothgenres
+        assert len(data["cells"]) == 1
+        cell = data["cells"][0]
+        assert {cell["genre_a"], cell["genre_b"]} == {"Fantasy", "History"}
+        assert cell["shared_words"] == 1
+        assert cell["ratio"] == pytest.approx(1 / 3, abs=1e-4)  # 1 shared / (2+2-1) union
+
+        # all_genre (the overlap graph's own link-click) is an AND --
+        # deliberately distinct from browse_books's own `genre` param (an
+        # OR), same reasoning all_top_code differs from top_code.
+        words = client.get("/api/browse/words?all_genre=Fantasy&all_genre=History").json()
+        assert {w["lemma"] for w in words["items"]} == {"bothgenres"}
+    finally:
+        restore()
+
+
+@pg
 def test_browse_growth_zero_fills_quiet_days_and_excludes_placeholder_authors():
     # Regression guard for the Visualizations page's "Corpus growth" charts:
     # every day in [min, max] must get a row (0 for a quiet day) so the
@@ -1252,6 +1302,18 @@ def test_category_overlap_at_top_bucket_level():
         assert sizes["people_society"] == 2  # stagged + astagged
         by_pair = {frozenset((c["code_a"], c["code_b"])): c for c in data["cells"]}
         assert by_pair[frozenset(("mind_language", "people_society"))]["shared_words"] == 1  # astagged only
+
+        # Regression (2026-08-17): CategoryOverlapGraph's top-level edge
+        # click used to send `domain` (OR) here -- the union of both
+        # buckets' entire membership, not the single-word intersection the
+        # edge's own shared_words=1 above actually represents. all_domain
+        # is the fix: an AND, same shape as all_top_code one level down.
+        all_domain = client.get(
+            "/api/browse/words?all_domain=mind_language&all_domain=people_society"
+        ).json()
+        assert {w["lemma"] for w in all_domain["items"]} == {"astagged"}
+        either_domain = client.get("/api/browse/words?domain=mind_language&domain=people_society").json()
+        assert either_domain["total"] == 3  # atagged + stagged + astagged -- the OR case, for contrast
     finally:
         restore()
 

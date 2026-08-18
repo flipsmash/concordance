@@ -145,10 +145,15 @@ function CategoryOverlapGraph({ bucket, parent, basePath }) {
 
   function overlapHref(codeA, codeB) {
     const params = new URLSearchParams()
-    const key = isTopLevel ? 'domain' : 'all_top_code'
+    // Both AND-intersections, matching exactly what this graph's own edge
+    // (browse_category_overlap's shared-word count) represents -- `domain`
+    // alone is an OR (right for the facet-row bucket chips, wrong here: a
+    // real live check found it showing the ~40k-word union of two buckets'
+    // entire membership for an edge whose own count was in the hundreds).
+    const key = isTopLevel ? 'all_domain' : 'all_top_code'
     params.append(key, codeA)
     params.append(key, codeB)
-    return `/app?${params}`
+    return `/app/words?${params}`
   }
 
   // Node fill: real bucket colors at the top level (the one place 6 truly
