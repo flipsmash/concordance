@@ -52,3 +52,10 @@ dictionaries/
 
 # Operational logs from one-off scripts (scripts/*.sh) — output, not source
 scripts/*.log
+logs/
+
+# Local llama.cpp build directory
+.build/
+
+# Stray Windows shortcut
+archive.lnk
