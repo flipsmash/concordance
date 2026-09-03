@@ -62,7 +62,7 @@ function CategorySubsubfieldDetail() {
 
       {error && <div className="error-banner">{error}</div>}
 
-      <Link to={`/app?top_code=${subsubcode}`} className="browse-quiz-link">
+      <Link to={`/app/words?top_code=${subsubcode}`} className="browse-quiz-link">
         Browse the words in this sub-sub-field →
       </Link>
 

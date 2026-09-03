@@ -52,7 +52,7 @@ function CategorySubsubsubfieldDetail() {
 
       {error && <div className="error-banner">{error}</div>}
 
-      <Link to={`/app?top_code=${subsubsubcode}`} className="browse-quiz-link">
+      <Link to={`/app/words?top_code=${subsubsubcode}`} className="browse-quiz-link">
         Browse the words in this category →
       </Link>
 

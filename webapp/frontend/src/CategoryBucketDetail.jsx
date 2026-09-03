@@ -55,7 +55,7 @@ function CategoryBucketDetail() {
         </div>
       </header>
 
-      <Link to={`/app?domain=${bucket}`} className="browse-quiz-link">
+      <Link to={`/app/words?domain=${bucket}`} className="browse-quiz-link">
         Browse the words in this category →
       </Link>
 
