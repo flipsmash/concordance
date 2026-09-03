@@ -22,7 +22,14 @@ def test_falls_through_to_wordnik_when_kaikki_has_nothing():
     assert ipa  # arpabet.to_ipa("T EH1 S T") -> a real IPA string
 
 
-def test_wordnik_gcide_diacritical_has_no_converter_falls_through():
+def test_wordnik_gcide_diacritical_converts_when_recognizable():
+    hit = rp.resolve_ipa(kaikki_entry=None, wordnik_raw='(tĕst)', wordnik_type="gcide-diacritical",
+                          local_entries=[("noun", "def", "ˈlkl", False, False)])
+    assert hit == ("tɛst", rp.Tier.WORDNIK)
+
+
+def test_wordnik_gcide_diacritical_falls_through_when_unconvertible():
+    # no surrounding parens -- not gcide.py's format, fails closed
     hit = rp.resolve_ipa(kaikki_entry=None, wordnik_raw="tehst", wordnik_type="gcide-diacritical",
                           local_entries=[("noun", "def", "ˈlkl", False, False)])
     assert hit == ("ˈlkl", rp.Tier.LOCAL_WIKTIONARY)

@@ -27,8 +27,11 @@ do with whatever it already fetched.
                            network at lookup time.
   2. WORDNIK            -- word.wordnik_pron_raw/wordnik_pron_type, already
                            fetched by `wordnik-pron`, converted via the
-                           matching notation converter (ahd.py/arpabet.py;
-                           gcide-diacritical has no converter yet).
+                           matching notation converter (ahd.py/arpabet.py/
+                           gcide.py). gcide.py fails closed on a large share
+                           of its own rawType (OCR-corrupted or elided-prefix
+                           source rows -- see its module docstring), so this
+                           tier's yield is uneven across rawTypes, not a bug.
   3. LOCAL_WIKTIONARY   -- vocab.wiktionary's us_pronunciation column
                            (localdict.py). The same underlying Wiktionary
                            data kaikki's dump draws from, just a different
@@ -62,7 +65,7 @@ from __future__ import annotations
 
 from enum import IntEnum
 
-from . import ahd, arpabet, audio, wiktextract
+from . import ahd, arpabet, audio, gcide, wiktextract
 
 
 class Tier(IntEnum):
@@ -81,8 +84,10 @@ def _wordnik_ipa(raw: str | None, rtype: str | None) -> str | None:
         converted = arpabet.to_ipa(raw)
     elif rtype == "ahd-5":
         converted = ahd.to_ipa(raw)
+    elif rtype == "gcide-diacritical":
+        converted = gcide.to_ipa(raw)
     else:
-        return None  # gcide-diacritical: no converter yet
+        return None
     return converted if converted and audio.looks_like_english_ipa(converted) else None
 
 
