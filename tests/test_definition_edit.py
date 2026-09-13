@@ -295,8 +295,10 @@ def test_word_detail_exposes_quiz_definition_and_source():
     judged against `quiz_definition` (what a quiz really shows), which had
     already been safely rewritten, but nothing in the word detail response
     exposed that field to let an admin see the two disagree. Word detail is
-    require_viewer (not admin-gated) at the API layer -- the frontend hides
-    this field for non-admins, but the API itself must always return it."""
+    require_viewer (not admin-gated) at the API layer, and the frontend now
+    shows this field to every viewer too (see WordDetail.jsx) -- but the API
+    contract this test guards is what matters here: it must always return
+    the field regardless of what the frontend does with it."""
     from starlette.testclient import TestClient
 
     from webapp.backend import main

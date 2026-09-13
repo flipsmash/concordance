@@ -324,17 +324,21 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
             </span>
           )}
         </div>
-        {/* Admin-only: the quizzable verdict above is judged against
-            quiz_definition (what a quiz actually shows), NOT the plain
-            `definition` displayed at the top of this page -- those two can
-            read very differently (a leaking raw definition, safely
-            rewritten for quizzing) with nothing else on this page to make
-            that visible. Found live: an admin flagged "codpieced" as a bug
-            because its definition still says "codpiece", with no way to
-            see that quiz_definition had already been rewritten leak-free. */}
-        {user?.is_admin && word.quiz_definition && (
+        {/* Paired directly with the badge above, not left separate: the
+            quizzable verdict is judged against quiz_definition (what a quiz
+            actually shows), NOT the plain `definition` displayed at the top
+            of this page -- those two can read very differently (a leaking
+            raw definition, safely rewritten for quizzing). Shown to every
+            viewer, not just admins, since /app/words/:id is reachable by any
+            logged-in user and the backend already sends this field
+            unconditionally -- gating it client-side only stranded regular
+            users with a "Quizzable" verdict they had no way to verify.
+            Found live: flagged as a bug twice ("codpieced", "eunuchism")
+            by someone reading only the definition above and the badge,
+            with no visible link between the two. */}
+        {word.quizzable && word.quiz_definition && (
           <p className="muted word-detail-quiz-definition">
-            Quiz definition ({word.quiz_def_source}): {word.quiz_definition}
+            Quizzed as ({word.quiz_def_source}): {word.quiz_definition}
           </p>
         )}
         {factors && (
