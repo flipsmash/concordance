@@ -179,6 +179,7 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
   }
 
   const hasAudio = word.audio_source && word.audio_source !== 'none'
+  const isGuessedAudio = word.audio_source === 'azure_guess'
   const factors = word.difficulty_factors
 
   return (
@@ -194,6 +195,14 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
         {word.part_of_speech && <span className="word-detail-pos">{word.part_of_speech}</span>}
         {hasAudio && (
           <audio controls src={`${API_BASE}/api/words/${id}/audio`} className="word-detail-audio" />
+        )}
+        {isGuessedAudio && (
+          <span
+            className="audio-guess-badge"
+            title="Synthesized from spelling alone — no verified pronunciation was found for this word"
+          >
+            unverified
+          </span>
         )}
         <a
           href={googleSearchUrl(word.lemma)}
