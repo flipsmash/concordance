@@ -369,6 +369,30 @@ CREATE TABLE IF NOT EXISTS {s}.book_fame (
 );
 CREATE INDEX IF NOT EXISTS book_fame_score_idx ON {s}.book_fame (fame_score DESC NULLS LAST);
 
+-- Same shape one level down from author_stats -- see that table's own
+-- CREATE TABLE comment for the backstory. browse_books' unique_word_count
+-- (which words in a book appear NOWHERE else in the corpus) turned out to
+-- need the identical fix: computing it live means a full scan of every
+-- word_book row, on every single request, found 2026-09-14 once book
+-- browsing was still slow after browse_books' own count(*) fix. genres/
+-- fame_score/fame_reasoning stay off this table for the same reason they
+-- stay off author_stats -- book_genre/book_fame are already cheap joins
+-- (~10-20ms measured), duplicating them here would just be another
+-- staleness source for no speed benefit.
+CREATE TABLE IF NOT EXISTS {s}.book_stats (
+    book_id             integer PRIMARY KEY REFERENCES {s}.book(id) ON DELETE CASCADE,
+    word_count          integer NOT NULL,
+    scored_word_count   integer NOT NULL,
+    mean_difficulty     double precision,
+    stddev_difficulty   double precision,
+    density             double precision,
+    unique_word_count   integer NOT NULL,
+    overall_difficulty  double precision,
+    computed_at         timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS book_stats_overall_difficulty_idx
+    ON {s}.book_stats (overall_difficulty DESC NULLS LAST);
+
 -- concordance book-merge's manifest of detected multi-part-book groups (see
 -- concordance/book_merge.py). Unlike checked_at elsewhere in this schema,
 -- checked_at here is NOT a skip gate -- a group excluded today for a gap
@@ -3356,6 +3380,105 @@ def compute_author_fame(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
                 stats["remaining"] = len(authors) - i
                 break
     return stats
+
+
+def compute_book_stats(conn, schema: str = DEFAULT_SCHEMA) -> dict:
+    """`concordance book-stats`: refreshes book_stats, one level down from
+    compute_author_stats -- see that function's docstring for the shared
+    backstory, and book_stats' own CREATE TABLE comment for why this one
+    specifically was needed (browse_books' unique_word_count, not word_count
+    itself, which was already cheap).
+
+    Deliberately the UNFILTERED population, exactly like compute_author_stats
+    -- a faceted browse_books request (domain/difficulty_min/difficulty_max/
+    archaic/pos/quizzable_only) changes which words count towards a book's
+    stats, so it still falls back to browse_books' live computation.
+    `author`/`book_id`/`genre`/`letter`/`q` are all safe as post-filters on
+    this table's rows, though -- none of them change any book's OWN stats,
+    only which books to return (mirrors browse_authors' identical reasoning
+    for `author`/`letter`/`q` there).
+
+    overall_difficulty here is unconditionally corpus-wide -- matching
+    Books.jsx/Authors.jsx's own "Harder than N% of the corpus" label and
+    Visualizations.jsx's "a corpus-relative percentile" description, not the
+    live browse_books path's actual behavior (which computes the percentile
+    over whatever `{where}`-filtered population happens to be in scope --
+    e.g. narrowed to just one author's own books when `author=X` is set).
+    That live-path behavior quietly contradicts the UI's own documented
+    contract whenever such a filter is active; this table's numbers are the
+    ones actually described to the user.
+
+    Every formula is a direct copy of browse_books' own live-computation
+    reasoning (see BookRow's field comments for the WHY): density is
+    word_count over distinct_nonstop_word_count (unlike author_stats, no
+    per-book averaging needed -- there's only the one book), unique_word_count
+    uses the same single-book word_book-exclusivity CTE, overall_difficulty
+    is the same percent_rank(mean_difficulty)/percent_rank(density) blend.
+
+    Always a full TRUNCATE + repopulate -- same reasoning as
+    compute_author_stats: 100% derived from word/word_book/word_difficulty/
+    book, no incremental delta worth tracking, and a targeted delete would
+    leave a stale row behind for any book that lost its last active word."""
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(f"TRUNCATE {s}.book_stats")
+        cur.execute(
+            f"""
+            WITH single_book_words AS (
+                SELECT wb2.word_id, min(wb2.book_id) AS book_id
+                FROM {s}.word_book wb2
+                JOIN {s}.word w2 ON w2.id = wb2.word_id AND w2.active
+                GROUP BY wb2.word_id HAVING count(*) = 1
+            ),
+            book_unique_counts AS (
+                SELECT book_id, count(*) AS unique_word_count
+                FROM single_book_words
+                GROUP BY book_id
+            ),
+            book_base AS (
+                -- count(*), not count(DISTINCT w.id): grouped by b.id, and
+                -- word_book's PK is (word_id, book_id), so a book's own
+                -- words can't repeat here -- see webapp/backend/browse.py's
+                -- matching comment.
+                SELECT b.id, b.distinct_nonstop_word_count,
+                       count(w.id) AS word_count,
+                       count(wd.difficulty) AS scored_word_count,
+                       avg(wd.difficulty) AS mean_difficulty,
+                       stddev_samp(wd.difficulty) AS stddev_difficulty,
+                       CASE WHEN b.distinct_nonstop_word_count > 0
+                            THEN count(w.id)::float / b.distinct_nonstop_word_count END AS density
+                FROM {s}.book b
+                JOIN {s}.word_book wb ON wb.book_id = b.id
+                JOIN {s}.word w ON w.id = wb.word_id
+                LEFT JOIN {s}.word_difficulty wd ON wd.word_id = w.id
+                WHERE w.active
+                GROUP BY b.id, b.distinct_nonstop_word_count
+            ),
+            diff_rank AS (
+                SELECT id, percent_rank() OVER (ORDER BY mean_difficulty) AS diff_pct
+                FROM book_base WHERE mean_difficulty IS NOT NULL
+            ),
+            dens_rank AS (
+                SELECT id, percent_rank() OVER (ORDER BY density) AS dens_pct
+                FROM book_base WHERE density IS NOT NULL
+            )
+            INSERT INTO {s}.book_stats
+                (book_id, word_count, scored_word_count, mean_difficulty,
+                 stddev_difficulty, density, unique_word_count, overall_difficulty)
+            SELECT bb.id, bb.word_count, bb.scored_word_count, bb.mean_difficulty,
+                   bb.stddev_difficulty, bb.density, coalesce(buc.unique_word_count, 0),
+                   CASE WHEN dr.diff_pct IS NOT NULL AND de.dens_pct IS NOT NULL
+                        THEN round((((dr.diff_pct + de.dens_pct) / 2) * 100)::numeric, 1)
+                   END
+            FROM book_base bb
+            LEFT JOIN diff_rank dr ON dr.id = bb.id
+            LEFT JOIN dens_rank de ON de.id = bb.id
+            LEFT JOIN book_unique_counts buc ON buc.book_id = bb.id
+            """
+        )
+        n = cur.rowcount
+    conn.commit()
+    return {"books": n}
 
 
 def compute_book_fame(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,

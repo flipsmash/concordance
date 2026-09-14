@@ -1049,6 +1049,117 @@ def browse_genre_overlap(_: dict = Depends(_main.require_viewer)) -> GenreOverla
     return GenreOverlap(sizes=size_rows, cells=cells)
 
 
+def _browse_books_from_stats(
+    *, author: str | None, book_id: list[int], q: str | None, fame_min: float | None,
+    fame_max: float | None, fame_unscored_only: bool, genre: list[str],
+    unique_word_bucket: str | None, overall_difficulty_band: str | None, letter: str | None,
+    random: bool, page: int, page_size: int, sort: str, dir: str,
+) -> "BookPage":
+    """browse_books' fast path -- see _browse_authors_from_stats for the
+    shared shape and book_stats' CREATE TABLE comment for why this table
+    exists. Reached only when no word-level facet is active (browse_books
+    itself gates this); `author`/`book_id`/`genre`/`letter`/`q` all narrow
+    which books to return, never a book's own precomputed stats, so they're
+    safe filters here regardless.
+
+    overall_difficulty here is unconditionally corpus-wide (see
+    compute_book_stats' docstring) -- matching what the frontend actually
+    labels it ("Harder than N% of the corpus"), not the live path's
+    filtered-population percentile."""
+    filters = []
+    params: list = []
+    if author:
+        filters.append("b.author = %s")
+        params.append(author)
+    if book_id:
+        filters.append("b.id = ANY(%s)")
+        params.append(book_id)
+    if genre:
+        filters.append(
+            f"EXISTS (SELECT 1 FROM {_main.SCHEMA}.book_genre bgf WHERE bgf.book_id = b.id AND bgf.genre = ANY(%s))"
+        )
+        params.append(genre)
+    if q:
+        filters.append("b.title ILIKE %s")
+        params.append(f"%{q}%")
+    if letter:
+        filters.append(f"left({_SORT_TITLE_EXPR}, 1) = %s")
+        params.append(letter.lower())
+    if unique_word_bucket:
+        lo, hi = _unique_word_bucket_range(unique_word_bucket)
+        if hi is None:
+            filters.append("bs.unique_word_count >= %s")
+            params.append(lo)
+        else:
+            filters.append("bs.unique_word_count BETWEEN %s AND %s")
+            params.extend([lo, hi])
+    if overall_difficulty_band is not None:
+        clause, band_params = _overall_difficulty_band_filter(overall_difficulty_band)
+        filters.append(clause.replace("overall_difficulty", "bs.overall_difficulty"))
+        params.extend(band_params)
+    if fame_unscored_only:
+        filters.append("bf.fame_score IS NULL")
+    else:
+        if fame_min is not None:
+            filters.append("bf.fame_score >= %s")
+            params.append(fame_min)
+        if fame_max is not None:
+            filters.append("bf.fame_score <= %s")
+            params.append(fame_max)
+    where = (" WHERE " + " AND ".join(filters)) if filters else ""
+
+    if random:
+        order_by = "random()"
+        limit = 1
+    else:
+        order_col = _BOOK_SORT_COLUMNS[sort]
+        order_dir = "ASC" if dir == "asc" else "DESC"
+        nulls = " NULLS LAST" if sort in _NULLABLE_SORTS else ""
+        order_by = f"{order_col} {order_dir}{nulls}, sort_title ASC"
+        limit = page_size
+    offset = 0 if random else (page - 1) * page_size
+
+    s = _main.SCHEMA
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT count(*)
+                FROM {s}.book b
+                JOIN {s}.book_stats bs ON bs.book_id = b.id
+                LEFT JOIN {s}.book_fame bf ON bf.book_id = b.id{where}""",
+            params,
+        )
+        total = cur.fetchone()[0]
+        cur.execute(
+            f"""WITH book_genres AS (
+                    SELECT book_id, array_agg(genre ORDER BY genre) AS genres
+                    FROM {s}.book_genre
+                    GROUP BY book_id
+                )
+                SELECT b.id, b.title, b.author, bs.word_count, bs.scored_word_count,
+                       bs.mean_difficulty, bs.stddev_difficulty, bs.density, b.archive_path,
+                       bs.overall_difficulty, bf.fame_score, bf.fame_reasoning,
+                       bs.unique_word_count, coalesce(bg.genres, '{{}}'),
+                       {_SORT_TITLE_EXPR} AS sort_title
+                FROM {s}.book b
+                JOIN {s}.book_stats bs ON bs.book_id = b.id
+                LEFT JOIN {s}.book_fame bf ON bf.book_id = b.id
+                LEFT JOIN book_genres bg ON bg.book_id = b.id{where}
+                ORDER BY {order_by}
+                LIMIT %s OFFSET %s""",
+            (*params, limit, offset),
+        )
+        rows = cur.fetchall()
+
+    items = [
+        BookRow(id=r[0], title=r[1], author=r[2], word_count=r[3], scored_word_count=r[4],
+                mean_difficulty=r[5], stddev_difficulty=r[6], density=r[7], archive_path=r[8],
+                overall_difficulty=r[9], fame_score=r[10], fame_reasoning=r[11],
+                unique_word_count=r[12], genres=r[13])
+        for r in rows
+    ]
+    return BookPage(items=items, total=total, page=page, page_size=page_size)
+
+
 @router.get("/api/browse/books", response_model=BookPage)
 def browse_books(
     author: str | None = None,
@@ -1080,6 +1191,22 @@ def browse_books(
 ) -> BookPage:
     if fame_unscored_only and (fame_min is not None or fame_max is not None):
         raise HTTPException(400, "fame_unscored_only is mutually exclusive with fame_min/fame_max")
+    # Fast path: book_stats (concordance/db.py's compute_book_stats) already
+    # holds mean_difficulty/density/overall_difficulty/unique_word_count
+    # precomputed for the UNFILTERED population -- see that table's CREATE
+    # TABLE comment and browse_authors' identical fast path above. Any
+    # word-level facet here changes which words count towards a book's own
+    # stats, so those requests still fall back to the live computation below;
+    # author/book_id/genre/letter/q only narrow which books to return, so
+    # they're safe under this fast path regardless.
+    if not (domain or difficulty_min is not None or difficulty_max is not None
+            or archaic or pos or quizzable_only):
+        return _browse_books_from_stats(
+            author=author, book_id=book_id, q=q, fame_min=fame_min, fame_max=fame_max,
+            fame_unscored_only=fame_unscored_only, genre=genre,
+            unique_word_bucket=unique_word_bucket, overall_difficulty_band=overall_difficulty_band,
+            letter=letter, random=random, page=page, page_size=page_size, sort=sort, dir=dir,
+        )
     # overall_difficulty is a CASE-expression alias, not a real column, so
     # this filter can't join `filters`/`where` (evaluated before that alias
     # exists) -- applied later, against the `scored` CTE both queries below

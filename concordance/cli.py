@@ -1134,6 +1134,28 @@ def author_fame_cmd(
     console.print(msg)
 
 
+@app.command("book-stats")
+def book_stats_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Refresh book_stats -- one level down from `author-stats` (see that
+    command's help and concordance/db.py's compute_book_stats for the full
+    reasoning). Cheap and always a full recompute -- safe to run after
+    anything that changes word/word_book/word_difficulty/book (ingestion,
+    difficulty scoring, archive-metadata), and worth adding to the post-
+    maintenance chain alongside author-stats."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    with console.status("[bold]Computing book stats…"):
+        stats = db.compute_book_stats(conn, schema)
+    conn.close()
+    console.print(f"[green]✓[/green] book-stats: [bold]{stats['books']}[/bold] books")
+
+
 @app.command("book-fame")
 def book_fame_cmd(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
