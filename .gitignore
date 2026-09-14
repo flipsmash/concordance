@@ -57,5 +57,5 @@ logs/
 # Local llama.cpp build directory
 .build/
 
-# Stray Windows shortcut
-archive.lnk
+# Stray Windows shortcuts (e.g. archive.lnk, archive_backup.lnk -- N:\ drive leftovers)
+*.lnk
