@@ -583,8 +583,14 @@ def browse_authors(
             cur.execute(
                 f"""SELECT count(*) FROM (
                         WITH book_word_counts AS (
+                            -- count(*), not count(DISTINCT w.id): grouped by
+                            -- b.id, and word_book's PK is (word_id, book_id),
+                            -- so a book's own words never repeat within this
+                            -- group -- DISTINCT is a no-op here that was
+                            -- forcing an extra per-group dedup over millions
+                            -- of rows for nothing.
                             SELECT b.author, b.id AS book_id, b.distinct_nonstop_word_count,
-                                   count(DISTINCT w.id) AS book_word_count
+                                   count(w.id) AS book_word_count
                             FROM {_main.SCHEMA}.book b
                             JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
                             JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id
@@ -698,8 +704,10 @@ def browse_authors(
                 GROUP BY author
             ),
             book_word_counts AS (
+                -- count(*): see the matching book_word_counts CTE above --
+                -- grouped by b.id, so word_book's PK makes DISTINCT redundant.
                 SELECT b.author, b.id AS book_id, b.distinct_nonstop_word_count,
-                       count(DISTINCT w.id) AS book_word_count
+                       count(w.id) AS book_word_count
                 FROM {_main.SCHEMA}.book b
                 JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
                 JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id
@@ -1037,10 +1045,13 @@ def browse_books(
             cur.execute(
                 f"""SELECT count(*) FROM (
                         WITH book_base AS (
+                            -- count(*): grouped by b.id, and word_book's PK
+                            -- is (word_id, book_id), so DISTINCT is a no-op
+                            -- here -- see browse_authors' matching comment.
                             SELECT b.id, b.distinct_nonstop_word_count,
                                    avg(wd.difficulty) AS mean_difficulty,
                                    CASE WHEN b.distinct_nonstop_word_count > 0
-                                        THEN count(DISTINCT w.id)::float / b.distinct_nonstop_word_count END AS density
+                                        THEN count(w.id)::float / b.distinct_nonstop_word_count END AS density
                             FROM {_main.SCHEMA}.book b
                             JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
                             JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id
@@ -1119,13 +1130,20 @@ def browse_books(
                 GROUP BY book_id
             ),
             book_base AS (
+                -- count(*), not count(DISTINCT w.id): grouped by b.id, and
+                -- word_book's PK is (word_id, book_id), so a book's own
+                -- words can't repeat in this group -- DISTINCT was forcing a
+                -- redundant per-group dedup over the whole corpus every
+                -- request. (Not safe in browse_authors, where a word
+                -- legitimately repeats across an author's several books --
+                -- see this file's module docstring.)
                 SELECT b.id, b.title, b.author, b.archive_path, b.distinct_nonstop_word_count,
-                       count(DISTINCT w.id) AS word_count,
+                       count(w.id) AS word_count,
                        count(wd.difficulty) AS scored_word_count,
                        avg(wd.difficulty) AS mean_difficulty,
                        stddev_samp(wd.difficulty) AS stddev_difficulty,
                        CASE WHEN b.distinct_nonstop_word_count > 0
-                            THEN count(DISTINCT w.id)::float / b.distinct_nonstop_word_count END AS density,
+                            THEN count(w.id)::float / b.distinct_nonstop_word_count END AS density,
                        bf.fame_score, bf.fame_reasoning,
                        {_SORT_TITLE_EXPR} AS sort_title,
                        coalesce(buc.unique_word_count, 0) AS unique_word_count,
@@ -2578,10 +2596,12 @@ def browse_overall_difficulty_histogram(
         if scope == "book":
             cur.execute(
                 f"""WITH book_base AS (
+                        -- count(*): grouped by b.id, so word_book's PK
+                        -- (word_id, book_id) makes DISTINCT redundant here.
                         SELECT b.id, b.distinct_nonstop_word_count,
                                avg(wd.difficulty) AS mean_difficulty,
                                CASE WHEN b.distinct_nonstop_word_count > 0
-                                    THEN count(DISTINCT w.id)::float / b.distinct_nonstop_word_count END AS density
+                                    THEN count(w.id)::float / b.distinct_nonstop_word_count END AS density
                         FROM {s}.book b
                         JOIN {s}.word_book wb ON wb.book_id = b.id
                         JOIN {s}.word w ON w.id = wb.word_id
@@ -2622,8 +2642,10 @@ def browse_overall_difficulty_histogram(
                         GROUP BY awi.author
                     ),
                     book_word_counts AS (
+                        -- count(*): see the book-scope branch's matching
+                        -- comment above -- grouped by b.id, DISTINCT is a no-op.
                         SELECT b.author, b.id AS book_id, b.distinct_nonstop_word_count,
-                               count(DISTINCT w.id) AS book_word_count
+                               count(w.id) AS book_word_count
                         FROM {s}.book b
                         JOIN {s}.word_book wb ON wb.book_id = b.id
                         JOIN {s}.word w ON w.id = wb.word_id
