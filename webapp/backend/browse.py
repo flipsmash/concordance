@@ -1197,6 +1197,14 @@ def browse_books(
             )
         else:
             cur.execute(
+                # GROUP BY b.id alone: bf.fame_score only needs to be
+                # JOINed for `where` to reference it (fame_min/max/
+                # fame_unscored_only above) -- it doesn't need to be part of
+                # the grouping key for a plain distinct-book-id count, and
+                # adding it forced Postgres to hash/compare bf.fame_score
+                # across every one of the 4.5M pre-aggregation rows instead
+                # of just b.id (measured ~1.5s vs ~0.4s against the real
+                # corpus).
                 f"""SELECT count(*) FROM (
                         SELECT b.id
                         FROM {_main.SCHEMA}.book b
@@ -1205,7 +1213,7 @@ def browse_books(
                         LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
                         LEFT JOIN {_main.SCHEMA}.book_fame bf ON bf.book_id = b.id
                         WHERE {where}
-                        GROUP BY b.id, bf.fame_score
+                        GROUP BY b.id
                     ) sub""",
                 params,
             )
@@ -1255,6 +1263,18 @@ def browse_books(
                 -- request. (Not safe in browse_authors, where a word
                 -- legitimately repeats across an author's several books --
                 -- see this file's module docstring.)
+                --
+                -- book_fame/book_unique_counts/book_genres are deliberately
+                -- NOT joined here, unlike an earlier version of this query --
+                -- each is a 1-row-per-book LEFT JOIN, but Postgres has no way
+                -- to know that from here (the functional-dependency exemption
+                -- that lets b.title/b.author/etc. skip GROUP BY only applies
+                -- to columns of `b` itself, once b.id is grouped). Including
+                -- bf.fame_reasoning (free text) and bg.genres (an array) in
+                -- GROUP BY forced a hash/compare of those values across every
+                -- one of the ~4.5M pre-aggregation rows, not just b.id --
+                -- measured ~2.7s in that shape vs ~0.5s joined in below,
+                -- after book_base has already collapsed to one row per book.
                 SELECT b.id, b.title, b.author, b.archive_path, b.distinct_nonstop_word_count,
                        count(w.id) AS word_count,
                        count(wd.difficulty) AS scored_word_count,
@@ -1262,20 +1282,13 @@ def browse_books(
                        stddev_samp(wd.difficulty) AS stddev_difficulty,
                        CASE WHEN b.distinct_nonstop_word_count > 0
                             THEN count(w.id)::float / b.distinct_nonstop_word_count END AS density,
-                       bf.fame_score, bf.fame_reasoning,
-                       {_SORT_TITLE_EXPR} AS sort_title,
-                       coalesce(buc.unique_word_count, 0) AS unique_word_count,
-                       coalesce(bg.genres, '{{}}') AS genres
+                       {_SORT_TITLE_EXPR} AS sort_title
                 FROM {_main.SCHEMA}.book b
                 JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
                 JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id
                 LEFT JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
-                LEFT JOIN {_main.SCHEMA}.book_fame bf ON bf.book_id = b.id
-                LEFT JOIN book_unique_counts buc ON buc.book_id = b.id
-                LEFT JOIN book_genres bg ON bg.book_id = b.id
                 WHERE {where}
-                GROUP BY b.id, b.title, b.author, b.archive_path, b.distinct_nonstop_word_count,
-                         bf.fame_score, bf.fame_reasoning, buc.unique_word_count, bg.genres
+                GROUP BY b.id, b.title, b.author, b.archive_path, b.distinct_nonstop_word_count
             ),
             diff_rank AS (
                 SELECT id, percent_rank() OVER (ORDER BY mean_difficulty) AS diff_pct
@@ -1291,10 +1304,15 @@ def browse_books(
                        CASE WHEN dr.diff_pct IS NOT NULL AND de.dens_pct IS NOT NULL
                             THEN round((((dr.diff_pct + de.dens_pct) / 2) * 100)::numeric, 1)
                        END AS overall_difficulty,
-                       bb.fame_score, bb.fame_reasoning, bb.unique_word_count, bb.sort_title, bb.genres
+                       bf.fame_score, bf.fame_reasoning,
+                       coalesce(buc.unique_word_count, 0) AS unique_word_count,
+                       bb.sort_title, coalesce(bg.genres, '{{}}') AS genres
                 FROM book_base bb
                 LEFT JOIN diff_rank dr ON dr.id = bb.id
                 LEFT JOIN dens_rank de ON de.id = bb.id
+                LEFT JOIN {_main.SCHEMA}.book_fame bf ON bf.book_id = bb.id
+                LEFT JOIN book_unique_counts buc ON buc.book_id = bb.id
+                LEFT JOIN book_genres bg ON bg.book_id = bb.id
             )
             SELECT id, title, author, word_count, scored_word_count, mean_difficulty,
                    stddev_difficulty, density, archive_path, overall_difficulty,
