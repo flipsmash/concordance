@@ -1069,6 +1069,31 @@ def author_similarity(
                   f"-> [bold]{stats['pairs_stored']}[/bold] related-author pairs stored")
 
 
+@app.command("author-stats")
+def author_stats_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Refresh author_stats -- the precomputed mean_difficulty/density/
+    unique_word_count/overall_difficulty webapp/backend/browse.py's
+    browse_authors reads for the common unfiltered case instead of
+    recomputing them live over the whole corpus on every request (see
+    concordance/db.py's compute_author_stats and author_stats' own CREATE
+    TABLE comment). Cheap and always a full recompute (a few seconds even
+    at 29k books) -- safe to run after anything that changes word/word_book/
+    word_difficulty/book (ingestion, difficulty scoring, archive-metadata),
+    and worth adding to the post-maintenance chain."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    with console.status("[bold]Computing author stats…"):
+        stats = db.compute_author_stats(conn, schema)
+    conn.close()
+    console.print(f"[green]✓[/green] author-stats: [bold]{stats['authors']}[/bold] authors")
+
+
 @app.command("author-fame")
 def author_fame_cmd(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),

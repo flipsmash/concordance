@@ -439,6 +439,107 @@ def _overall_difficulty_band_filter(label: str) -> tuple[str, list]:
     return f"overall_difficulty >= %s AND overall_difficulty {op} %s", [lo, hi]
 
 
+def _unique_word_bucket_range(bucket_label: str) -> tuple[int, int | None]:
+    """(lo, hi) for a bucket label out of _UNIQUE_WORD_BUCKETS -- the plain
+    range check _browse_authors_from_stats needs against author_stats'
+    already-materialized unique_word_count column, as opposed to
+    _unique_word_bucket_filter's NOT EXISTS/HAVING machinery above (built
+    for a live per-book/per-author computation that doesn't exist in this
+    fast path -- the count is just a column here)."""
+    for lo, hi, label in _UNIQUE_WORD_BUCKETS:
+        if label == bucket_label:
+            return lo, hi
+    raise HTTPException(404, f"unknown unique-word bucket {bucket_label!r}")
+
+
+def _browse_authors_from_stats(
+    *, author: str | None, q: str | None, fame_min: float | None, fame_max: float | None,
+    fame_unscored_only: bool, unique_word_bucket: str | None, overall_difficulty_band: str | None,
+    letter: str | None, random: bool, page: int, page_size: int, sort: str, dir: str,
+) -> "AuthorPage":
+    """browse_authors' fast path: author_stats already holds this exact
+    request's answer precomputed (see that table's CREATE TABLE comment and
+    concordance/db.py's compute_author_stats) -- reached only when no word-
+    level facet is active, so every filter here is a plain column condition,
+    no per-request corpus-wide aggregation. `author`/`letter`/`q` narrow
+    which authors to return, never which words count towards their stats,
+    so they're safe under any facet state; browse_authors itself only calls
+    this function once none of the stats-invalidating facets are set."""
+    filters = []
+    params: list = []
+    if author:
+        filters.append("as_.author = %s")
+        params.append(author)
+    if letter:
+        filters.append("lower(left(as_.author, 1)) = %s")
+        params.append(letter.lower())
+    if q:
+        filters.append("as_.author ILIKE %s")
+        params.append(f"%{q}%")
+    if unique_word_bucket:
+        lo, hi = _unique_word_bucket_range(unique_word_bucket)
+        if hi is None:
+            filters.append("as_.unique_word_count >= %s")
+            params.append(lo)
+        else:
+            filters.append("as_.unique_word_count BETWEEN %s AND %s")
+            params.extend([lo, hi])
+    if overall_difficulty_band is not None:
+        clause, band_params = _overall_difficulty_band_filter(overall_difficulty_band)
+        filters.append(clause.replace("overall_difficulty", "as_.overall_difficulty"))
+        params.extend(band_params)
+    if fame_unscored_only:
+        filters.append("af.fame_score IS NULL")
+    else:
+        if fame_min is not None:
+            filters.append("af.fame_score >= %s")
+            params.append(fame_min)
+        if fame_max is not None:
+            filters.append("af.fame_score <= %s")
+            params.append(fame_max)
+    where = (" WHERE " + " AND ".join(filters)) if filters else ""
+
+    if random:
+        order_by = "random()"
+        limit = 1
+    else:
+        order_col = _AUTHOR_SORT_COLUMNS[sort]
+        order_dir = "ASC" if dir == "asc" else "DESC"
+        nulls = " NULLS LAST" if sort in _NULLABLE_SORTS else ""
+        order_by = f"{order_col} {order_dir}{nulls}, author ASC"
+        limit = page_size
+    offset = 0 if random else (page - 1) * page_size
+
+    s = _main.SCHEMA
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT count(*) FROM {s}.author_stats as_
+                LEFT JOIN {s}.author_fame af ON af.author = as_.author{where}""",
+            params,
+        )
+        total = cur.fetchone()[0]
+        cur.execute(
+            f"""SELECT as_.author, as_.book_count, as_.word_count, as_.scored_word_count,
+                       as_.mean_difficulty, as_.stddev_difficulty, as_.density,
+                       as_.overall_difficulty, af.fame_score, af.fame_reasoning,
+                       as_.unique_word_count
+                FROM {s}.author_stats as_
+                LEFT JOIN {s}.author_fame af ON af.author = as_.author{where}
+                ORDER BY {order_by}
+                LIMIT %s OFFSET %s""",
+            (*params, limit, offset),
+        )
+        rows = cur.fetchall()
+
+    items = [
+        AuthorRow(author=r[0], book_count=r[1], word_count=r[2], scored_word_count=r[3],
+                  mean_difficulty=r[4], stddev_difficulty=r[5], density=r[6], overall_difficulty=r[7],
+                  fame_score=r[8], fame_reasoning=r[9], unique_word_count=r[10])
+        for r in rows
+    ]
+    return AuthorPage(items=items, total=total, page=page, page_size=page_size)
+
+
 # --- /api/browse/authors -------------------------------------------------------
 
 class AuthorRow(BaseModel):
@@ -495,6 +596,23 @@ def browse_authors(
 ) -> AuthorPage:
     if fame_unscored_only and (fame_min is not None or fame_max is not None):
         raise HTTPException(400, "fame_unscored_only is mutually exclusive with fame_min/fame_max")
+    # Fast path: author_stats (concordance/db.py's compute_author_stats)
+    # already holds mean_difficulty/density/overall_difficulty/
+    # unique_word_count precomputed for the UNFILTERED population -- but
+    # only for that population, since any word-level facet here
+    # (domain/difficulty_min/difficulty_max/archaic/pos/quizzable_only) or
+    # book_id changes which words count towards an author's own stats (see
+    # author_stats' CREATE TABLE comment). None of those active means this
+    # request's answer is already sitting in that table, precomputed,
+    # instead of needing the full live recomputation below.
+    if not (domain or difficulty_min is not None or difficulty_max is not None
+            or archaic or pos or quizzable_only or book_id):
+        return _browse_authors_from_stats(
+            author=author, q=q, fame_min=fame_min, fame_max=fame_max,
+            fame_unscored_only=fame_unscored_only, unique_word_bucket=unique_word_bucket,
+            overall_difficulty_band=overall_difficulty_band, letter=letter,
+            random=random, page=page, page_size=page_size, sort=sort, dir=dir,
+        )
     overall_diff_where, overall_diff_params = "", []
     if overall_difficulty_band is not None:
         _clause, overall_diff_params = _overall_difficulty_band_filter(overall_difficulty_band)

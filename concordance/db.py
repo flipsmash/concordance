@@ -206,6 +206,33 @@ CREATE TABLE IF NOT EXISTS {s}.author_similarity (
 CREATE INDEX IF NOT EXISTS author_similarity_rank_idx
     ON {s}.author_similarity (author_a, score DESC);
 
+-- Precomputed replacement for the aggregate stats webapp/backend/browse.py's
+-- browse_authors used to recompute live, on every request, over the WHOLE
+-- corpus (mean_difficulty/density/overall_difficulty/unique_word_count) --
+-- same "didn't survive contact with the real corpus" story as
+-- author_similarity above, found 2026-09-13 once the corpus reached 29k
+-- books / 4.5M word_book rows (browse_authors' author_word_ids alone, a
+-- corpus-wide SELECT DISTINCT (author, word_id), measured at ~3.2s). Only
+-- valid for the UNFILTERED population (no domain/difficulty/archaic/pos/
+-- quizzable_only/book_id facet active) -- see compute_author_stats and
+-- browse_authors' own use of it for why a faceted request still falls back
+-- to live computation. fame_score/fame_reasoning stay on their own
+-- independently-refreshed author_fame table, not duplicated here.
+CREATE TABLE IF NOT EXISTS {s}.author_stats (
+    author              text PRIMARY KEY,
+    book_count          integer NOT NULL,
+    word_count          integer NOT NULL,
+    scored_word_count   integer NOT NULL,
+    mean_difficulty     double precision,
+    stddev_difficulty   double precision,
+    density             double precision,
+    unique_word_count   integer NOT NULL,
+    overall_difficulty  double precision,
+    computed_at         timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS author_stats_overall_difficulty_idx
+    ON {s}.author_stats (overall_difficulty DESC NULLS LAST);
+
 -- Hierarchical clustering + 2D projection over the top-N (by book count)
 -- authors -- see compute_author_clustering. Unlike author_similarity
 -- (every author, top-k neighbors only), this covers a bounded, smaller set
@@ -3095,6 +3122,139 @@ def _load_fame_llm():
             "fame scoring needs a real LLM; pass dry_run=True to only gather evidence")
     from llama_cpp import Llama
     return Llama(model_path=cfg.model_path, n_gpu_layers=cfg.n_gpu_layers, n_ctx=cfg.n_ctx, verbose=False)
+
+
+def compute_author_stats(conn, schema: str = DEFAULT_SCHEMA) -> dict:
+    """`concordance author-stats`: refreshes author_stats, a precomputed
+    stand-in for the aggregate columns webapp/backend/browse.py's
+    browse_authors used to compute live on every request (mean_difficulty,
+    stddev_difficulty, density, unique_word_count, overall_difficulty) --
+    see author_stats' own CREATE TABLE comment for the "didn't survive
+    contact with the real corpus" backstory.
+
+    Deliberately the UNFILTERED population only -- exactly
+    _build_word_filters(None, [], [], None, None, [], [], False)'s
+    ["w.active"], no book_id -- matching browse_authors' own "no word-level
+    facet active" fast path (see that function's use of this table). A
+    faceted browse request (domain/difficulty/archaic/pos/quizzable_only/
+    book_id) changes which words count towards an author's stats, so it
+    still falls back to browse_authors' original live computation; this
+    table only ever serves the common, unfiltered "just browsing" case.
+
+    Every formula here is a direct copy of browse_authors' own long-
+    documented reasoning (see that function's field comments for the WHY):
+    density is the MEAN OF PER-BOOK densities, not deduped word_count over
+    summed distinct_nonstop_word_count; unique_word_count uses the same
+    single-author word_book-exclusivity CTE; overall_difficulty is a
+    percent_rank(mean_difficulty)/percent_rank(density) blend, each computed
+    only over authors that HAVE the underlying metric. fame_score/
+    fame_reasoning are deliberately NOT stored here -- they live on their
+    own independently-refreshed author_fame table, joined in by callers.
+
+    Always a full TRUNCATE + repopulate, like compute_author_cluster* below
+    -- author_stats is 100% derived from word/word_book/word_difficulty/
+    book, so there's no meaningful "since last run" delta to compute
+    incrementally, and a stale row for an author who lost their last book
+    (or gained PLACEHOLDER_AUTHORS membership) would otherwise linger
+    forever under any targeted-delete approach (see
+    compute_author_similarity's own comment on exactly that failure mode)."""
+    s = _safe_schema(schema)
+    placeholders = list(PLACEHOLDER_AUTHORS)
+    with conn.cursor() as cur:
+        cur.execute(f"TRUNCATE {s}.author_stats")
+        cur.execute(
+            f"""
+            WITH single_author_words AS (
+                SELECT wb2.word_id, min(b2.author) AS author
+                FROM {s}.word_book wb2
+                JOIN {s}.book b2 ON b2.id = wb2.book_id
+                    AND b2.author IS NOT NULL AND b2.author != '' AND b2.author != ALL(%s)
+                JOIN {s}.word w2 ON w2.id = wb2.word_id AND w2.active
+                GROUP BY wb2.word_id HAVING count(DISTINCT b2.author) = 1
+            ),
+            author_unique_counts AS (
+                SELECT author, count(*) AS unique_word_count
+                FROM single_author_words
+                GROUP BY author
+            ),
+            book_word_counts AS (
+                -- count(*): grouped by b.id, and word_book's PK is
+                -- (word_id, book_id), so a book's own words can't repeat in
+                -- this group -- see browse.py's matching comment.
+                SELECT b.author, b.id AS book_id, b.distinct_nonstop_word_count,
+                       count(w.id) AS book_word_count
+                FROM {s}.book b
+                JOIN {s}.word_book wb ON wb.book_id = b.id
+                JOIN {s}.word w ON w.id = wb.word_id AND w.active
+                WHERE b.author IS NOT NULL AND b.author != '' AND b.author != ALL(%s)
+                GROUP BY b.author, b.id, b.distinct_nonstop_word_count
+            ),
+            author_density AS (
+                SELECT author, avg(density) AS density
+                FROM (
+                    SELECT author,
+                           CASE WHEN distinct_nonstop_word_count > 0
+                                THEN book_word_count::float / distinct_nonstop_word_count END AS density
+                    FROM book_word_counts
+                ) bd
+                WHERE density IS NOT NULL
+                GROUP BY author
+            ),
+            author_books AS (
+                SELECT author, count(DISTINCT book_id) AS book_count
+                FROM book_word_counts
+                GROUP BY author
+            ),
+            author_word_ids AS (
+                SELECT DISTINCT b.author, w.id AS word_id
+                FROM {s}.book b
+                JOIN {s}.word_book wb ON wb.book_id = b.id
+                JOIN {s}.word w ON w.id = wb.word_id AND w.active
+                WHERE b.author IS NOT NULL AND b.author != '' AND b.author != ALL(%s)
+            ),
+            author_word_stats AS (
+                SELECT awi.author, count(DISTINCT awi.word_id) AS word_count,
+                       count(wd.difficulty) AS scored_word_count,
+                       avg(wd.difficulty) AS mean_difficulty,
+                       stddev_samp(wd.difficulty) AS stddev_difficulty
+                FROM author_word_ids awi
+                LEFT JOIN {s}.word_difficulty wd ON wd.word_id = awi.word_id
+                GROUP BY awi.author
+            ),
+            author_base AS (
+                SELECT aws.author, ab.book_count, aws.word_count, aws.scored_word_count,
+                       aws.mean_difficulty, aws.stddev_difficulty, ad.density,
+                       coalesce(auc.unique_word_count, 0) AS unique_word_count
+                FROM author_word_stats aws
+                JOIN author_books ab ON ab.author = aws.author
+                LEFT JOIN author_density ad ON ad.author = aws.author
+                LEFT JOIN author_unique_counts auc ON auc.author = aws.author
+            ),
+            diff_rank AS (
+                SELECT author, percent_rank() OVER (ORDER BY mean_difficulty) AS diff_pct
+                FROM author_base WHERE mean_difficulty IS NOT NULL
+            ),
+            dens_rank AS (
+                SELECT author, percent_rank() OVER (ORDER BY density) AS dens_pct
+                FROM author_base WHERE density IS NOT NULL
+            )
+            INSERT INTO {s}.author_stats
+                (author, book_count, word_count, scored_word_count, mean_difficulty,
+                 stddev_difficulty, density, unique_word_count, overall_difficulty)
+            SELECT ab2.author, ab2.book_count, ab2.word_count, ab2.scored_word_count,
+                   ab2.mean_difficulty, ab2.stddev_difficulty, ab2.density, ab2.unique_word_count,
+                   CASE WHEN dr.diff_pct IS NOT NULL AND de.dens_pct IS NOT NULL
+                        THEN round((((dr.diff_pct + de.dens_pct) / 2) * 100)::numeric, 1)
+                   END
+            FROM author_base ab2
+            LEFT JOIN diff_rank dr ON dr.author = ab2.author
+            LEFT JOIN dens_rank de ON de.author = ab2.author
+            """,
+            (placeholders, placeholders, placeholders),
+        )
+        n = cur.rowcount
+    conn.commit()
+    return {"authors": n}
 
 
 def compute_author_fame(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
