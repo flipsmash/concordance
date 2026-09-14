@@ -29,5 +29,6 @@ run_step oed-concordance-match  concordance oed-concordance-match
 run_step train-fasttext         concordance train-fasttext
 run_step archive-metadata       concordance archive-metadata
 run_step author-stats           concordance author-stats
+run_step book-stats              concordance book-stats
 
 echo "=== [$(date '+%F %T')] CHAIN COMPLETE ===" | tee -a "logs/chain_${TS}_driver.log"
