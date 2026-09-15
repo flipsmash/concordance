@@ -421,7 +421,7 @@ CREATE TABLE IF NOT EXISTS {s}.book_merge_group (
 
 CREATE TABLE IF NOT EXISTS {s}.word_audio (
     word_id      integer PRIMARY KEY REFERENCES {s}.word(id) ON DELETE CASCADE,
-    source       text,          -- 'commons' | 'mw' | 'azure' | 'azure_guess' | 'none' (looked up, nothing found)
+    source       text,          -- 'commons' | 'mw' | 'azure' | 'piper' | 'azure_guess' (legacy) | 'none' (looked up, nothing found)
     file_path    text,
     ipa_used     text,          -- the exact phoneme string sent to the synthesizer (azure only)
     voice        text,          -- azure voice name, or the Commons source URL
@@ -917,6 +917,15 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
         # (predates this column) and is always treated as US dialect, matching
         # every existing source's actual behavior -- see audio.ipa_dialect_for_source.
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS ipa_source text")
+        # When every IPA source was checked and came up empty, `ipa` stays ''
+        # (the historical convention, not NULL -- see the one-time migration
+        # note below) but this timestamp is what actually distinguishes
+        # "confirmed nothing anywhere" from "never checked": compute_ipa
+        # should only overwrite ipa='' when this is NULL or stale, never
+        # re-walk the whole cascade on every run for words that already came
+        # up empty. Same shape as wordnik_checked_at, one level up (covers
+        # the whole cascade, not just the Wordnik tier).
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS ipa_checked_at timestamptz")
         # soft-delete flag for the review-and-prune web UI: pruned words stay in
         # place (history/audio/etc. intact) but drop out of every downstream view
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS active boolean NOT NULL DEFAULT true")
@@ -4364,27 +4373,39 @@ def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None
     s = _safe_schema(schema)
 
     with conn.cursor() as cur:
-        cur.execute(f"SELECT id, lemma, ipa, wordnik_pron_raw, wordnik_pron_type "
+        cur.execute(f"SELECT id, lemma, ipa, wordnik_pron_raw, wordnik_pron_type, ipa_checked_at "
                     f"FROM {s}.word ORDER BY id")
         all_rows = cur.fetchall()
 
     def is_valid(ipa):
         return bool(ipa) and audio.looks_like_english_ipa(ipa)
 
-    candidates = all_rows if not only_missing else [r for r in all_rows if not is_valid(r[2])]
-    dist: Counter = Counter(total=len(all_rows), already_valid=len(all_rows) - len(candidates))
+    # only_missing also skips anything already confirmed-checked (not just
+    # already-valid): without that, a word the cascade already walked and
+    # found nothing for gets the full dump-scan-plus-cascade cost paid again
+    # on every future run, forever -- the exact "very slow, barely moves"
+    # complaint this was part of fixing. A deliberate --refetch (only_missing
+    # =False) still re-walks everything, which is the right way to pick up
+    # newly-unlocked upstream data (e.g. after an OED reconciliation pass
+    # resolves entries that were needs_review before).
+    candidates = all_rows if not only_missing else [
+        r for r in all_rows if not is_valid(r[2]) and r[5] is None]
+    already_valid = sum(1 for r in all_rows if is_valid(r[2]))
+    already_checked_empty = (len(all_rows) - already_valid - len(candidates)) if only_missing else 0
+    dist: Counter = Counter(total=len(all_rows), already_valid=already_valid,
+                             already_checked_empty=already_checked_empty)
     # `limit` slices the already-filtered candidate set, not the raw fetch --
     # applying it beforehand (the original bug) could silently hand back
     # fewer than `limit` words, or zero, depending on where the first N rows
-    # in scan order happened to already be valid. already_valid above is
-    # computed from the full filtered set, before this slice, so it still
-    # reflects the whole table regardless of `limit`.
+    # in scan order happened to already be valid. The already_* counts above
+    # are computed from the full filtered set, before this slice, so they
+    # still reflect the whole table regardless of `limit`.
     if limit:
         candidates = candidates[:limit]
     if not candidates:
         return dict(dist)
 
-    lemmas = {lemma.strip().lower() for _, lemma, _, _, _ in candidates}
+    lemmas = {lemma.strip().lower() for _, lemma, _, _, _, _ in candidates}
     dump_path = dump_path or wiktextract.DEFAULT_DUMP_PATH
     kaikki_lexicon = wiktextract.build_lexicon(
         dump_path, lemmas, progress_cb=lambda n: print(f"  ...{n} lines scanned"))
@@ -4392,7 +4413,7 @@ def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None
     oed_lexicon = oed_db.pronunciation_lexicon(conn, lemmas, schema=oed_schema)
 
     with conn.cursor() as cur:
-        for i, (wid, lemma, existing_ipa, wn_raw, wn_type) in enumerate(candidates, 1):
+        for i, (wid, lemma, existing_ipa, wn_raw, wn_type, _checked_at) in enumerate(candidates, 1):
             if i % 5000 == 0:
                 conn.commit()
                 print(f"  ...{i}/{len(candidates)} words checked")
@@ -4421,6 +4442,15 @@ def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None
                 dist["cleared_no_replacement"] += 1
             else:
                 dist["unresolved"] += 1
+            # Every candidate reaches here regardless of outcome -- the whole
+            # cascade was walked for this word even when nothing was found,
+            # and that's the distinction ipa_checked_at exists to preserve
+            # (see apply_schema's comment on this column): a still-empty ipa
+            # after this means "confirmed nothing anywhere", not "never
+            # looked". Without it, only_missing's own is_valid() filter would
+            # keep re-walking the full cascade for the same permanently-empty
+            # words on every future run forever.
+            cur.execute(f"UPDATE {s}.word SET ipa_checked_at=now() WHERE id=%s", (wid,))
     conn.commit()
     return dict(dist)
 
@@ -4563,12 +4593,14 @@ def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = No
     costs nothing extra here, a genuinely fresh one still costs one of the
     shared 1000/day API calls), else Azure IPA-guided synthesis where a
     transcription is known (ours, kaikki's, or Wordnik's — backfilling
-    word.ipa along the way), else a 'none' placeholder so re-runs don't keep
-    re-parsing the dump for words with nothing to find. Azure synthesis
-    picks its voice/lang from the word's ipa_source
-    (audio.ipa_dialect_for_source/voice_for_dialect) so an OED-sourced
-    (British RP) transcription gets the UK voice and the RP linking-r
-    convention, not the US voice's rhotic default -- see
+    word.ipa along the way), else local Piper grapheme-only synthesis (no
+    IPA needed -- see audio.synthesize_piper's docstring for why this stays
+    off Azure), else a 'none' placeholder so re-runs don't keep re-parsing
+    the dump for words with nothing to find (in practice this should now be
+    rare: Piper almost never fails). Azure synthesis picks its voice/lang
+    from the word's ipa_source (audio.ipa_dialect_for_source/voice_for_dialect)
+    so an OED-sourced (British RP) transcription gets the UK voice and the
+    RP linking-r convention, not the US voice's rhotic default -- see
     audio.normalize_ipa's docstring for why that distinction matters.
 
     MW audio is real human speech (same trust tier as Commons, ahead of any
@@ -4604,13 +4636,18 @@ def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = No
     if not (key and region):
         print("  (no AZURE_SPEECH_KEY/AZURE_SPEECH_REGION in .env — skipping synthesis, Commons-only pass)")
 
-    # Same batch-level quota pre-check fill_definitions/pipeline.py already
-    # do -- checked ONCE, not per word, so a real backlog can't silently
-    # burn the shared 1000/day cap one lookup at a time (see fill_definitions'
-    # own comment for the full "why" -- identical reasoning here).
+    # NOT gated on mw_module.quota_exhausted() here, unlike
+    # fill_definitions/pipeline.py's batch-level pre-check: mw.lookup_api
+    # already checks its on-disk cache BEFORE it ever looks at the quota
+    # (a cache hit costs nothing, exhausted or not), so a blanket pre-check
+    # at this level was silently throwing away already-cached, already-paid
+    # -for MW recordings on any day the shared 1000/day cap had already been
+    # spent by another caller earlier that day -- confirmed live: hundreds
+    # of words with real cached MW audio (e.g. "callipygian") still ended up
+    # 'azure' or 'none' because this batch happened to run after the quota
+    # was gone. lookup_api's own internal check still protects the quota
+    # for words that truly aren't cached yet.
     mw_key = mw_module.mw_api_key()
-    if mw_key and mw_module.quota_exhausted():
-        mw_key = ""
     mw_session = make_session() if mw_key else None
 
     audio.AUDIO_DIR.mkdir(exist_ok=True)
@@ -4678,6 +4715,21 @@ def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = No
                     row = ("azure", str(dest), ipa_used, voice, None)
                     dist["azure"] += 1
             if row is None:
+                # Piper: no curated IPA needed, so this is the tier that
+                # actually closes the gap the others structurally can't --
+                # see audio.py's module docstring for why it's local/
+                # grapheme-only rather than an Azure-IPA substitute. Almost
+                # never fails (any spelling can be phonemized), so this is
+                # what 'none' below is now reserved for: Piper itself not
+                # installed/configured, not an ordinary per-word miss.
+                clip = audio.synthesize_piper(lemma)
+                if clip:
+                    dest = audio.AUDIO_DIR / f"{lemma_lc}.mp3"
+                    dest.write_bytes(clip)
+                    row = ("piper", str(dest), None, audio.PIPER_VOICE_NAME,
+                           "Synthesized from spelling by local Piper TTS -- no verified pronunciation available")
+                    dist["piper"] += 1
+            if row is None:
                 row = ("none", None, None, None, None)
                 dist["none"] += 1
 
@@ -4697,20 +4749,21 @@ def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = No
 
 
 def synthesize_unverified_guesses(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0,
-                                   delay: float = 0.3) -> dict:
-    """Last resort for words with no real recording and no IPA anywhere: Azure
-    guesses pronunciation from spelling alone, same as any TTS would. Recorded
-    with source='azure_guess' — deliberately distinct from 'azure' (IPA-guided)
-    so the quiz app can flag these as unverified rather than presenting a guess
-    with the same confidence as a verified pronunciation."""
+                                   delay: float = 0.0) -> dict:
+    """Sweeps up any pre-existing source='none' backlog (words compute_audio
+    processed before Piper was wired in as its own final tier, or a run where
+    Piper itself wasn't installed/configured) using the same local Piper
+    grapheme-only synthesis compute_audio now does inline for new words --
+    see audio.synthesize_piper's docstring for why this stays off Azure.
+    Recorded with source='piper' — deliberately distinct from 'azure'
+    (IPA-guided) so the quiz app can flag these as unverified rather than
+    presenting a guess with the same confidence as a verified pronunciation.
+    No external service, so no real rate limit; delay defaults to 0 and only
+    exists for callers that want to throttle disk I/O."""
     import time
     from collections import Counter
     from . import audio
     s = _safe_schema(schema)
-
-    key, region = audio.azure_credentials()
-    if not (key and region):
-        return {"error": "no AZURE_SPEECH_KEY/AZURE_SPEECH_REGION in .env"}
 
     with conn.cursor() as cur:
         cur.execute(f"""SELECT w.id, w.lemma FROM {s}.word w
@@ -4726,15 +4779,15 @@ def synthesize_unverified_guesses(conn, schema: str = DEFAULT_SCHEMA, limit: int
     with conn.cursor() as cur:
         for i, (wid, lemma) in enumerate(rows, start=1):
             lemma_lc = lemma.strip().lower()
-            clip = audio.synthesize_azure_guess(lemma, key, region)
+            clip = audio.synthesize_piper(lemma)
             if clip:
                 dest = audio.AUDIO_DIR / f"{lemma_lc}.mp3"
                 dest.write_bytes(clip)
                 cur.execute(
-                    f"""UPDATE {s}.word_audio SET source='azure_guess', file_path=%s, ipa_used=NULL,
-                        voice=%s, license_note='unverified: no IPA available, Azure guessed from spelling',
+                    f"""UPDATE {s}.word_audio SET source='piper', file_path=%s, ipa_used=NULL,
+                        voice=%s, license_note='Synthesized from spelling by local Piper TTS -- no verified pronunciation available',
                         generated_at=now() WHERE word_id=%s""",
-                    (str(dest), audio.AZURE_VOICE, wid))
+                    (str(dest), audio.PIPER_VOICE_NAME, wid))
                 dist["synthesized"] += 1
             else:
                 dist["failed"] += 1

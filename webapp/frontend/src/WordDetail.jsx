@@ -179,7 +179,11 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
   }
 
   const hasAudio = word.audio_source && word.audio_source !== 'none'
-  const isGuessedAudio = word.audio_source === 'azure_guess'
+  // 'piper' (local grapheme-only synthesis) carries the same "no verified
+  // pronunciation" caveat as the older 'azure_guess' tier it replaced —
+  // both must show the same unverified badge, never the confidence of a
+  // real recording or IPA-guided synthesis.
+  const isGuessedAudio = word.audio_source === 'azure_guess' || word.audio_source === 'piper'
   const factors = word.difficulty_factors
 
   return (

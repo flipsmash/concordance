@@ -707,7 +707,7 @@ class WordDetail(BaseModel):
     ngram_recency_ratio: float | None
     ngram_peak_year: int | None
 
-    audio_source: str | None  # 'commons'|'azure'|'azure_guess'|'none'|None (no row)
+    audio_source: str | None  # 'commons'|'mw'|'azure'|'piper'|'azure_guess'|'none'|None (no row)
 
     categories: list[WordCategory]
     books: list[BookRef]

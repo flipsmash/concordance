@@ -345,31 +345,97 @@ def _ipa_has_leading_char(ipa: str) -> bool | None:
     return m.start() > 0
 
 
+# Vowel symbols within _ALLOWED_CHARS -- used only to count syllable nuclei
+# for _reconcile_close's monosyllable guard, never to validate a full
+# transcription (valid_ipa already does that against the full charset).
+_VOWELS = set("aeiouæœɑɒɔəɛɜɪɨɵʊʌɚɝ")
+_NUCLEUS_RE = re.compile("[" + "".join(_VOWELS) + "]+")
+
+
+def _count_nuclei(stress_free_ipa: str) -> int:
+    """Number of syllable nuclei: maximal runs of adjacent vowel characters
+    count as ONE nucleus each, since a diphthong (e.g. the əʊ in "pəʊp") is
+    written as two adjacent vowel letters with no boundary marker -- naively
+    counting vowel *characters* would overcount a one-syllable diphthong as
+    two syllables."""
+    return len(_NUCLEUS_RE.findall(stress_free_ipa))
+
+
+def _reconcile_close(n1: str, n2: str) -> str | None:
+    """Two narrow, notationally-safe equivalences to try when pass1 and
+    pass2 disagree verbatim -- NOT a general fuzzy-match/edit-distance
+    threshold. A live sample of real disagreements showed edit-distance-1-2
+    pairs are a mix of harmless notational noise (encoding, an omittable
+    mark) and genuine phonetic disagreement (vowel-length or -identity
+    swaps, a dropped segment, moved stress) at THE SAME edit distance, so a
+    blind distance cutoff would silently accept some of the latter. Only
+    two specific, individually-justified patterns are handled here; anything
+    else is left for a human or a further reconciliation pass, not guessed:
+
+    1. ASCII apostrophe used as a stress-mark glyph ("præk'tɪk") instead of
+       the proper ˈ -- pure encoding noise from OCR/vision transcription,
+       never a real phoneme. Normalizing it can still correctly *expose* a
+       genuine stress-position disagreement (e.g. "ˈpræktɪk" vs
+       "præk'tɪk" -> "ˈpræktɪk" vs "prækˈtɪk", still no match) rather than
+       paper over it.
+    2. Stress-mark presence/absence when the stress-stripped strings are
+       otherwise identical AND the word has exactly one syllable nucleus --
+       a primary-stress mark carries no information on a monosyllable
+       ("tenθ" vs "ˈtenθ"). Anything with 2+ nuclei is stress *placement*,
+       which must never be auto-merged (see e.g. "ˈskætərɒmɪtə(r" vs
+       "skætəˈrɒmɪtə(r" in the same sample -- a real disagreement, not
+       noise, despite being edit-distance 2 same as the safe cases)."""
+    def apostrophe_as_stress(s: str) -> str:
+        return s.replace("'", "ˈ")
+
+    g1, g2 = apostrophe_as_stress(n1), apostrophe_as_stress(n2)
+    if g1 == g2 and valid_ipa(g1):
+        return g1
+
+    def strip_stress(s: str) -> str:
+        return _STRESS_MARK_RE.sub("", s)
+
+    s1, s2 = strip_stress(g1), strip_stress(g2)
+    if s1 == s2 and valid_ipa(s1) and _count_nuclei(s1) == 1:
+        return g1 if _STRESS_MARK_RE.search(g1) else g2
+    return None
+
+
 def resolve_pronunciation(pass1: str | None, pass2: str | None,
                            raw_ocr: str | None = None) -> tuple[str | None, bool]:
     """(ipa_or_None, needs_review). Agreement (after whitespace/paren
     normalization) on two valid-IPA-charset reads is the primary gate —
     matches the pilot's double-pass design, not a single-pass allowlist
-    check. On top of that: a real, measured failure mode (see module
-    docstring) is BOTH passes sharing the same bias — dropping a real,
-    visible leading unstressed vowel before the first stress mark — which
-    pass-agreement alone can't catch since it's not independent noise.
-    raw_ocr (unreliable for exact glyphs, but structurally informative) is
-    cross-checked for this one specific pattern: if it clearly shows a
-    leading character before the stress mark and the agreed transcription
-    doesn't, that overrides an otherwise-clean agreement back to
-    needs_review=True rather than trusting a bias both passes share."""
+    check. Falls back to _reconcile_close's two narrow, individually-safe
+    equivalences when verbatim agreement fails (see its docstring for why
+    this stops well short of a general fuzzy match). On top of that: a
+    real, measured failure mode (see module docstring) is BOTH passes
+    sharing the same bias — dropping a real, visible leading unstressed
+    vowel before the first stress mark — which pass-agreement alone can't
+    catch since it's not independent noise. raw_ocr (unreliable for exact
+    glyphs, but structurally informative) is cross-checked for this one
+    specific pattern: if it clearly shows a leading character before the
+    stress mark and the agreed transcription doesn't, that overrides an
+    otherwise-clean agreement back to needs_review=True rather than
+    trusting a bias both passes share."""
     def norm(s: str | None) -> str | None:
         if s is None:
             return None
         return s.strip().strip("()").strip()
 
     n1, n2 = norm(pass1), norm(pass2)
-    if not (n1 and n2 and n1 == n2 and valid_ipa(n1)):
+    if not (n1 and n2):
         return None, True
 
+    if n1 == n2 and valid_ipa(n1):
+        resolved = n1
+    else:
+        resolved = _reconcile_close(n1, n2)
+        if resolved is None:
+            return None, True
+
     raw_says = _raw_suggests_leading_char(raw_ocr)
-    ipa_says = _ipa_has_leading_char(n1)
+    ipa_says = _ipa_has_leading_char(resolved)
     if raw_says is True and ipa_says is False:
         return None, True
-    return n1, False
+    return resolved, False

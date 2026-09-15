@@ -1,5 +1,8 @@
 """Pronunciation audio: pure logic only (Commons fetch + Azure synthesis are live calls)."""
 from __future__ import annotations
+import sys
+from pathlib import Path
+from unittest.mock import Mock
 from concordance import audio
 
 
@@ -100,7 +103,7 @@ def test_rejects_empty_or_none_ipa():
 def test_synthesize_azure_forwards_voice_and_lang_into_ssml(monkeypatch):
     captured = {}
 
-    def fake_synthesize_ssml(ssml, key, region, tries=4):
+    def fake_synthesize_ssml(ssml, key, region, tries=4, word=""):
         captured["ssml"] = ssml
         return b"fake-mp3-bytes"
 
@@ -114,7 +117,7 @@ def test_synthesize_azure_forwards_voice_and_lang_into_ssml(monkeypatch):
 def test_synthesize_azure_guess_forwards_voice_and_lang_into_ssml(monkeypatch):
     captured = {}
 
-    def fake_synthesize_ssml(ssml, key, region, tries=4):
+    def fake_synthesize_ssml(ssml, key, region, tries=4, word=""):
         captured["ssml"] = ssml
         return b"fake-mp3-bytes"
 
@@ -128,7 +131,7 @@ def test_synthesize_azure_guess_forwards_voice_and_lang_into_ssml(monkeypatch):
 def test_synthesize_azure_defaults_to_us_voice_and_lang(monkeypatch):
     captured = {}
 
-    def fake_synthesize_ssml(ssml, key, region, tries=4):
+    def fake_synthesize_ssml(ssml, key, region, tries=4, word=""):
         captured["ssml"] = ssml
         return b"fake-mp3-bytes"
 
@@ -136,3 +139,118 @@ def test_synthesize_azure_defaults_to_us_voice_and_lang(monkeypatch):
     audio.synthesize_azure("abandoner", "ˈbændənər", "key", "region")
     assert "xml:lang='en-US'" in captured["ssml"]
     assert f"name='{audio.AZURE_VOICE}'" in captured["ssml"]
+
+
+# --- failure visibility -------------------------------------------------------
+# Regression tests for a real production incident: a whole Azure run (10,690
+# words, logs/audio_20260904_123145.log) produced 0 Azure-synthesized audio
+# with nothing in the logs to say why, because every failure path returned
+# None bare. _synthesize_ssml must now print the actual reason.
+
+def test_synthesize_ssml_prints_status_and_body_on_non_200(monkeypatch, capsys):
+    resp = Mock(status_code=401, text="Access denied due to invalid subscription key")
+    monkeypatch.setattr(audio.requests, "post", lambda *a, **k: resp)
+    result = audio._synthesize_ssml("<speak/>", "bad-key", "eastus", tries=1, word="abandoner")
+    assert result is None
+    out = capsys.readouterr().out
+    assert "401" in out
+    assert "abandoner" in out
+    assert "Access denied" in out
+
+
+def test_synthesize_ssml_prints_after_retries_exhausted_on_network_error(monkeypatch, capsys):
+    def raise_conn_error(*a, **k):
+        raise audio.requests.RequestException("boom")
+    monkeypatch.setattr(audio.requests, "post", raise_conn_error)
+    monkeypatch.setattr(audio.time, "sleep", lambda s: None)
+    result = audio._synthesize_ssml("<speak/>", "key", "eastus", tries=2, word="abandoner")
+    assert result is None
+    out = capsys.readouterr().out
+    assert "abandoner" in out
+    assert "boom" in out
+
+
+def test_synthesize_ssml_silent_on_success(monkeypatch, capsys):
+    resp = Mock(status_code=200, content=b"fake-mp3-bytes")
+    monkeypatch.setattr(audio.requests, "post", lambda *a, **k: resp)
+    result = audio._synthesize_ssml("<speak/>", "key", "eastus", tries=1, word="abandoner")
+    assert result == b"fake-mp3-bytes"
+    assert capsys.readouterr().out == ""
+
+
+# --- Piper: local grapheme-only synthesis ------------------------------------
+
+def test_synthesize_piper_returns_none_when_voice_unavailable(monkeypatch, tmp_path):
+    monkeypatch.setattr(audio, "AUDIO_DIR", tmp_path)
+    monkeypatch.setattr(audio, "_piper_voice", lambda: None)
+    assert audio.synthesize_piper("abomine") is None
+
+
+def test_synthesize_piper_transcodes_via_ffmpeg(monkeypatch, tmp_path):
+    monkeypatch.setattr(audio, "AUDIO_DIR", tmp_path)
+
+    class FakeVoice:
+        def synthesize_wav(self, word, wav_file):
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(22050)
+            wav_file.writeframes(b"\x00\x00")
+
+    monkeypatch.setattr(audio, "_piper_voice", lambda: FakeVoice())
+
+    def fake_run(cmd, **kwargs):
+        dest_mp3 = Path(cmd[-1])
+        dest_mp3.write_bytes(b"fake-mp3-bytes")
+        return Mock(returncode=0)
+
+    monkeypatch.setattr(audio.subprocess, "run", fake_run)
+    result = audio.synthesize_piper("abomine")
+    assert result == b"fake-mp3-bytes"
+    # temp files cleaned up, nothing left behind in AUDIO_DIR
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_synthesize_piper_returns_none_on_ffmpeg_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(audio, "AUDIO_DIR", tmp_path)
+
+    class FakeVoice:
+        def synthesize_wav(self, word, wav_file):
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(22050)
+            wav_file.writeframes(b"\x00\x00")
+
+    monkeypatch.setattr(audio, "_piper_voice", lambda: FakeVoice())
+    monkeypatch.setattr(audio.subprocess, "run", lambda cmd, **kwargs: Mock(returncode=1))
+    assert audio.synthesize_piper("abomine") is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_piper_voice_caches_across_calls(monkeypatch):
+    monkeypatch.setattr(audio, "_piper_voice_cache", None)
+    calls = []
+
+    class FakePiperModule:
+        class PiperVoice:
+            @staticmethod
+            def load(path):
+                calls.append(path)
+                return "the-voice"
+
+    monkeypatch.setitem(sys.modules, "piper", FakePiperModule)
+    assert audio._piper_voice() == "the-voice"
+    assert audio._piper_voice() == "the-voice"
+    assert len(calls) == 1  # loaded once, cached on the second call
+
+
+def test_piper_voice_degrades_to_none_when_load_fails(monkeypatch):
+    monkeypatch.setattr(audio, "_piper_voice_cache", None)
+
+    class FakePiperModule:
+        class PiperVoice:
+            @staticmethod
+            def load(path):
+                raise OSError("no such file")
+
+    monkeypatch.setitem(sys.modules, "piper", FakePiperModule)
+    assert audio._piper_voice() is None

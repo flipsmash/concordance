@@ -1684,6 +1684,8 @@ def ipa(
                  + stats.get("corrected_local_wiktionary", 0) + stats.get("corrected_oed", 0))
     console.print(f"[green]✓[/green] ipa: {stats.get('total',0)} words — "
                   f"[bold]{stats.get('already_valid',0)}[/bold] already valid, "
+                  f"{stats.get('already_checked_empty',0)} already checked (confirmed no IPA "
+                  f"anywhere, skipped -- use --refetch to re-walk them), "
                   f"{backfilled} backfilled ({stats.get('backfilled_kaikki',0)} kaikki, "
                   f"{stats.get('backfilled_wordnik',0)} wordnik, "
                   f"{stats.get('backfilled_local_wiktionary',0)} local wiktionary, "
@@ -2189,7 +2191,9 @@ def audio(
     """Pronunciation audio: Commons recordings where they exist, else a real
     Merriam-Webster recording (needs MW_DICTIONARY_API_KEY -- shares the same
     1000/day cap as MW definition lookups), else Azure IPA-guided synthesis
-    where a transcription is known. Words with none of the above are left alone."""
+    where a transcription is known, else local Piper grapheme-only synthesis
+    (needs models/piper/, see audio.PIPER_MODEL_PATH). Only a word Piper
+    itself can't produce anything for is left at 'none'."""
     try:
         conn = db.connect(database_url)
     except Exception as exc:  # noqa: BLE001
@@ -2205,6 +2209,7 @@ def audio(
                   f"{commons_total} Commons ({stats.get('commons_direct_search',0)} via direct search), "
                   f"{stats.get('mw',0)} Merriam-Webster, "
                   f"{stats.get('azure',0)} Azure-synthesized, "
+                  f"{stats.get('piper',0)} Piper-synthesized (unverified), "
                   f"{stats.get('none',0)} no data found")
 
 
@@ -2214,9 +2219,11 @@ def audio_guess(
     limit: int = typer.Option(0, "--limit", "-l", help="Cap number of words synthesized."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
-    """Last resort for words with no real recording and no IPA anywhere: Azure
-    guesses pronunciation from spelling alone. Recorded as source='azure_guess'
-    — distinct from IPA-guided 'azure' — so the app can flag these unverified."""
+    """Sweeps up any pre-existing source='none' backlog using local Piper
+    grapheme-only synthesis (compute_audio's own `audio` command now does this
+    inline for new words -- this is only needed for words a run before Piper
+    existed left at 'none'). Recorded as source='piper' — distinct from
+    IPA-guided 'azure' — so the app can flag these unverified."""
     try:
         conn = db.connect(database_url)
     except Exception as exc:  # noqa: BLE001

@@ -443,6 +443,51 @@ def test_compute_ipa_sets_ipa_source_on_backfill_and_correction_and_clears_it(mo
 
 
 @pg
+def test_compute_ipa_skips_already_checked_empty_words_unless_refetch(monkeypatch):
+    # A word the cascade already walked and found nothing for must not pay
+    # the full dump-scan-plus-cascade cost again on every future only_missing
+    # run -- that's exactly the "runs forever, barely moves" failure mode
+    # ipa_checked_at exists to fix. --refetch (only_missing=False) is the
+    # deliberate escape hatch for picking up newly-unlocked upstream data.
+    from concordance import wiktextract
+    from concordance.model import Candidate
+
+    schema = "cc_test_ipa_checked_at"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    words = [
+        Candidate(lemma="neverchecked", pos="NOUN"),
+        Candidate(lemma="checkedempty", pos="NOUN"),
+    ]
+    db.sync_book_results(conn, "Book One", kept=words, rejected=[], schema=schema)
+    with conn.cursor() as cur:
+        cur.execute(f"UPDATE {schema}.word SET ipa_checked_at=now() WHERE lemma='checkedempty'")
+    conn.commit()
+
+    lexicon = {}  # nothing findable anywhere, for either word
+    monkeypatch.setattr(wiktextract, "build_lexicon", lambda *a, **k: lexicon)
+
+    stats = db.compute_ipa(conn, schema)
+    assert stats["total"] == 2
+    assert stats["already_checked_empty"] == 1
+    # only neverchecked was actually walked -- checkedempty was skipped
+    assert stats.get("unresolved", 0) == 1
+
+    stats2 = db.compute_ipa(conn, schema, only_missing=False)
+    assert stats2["already_checked_empty"] == 0  # --refetch ignores the gate
+    assert stats2.get("unresolved", 0) == 2       # both re-walked this time
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
 def test_compute_audio_mw_tier_downloads_when_commons_misses(monkeypatch):
     # Real recorded MW audio (mw.py's MWEntry.pronunciations[].audio_url) is
     # a same-trust-tier fallback to Commons, tried before Azure synthesis --
@@ -498,7 +543,14 @@ def test_compute_audio_mw_tier_downloads_when_commons_misses(monkeypatch):
 
 
 @pg
-def test_compute_audio_skips_mw_when_quota_exhausted(monkeypatch):
+def test_compute_audio_uses_cached_mw_hit_even_when_quota_exhausted(monkeypatch):
+    # mw.lookup_api checks its on-disk cache before it ever looks at the
+    # quota, so a cache hit must still work on a day the shared 1000/day cap
+    # is already spent -- compute_audio must not pre-empt that with its own
+    # batch-level quota check (regression test for the bug where it did:
+    # hundreds of words with real cached MW audio, e.g. "callipygian", were
+    # silently falling through to 'azure'/'none' any time this ran after
+    # another caller had already used up the day's quota).
     from concordance import audio, mw, wiktextract
     from concordance.model import Candidate
 
@@ -507,8 +559,16 @@ def test_compute_audio_skips_mw_when_quota_exhausted(monkeypatch):
     monkeypatch.setattr(mw, "mw_api_key", lambda: "fake-key")
     monkeypatch.setattr(mw, "quota_exhausted", lambda: True)
 
-    called = []
-    monkeypatch.setattr(mw, "lookup_api", lambda *a, **k: called.append(1) or [])
+    entry = mw.MWEntry(
+        headword="besmirch", part_of_speech="verb", definitions=["to soil"],
+        pronunciations=[mw.MWPronunciation(respelling="bi-SMURCH",
+                                            audio_url="https://example.test/besmirch.mp3")],
+        source="Merriam-Webster API",
+    )
+    monkeypatch.setattr(mw, "lookup_api", lambda *a, **k: [entry])  # simulates a cache hit
+    monkeypatch.setattr(mw, "exact_matches", lambda entries, word: entries)
+    monkeypatch.setattr(mw, "pick_entry", lambda entries, pos: entries[0])
+    monkeypatch.setattr(audio, "fetch_commons_audio", lambda url, dest, tries=1: True)
 
     schema = "cc_test_audio_mw_exhausted"
     conn = db.connect(_URL)
@@ -522,10 +582,154 @@ def test_compute_audio_skips_mw_when_quota_exhausted(monkeypatch):
 
     stats = db.compute_audio(conn, schema)
 
-    assert stats.get("mw", 0) == 0
-    assert called == []  # never even attempted once quota was exhausted
+    assert stats["mw"] == 1
 
     with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_compute_audio_mw_miss_falls_through_when_quota_exhausted(monkeypatch):
+    # The inverse case: quota exhausted AND the word isn't cached -- lookup_api
+    # itself (not compute_audio) is responsible for returning [] without a
+    # network call, so compute_audio should still call it (trusting that
+    # internal gate) and fall through to the next tier rather than erroring.
+    from concordance import audio, mw, wiktextract
+    from concordance.model import Candidate
+
+    monkeypatch.setattr(wiktextract, "build_lexicon", lambda *a, **k: {})
+    monkeypatch.setattr(audio, "azure_credentials", lambda: (None, None))
+    monkeypatch.setattr(mw, "mw_api_key", lambda: "fake-key")
+    monkeypatch.setattr(mw, "quota_exhausted", lambda: True)
+    monkeypatch.setattr(mw, "lookup_api", lambda *a, **k: [])  # simulates an uncached miss
+    monkeypatch.setattr(audio, "synthesize_piper", lambda lemma: None)  # not what this test covers
+
+    schema = "cc_test_audio_mw_exhausted_miss"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    db.sync_book_results(conn, "Book One", kept=[Candidate(lemma="besmirch", pos="VERB")],
+                          rejected=[], schema=schema)
+
+    stats = db.compute_audio(conn, schema)
+
+    assert stats.get("mw", 0) == 0
+    assert stats["none"] == 1
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_compute_audio_piper_tier_when_everything_else_misses(monkeypatch):
+    # Piper (local, grapheme-only) is the tier that actually closes the IPA
+    # gap: no Commons/MW recording, no IPA to hand Azure -- this is what
+    # 'none' meant before Piper existed, and should now succeed instead.
+    from concordance import audio, mw, wiktextract
+    from concordance.model import Candidate
+
+    monkeypatch.setattr(wiktextract, "build_lexicon", lambda *a, **k: {})
+    monkeypatch.setattr(audio, "azure_credentials", lambda: (None, None))
+    monkeypatch.setattr(mw, "mw_api_key", lambda: "")
+    monkeypatch.setattr(audio, "synthesize_piper", lambda lemma: b"fake-piper-mp3")
+
+    schema = "cc_test_audio_piper"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    db.sync_book_results(conn, "Book One", kept=[Candidate(lemma="abomine", pos="VERB")],
+                          rejected=[], schema=schema)
+
+    stats = db.compute_audio(conn, schema)
+
+    assert stats["piper"] == 1
+    assert stats.get("none", 0) == 0
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT source, ipa_used, voice FROM {schema}.word_audio WHERE word_id = "
+                    f"(SELECT id FROM {schema}.word WHERE lemma='abomine')")
+        source, ipa_used, voice = cur.fetchone()
+        assert source == "piper"
+        assert ipa_used is None
+        assert voice == audio.PIPER_VOICE_NAME
+
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_compute_audio_piper_unavailable_still_falls_through_to_none(monkeypatch):
+    from concordance import audio, mw, wiktextract
+    from concordance.model import Candidate
+
+    monkeypatch.setattr(wiktextract, "build_lexicon", lambda *a, **k: {})
+    monkeypatch.setattr(audio, "azure_credentials", lambda: (None, None))
+    monkeypatch.setattr(mw, "mw_api_key", lambda: "")
+    monkeypatch.setattr(audio, "synthesize_piper", lambda lemma: None)  # model files absent
+
+    schema = "cc_test_audio_piper_unavailable"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    db.sync_book_results(conn, "Book One", kept=[Candidate(lemma="abomine", pos="VERB")],
+                          rejected=[], schema=schema)
+
+    stats = db.compute_audio(conn, schema)
+
+    assert stats.get("piper", 0) == 0
+    assert stats["none"] == 1
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_synthesize_unverified_guesses_uses_piper(monkeypatch):
+    from concordance import audio, wiktextract
+    from concordance.model import Candidate
+
+    monkeypatch.setattr(wiktextract, "build_lexicon", lambda *a, **k: {})
+    monkeypatch.setattr(audio, "azure_credentials", lambda: (None, None))
+    monkeypatch.setattr(audio, "synthesize_piper", lambda lemma: b"fake-piper-mp3")
+
+    schema = "cc_test_audio_guess_piper"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    db.sync_book_results(conn, "Book One", kept=[Candidate(lemma="abomine", pos="VERB")],
+                          rejected=[], schema=schema)
+    # Simulate a pre-Piper backlog: a word already stuck at source='none'.
+    with conn.cursor() as cur:
+        cur.execute(f"""INSERT INTO {schema}.word_audio (word_id, source, generated_at)
+                        VALUES ((SELECT id FROM {schema}.word WHERE lemma='abomine'), 'none', now())""")
+    conn.commit()
+
+    stats = db.synthesize_unverified_guesses(conn, schema)
+
+    assert stats["synthesized"] == 1
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT source, voice FROM {schema}.word_audio WHERE word_id = "
+                    f"(SELECT id FROM {schema}.word WHERE lemma='abomine')")
+        assert cur.fetchone() == ("piper", audio.PIPER_VOICE_NAME)
+
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
     conn.close()
