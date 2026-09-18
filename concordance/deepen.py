@@ -79,6 +79,7 @@ def define(vocab_path: Path, console: Console | None = None,
 
     conn = db.connect()
     lexicon = localdict.build_lexicon(conn, {(r.get("word") or "").strip().lower() for r in undefined})
+    localdict.expand_lexicon_for_stubs(conn, lexicon)
     conn.close()
 
     session = dictionary.make_session()

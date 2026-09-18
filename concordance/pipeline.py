@@ -130,6 +130,7 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
     console.print(f"Found [bold]{len(candidates)}[/bold] distinct lemmas.")
 
     lexicon = localdict.build_lexicon(conn, set(candidates.keys()))
+    localdict.expand_lexicon_for_stubs(conn, lexicon)
 
     # --- deterministic filters -------------------------------------------
     floor.apply_floor(candidates, cfg)

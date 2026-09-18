@@ -569,7 +569,9 @@ def accept_rejected(rejected_id: int, _: dict = Depends(require_admin)) -> Accep
         lemma, book_id, pos, as_seen, sentence, chapter, reason = row
 
         cand = Candidate(lemma=lemma, pos=pos or "")
-        if not localdict.enrich(cand, localdict.build_lexicon(conn, {lemma.lower()})):
+        local_lexicon = localdict.build_lexicon(conn, {lemma.lower()})
+        localdict.expand_lexicon_for_stubs(conn, local_lexicon)
+        if not localdict.enrich(cand, local_lexicon):
             dictionary_enrich(cand)
 
         # The dictionary's only resolvable sense for this lemma is a symbol/

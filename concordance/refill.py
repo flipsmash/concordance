@@ -74,6 +74,7 @@ def refill(path: Path, console: Console | None = None) -> tuple[int, int]:
 
     conn = db.connect()
     lexicon = localdict.build_lexicon(conn, {(r.get("word") or "").strip().lower() for r in todo})
+    localdict.expand_lexicon_for_stubs(conn, lexicon)
     conn.close()
 
     session = dictionary.make_session()

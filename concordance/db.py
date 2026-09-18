@@ -1393,6 +1393,7 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
         return stats
 
     lexicon = localdict.build_lexicon(conn, {lemma.lower() for _, lemma, *_ in rows})
+    localdict.expand_lexicon_for_stubs(conn, lexicon)
     from .oed import definitions as oed_definitions
     oed_lexicon = oed_definitions.definition_lexicon(
         conn, {lemma.lower() for _, lemma, *_ in rows}, schema=oed_schema)
@@ -1563,6 +1564,7 @@ def refill_definitions(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> di
         return stats
 
     lexicon = localdict.build_lexicon(conn, {lemma.lower() for _, lemma, *_ in rows})
+    localdict.expand_lexicon_for_stubs(conn, lexicon)
     session = make_session()
 
     with conn.cursor() as cur:
@@ -1973,6 +1975,7 @@ def dedupe_plural_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int 
         return stats
 
     lexicon = localdict.build_lexicon(conn, {sing for *_, sing in parsed})
+    localdict.expand_lexicon_for_stubs(conn, lexicon)
     session = make_session()
     key = deepdef.wordnik_key()
     max_tier = resolve.Tier.WEB if use_web else resolve.Tier.YOURDICT
@@ -2127,6 +2130,7 @@ def expand_synonym_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int
 
     bare_targets = {t for *_, t, gloss in parsed if t and gloss is None}
     lexicon = localdict.build_lexicon(conn, bare_targets)
+    localdict.expand_lexicon_for_stubs(conn, lexicon)
     session = make_session()
     key = deepdef.wordnik_key()
     max_tier = resolve.Tier.WEB if use_web else resolve.Tier.YOURDICT
