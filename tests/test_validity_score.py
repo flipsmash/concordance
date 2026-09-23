@@ -287,3 +287,14 @@ def test_obsolete_spelling_target():
     # a real sense first, or a non-spelling gloss, is not a pointer
     assert o("(obsolete) To attend to; to apply oneself to.; Obsolete form of intend.") is None
     assert o("A grotesque creature of folklore.") is None
+
+
+def test_foreign_cast_out_reason_requires_every_english_check_to_fail():
+    from concordance.validity_score import foreign_cast_out_reason as f
+    note = f("miteinander", ["German"], "Web (LLM-extracted)")
+    assert note and "German" in note
+    assert f("miteinander", None, "Web (LLM-extracted)") is None              # no foreign-only evidence
+    assert f("miteinander", ["German"], "Merriam-Webster API") is None          # English dictionary defined it
+    assert f("miteinander", ["German"], "Local Wiktionary (DB) (synonym of 'x')") is None
+    assert f("haft", ["Danish"], "") is None                                   # common in English
+    assert f("glaive", ["French"], "") is None                                 # Webster list / WordNet

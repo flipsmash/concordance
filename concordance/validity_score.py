@@ -366,6 +366,40 @@ def early_modern_uv_target(word: str, min_zipf: float) -> str | None:
     return None
 
 
+# Definition sources that are English dictionaries: a definition from one is
+# itself evidence the word is used in English. The rest (fuzzy lookup, web+LLM
+# extraction, corpus-only, blank) say nothing about English usage.
+_NON_ENGLISH_EVIDENCE_SOURCES = frozenset({"", "datamuse", "dm", "Web (LLM-extracted)", "corpus",
+                                           "vocab.defined import", "wordlist"})
+_FOREIGN_MAX_EN_ZIPF = 2.0
+
+
+def foreign_cast_out_reason(word: str, foreign_langs: list[str] | None,
+                            definition_source: str | None) -> str | None:
+    """Note for casting a word out as foreign, or None to keep it.
+
+    `foreign_langs` comes from db.foreign_only_langs: the word has Wiktionary
+    entries ONLY in languages other than English(-family), Translingual,
+    Latin and Greek, and is in neither the local English Wiktionary nor 0
+    Dict. This adds the per-word English-usage checks, all of which must
+    pass (conservative -- any one English signal keeps the word):
+      - its definition didn't come from an English dictionary;
+      - wordfreq English Zipf < 2.0;
+      - not in the Webster-derived English word list, nor in WordNet.
+    English-book (Ngram) frequency is deliberately NOT a keep signal: foreign
+    quotations make plainly foreign words common there (sondern, perche)."""
+    if not foreign_langs:
+        return None
+    source = (definition_source or "").split(" (synonym")[0]
+    if source not in _NON_ENGLISH_EVIDENCE_SOURCES:
+        return None
+    w = word.strip().lower()
+    if zipf_frequency(w, "en") >= _FOREIGN_MAX_EN_ZIPF or w in _wordset() or _in_wordnet(w):
+        return None
+    shown = ", ".join(sorted(foreign_langs)[:4]) + ("…" if len(foreign_langs) > 4 else "")
+    return f"foreign ({shown} per Wiktionary); no English entry or usage"
+
+
 def _morph_root(word: str) -> str | None:
     """The most common known root reachable by peeling a SINGLE prefix or a
     SINGLE suffix off `word` — e.g. unbuttoned -> buttoned, bemused -> mused.

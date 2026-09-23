@@ -2895,3 +2895,41 @@ def test_fetch_ngrams_bulk_first(tmp_path, monkeypatch):
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
         cur.execute(f"DROP SCHEMA {gschema} CASCADE")
     conn.commit()
+
+
+@pg
+def test_clean_foreign_words(monkeypatch):
+    from concordance.model import Candidate
+    schema, wikt = "cc_test_foreign_words", "cc_test_foreign_wikt"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        cur.execute(f"DROP SCHEMA IF EXISTS {wikt} CASCADE")
+        cur.execute(f"CREATE SCHEMA {wikt}")
+        cur.execute(f"CREATE TABLE {wikt}.foreign_term (term text PRIMARY KEY, langs text[])")
+        cur.execute(f"""INSERT INTO {wikt}.foreign_term VALUES
+                        ('zzmiteinander', '{{German}}'), ('zzkeptone', '{{French}}'), ('zzdefined', '{{Italian}}')""")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    def cand(lemma, src):
+        c = Candidate(lemma=lemma, pos="NOUN"); c.definition = "x"; c.definition_source = src; return c
+    db.sync_book_results(conn, "Book A", kept=[
+        cand("zzmiteinander", "Web (LLM-extracted)"), cand("zzkeptone", "datamuse"),
+        cand("zzdefined", "Merriam-Webster API"), cand("zzplain", "")], rejected=[], schema=schema)
+    with conn.cursor() as cur:
+        cur.execute(f"UPDATE {schema}.word SET variant_flag_reason='foreign_review' WHERE lemma='zzkeptone'")
+    conn.commit()
+
+    stats = db.clean_foreign_words(conn, schema, apply=True, wikt_schema=wikt)
+    assert [a[1] for a in stats["actions"]] == ["zzmiteinander"]
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT lemma, active, validity_label, variant_flag_reason FROM {schema}.word")
+        got = {l: (a, v, f) for l, a, v, f in cur.fetchall()}
+        assert got["zzmiteinander"] == (False, "likely-artifact", "foreign_word")
+        assert got["zzkeptone"][0] is True           # reviewed exception never re-cast-out
+        assert got["zzdefined"][0] is True           # an English dictionary defined it
+        assert got["zzplain"][0] is True             # no foreign evidence at all
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+        cur.execute(f"DROP SCHEMA {wikt} CASCADE")
+    conn.commit()

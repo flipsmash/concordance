@@ -251,12 +251,23 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
         # prune via the review webapp if it really is junk.
         cast_out = 0
         flagged = 0
+        # Foreign-only per Wiktionary and absent from the English references
+        # (one query for the whole shortlist); foreign_cast_out_reason below
+        # adds the per-word English-usage checks. Latin/Greek never qualify.
+        foreign = db.foreign_only_langs(conn, [c.lemma for c in shortlist])
         for cand in shortlist:
             if cand.verdict is Verdict.DROP:
                 # Already cast out above (e.g. _enrich_one's MW foreign-
                 # language signal) -- skip, so it doesn't also pay for a
                 # variant_reject_reason computation and pick up a confusing
                 # "flagged for human review" mark on a word already dropped.
+                continue
+            if note := validity_score.foreign_cast_out_reason(
+                    cand.lemma, foreign.get(cand.lemma.lower()), cand.definition_source):
+                cand.verdict = Verdict.DROP
+                cand.reject_reason = RejectReason.FOREIGN_LANGUAGE
+                cand.interesting_reason = note
+                cast_out += 1
                 continue
             target = kind = None
             if t := validity_score.dialect_respelling_target(cand.definition):
@@ -288,7 +299,7 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
                 flagged += 1
         if cast_out:
             console.print(f"[dim]{cast_out} more cast out post-enrichment "
-                           "(symbol/proper-noun-only dictionary sense, or dialect/archaic respelling).[/dim]")
+                           "(symbol/proper-noun-only sense, foreign word, or dialect/archaic respelling).[/dim]")
         if flagged:
             console.print(f"[dim]{flagged} flagged for human review "
                            "(possible foreign word / archaic spelling variant).[/dim]")

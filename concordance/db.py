@@ -2829,6 +2829,117 @@ def _sweep_respellings(conn, schema: str, prefix: str, *, apply: bool, prefilter
     return {"scanned": len(found), "counts": dict(Counter(a[0] for a in actions)), "actions": actions}
 
 
+# Wiktionary language names that count as English for foreign-word
+# detection (historical/regional English and scientific Translingual entries),
+# and the classical families Brian asked to leave alone.
+_ENGLISH_FAMILY_LANGS = ("English", "Middle English", "Old English", "Early Modern English",
+                         "Scots", "Yola", "Fingallian", "Translingual")
+
+
+def load_wiktionary_langs(conn, dump_path: str | None = None, wikt_schema: str = "wikt") -> dict:
+    """`concordance wiktionary-langs`: from the English Wiktionary dump (every
+    language's entries, each tagged with its language), build
+    <wikt_schema>.foreign_term -- terms (lowercased) that have entries ONLY in
+    languages outside English-family/Translingual and outside Latin/Greek,
+    with those languages. Standalone schema, not apply_schema (a large load).
+    A byte-level grep pulls each entry's top-level "word"/"lang" pair (always
+    adjacent, in that order) so the multi-GB JSON never needs parsing."""
+    import subprocess
+    from . import wiktextract
+    g = _safe_schema(wikt_schema)
+    dump = dump_path or wiktextract.DEFAULT_DUMP_PATH
+    pattern = r'"word": "(?:[^"\\]|\\.)*", "lang": "(?:[^"\\]|\\.)*", "lang_code": "[^"]*"'
+    zcat = subprocess.Popen(["zcat", dump], stdout=subprocess.PIPE)
+    grep = subprocess.Popen(["grep", "-aoP", pattern], stdin=zcat.stdout, stdout=subprocess.PIPE,
+                            env={**os.environ, "LC_ALL": "C"})
+    zcat.stdout.close()
+    pair_re = re.compile(r'^"word": "(.*)", "lang": "(.*)", "lang_code": "[^"]*"$')
+    with conn.cursor() as cur:
+        cur.execute(f"CREATE SCHEMA IF NOT EXISTS {g}")
+        cur.execute(f"DROP TABLE IF EXISTS {g}.term_lang_raw")
+        cur.execute(f"CREATE UNLOGGED TABLE {g}.term_lang_raw (term text NOT NULL, lang text NOT NULL)")
+        n = 0
+        with cur.copy(f"COPY {g}.term_lang_raw (term, lang) FROM STDIN") as copy:
+            for raw in grep.stdout:
+                m = pair_re.match(raw.decode("utf-8", "replace").rstrip("\n"))
+                if m:
+                    copy.write_row((json.loads(f'"{m.group(1)}"').lower(), json.loads(f'"{m.group(2)}"')))
+                    n += 1
+        grep.wait(); zcat.wait()
+        cur.execute(f"DROP TABLE IF EXISTS {g}.foreign_term")
+        cur.execute(f"""CREATE TABLE {g}.foreign_term AS
+                        SELECT term, array_agg(DISTINCT lang ORDER BY lang) AS langs
+                        FROM {g}.term_lang_raw
+                        GROUP BY term
+                        HAVING NOT bool_or(lang = ANY(%s) OR lang ~ '(Latin|Greek)')""",
+                    (list(_ENGLISH_FAMILY_LANGS),))
+        cur.execute(f"ALTER TABLE {g}.foreign_term ADD PRIMARY KEY (term)")
+        cur.execute(f"SELECT count(*) FROM {g}.foreign_term")
+        foreign = cur.fetchone()[0]
+        cur.execute(f"DROP TABLE {g}.term_lang_raw")
+    conn.commit()
+    return {"pairs": n, "foreign_only_terms": foreign}
+
+
+def foreign_only_langs(conn, lemmas, wikt_schema: str = "wikt") -> dict[str, list[str]]:
+    """lemma -> its Wiktionary languages, for the lemmas that are foreign-only
+    per <wikt_schema>.foreign_term AND absent from the local English
+    Wiktionary (vocab.wiktionary) and 0 Dict (oed.entry) headwords. Empty if
+    the table hasn't been built. The per-word English-usage checks live in
+    validity_score.foreign_cast_out_reason."""
+    g = _safe_schema(wikt_schema)
+    lemmas = sorted({l.lower() for l in lemmas})
+    if not lemmas:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass(%s), to_regclass('vocab.wiktionary'), to_regclass('oed.entry')",
+                    (f"{g}.foreign_term",))
+        have_ft, have_wik, have_oed = cur.fetchone()
+        if not have_ft:
+            return {}
+        cur.execute(
+            f"""SELECT f.term, f.langs FROM {g}.foreign_term f
+                WHERE f.term = ANY(%s)"""
+            + (" AND NOT EXISTS (SELECT 1 FROM vocab.wiktionary v WHERE v.term IN (f.term, initcap(f.term)))"
+               if have_wik else "")
+            + (" AND NOT EXISTS (SELECT 1 FROM oed.entry o WHERE o.headword_norm IN (f.term, initcap(f.term)))"
+               if have_oed else ""),
+            (lemmas,))
+        return {term: langs for term, langs in cur.fetchall()}
+
+
+def clean_foreign_words(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool = False,
+                        wikt_schema: str = "wikt") -> dict:
+    """`concordance clean-foreign-words`: cast out active words that are
+    foreign and not used in English (db.foreign_only_langs +
+    validity_score.foreign_cast_out_reason; Latin and Greek never qualify).
+    Cast out = active=false, validity_label='likely-artifact', and
+    variant_flag_reason='foreign_word' with the languages in the note (a
+    distinct reason, so the deleted-as-difficulty dataset can exclude them).
+    Soft/reversible; idempotent (only active words, and never one flagged
+    foreign_review -- a kept exception); dry run unless `apply`."""
+    from .validity_score import foreign_cast_out_reason
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        # foreign_review = a human (or a reviewed exception) decided to keep
+        # it despite the evidence -- never re-cast-out behind their back
+        cur.execute(f"""SELECT id, lemma_lc, coalesce(definition_source,'') FROM {s}.word
+                        WHERE active AND coalesce(variant_flag_reason, '') <> 'foreign_review'""")
+        rows = cur.fetchall()
+    langs = foreign_only_langs(conn, [l for _, l, _ in rows], wikt_schema)
+    actions = [(wid, lemma, note) for wid, lemma, src in rows
+               if lemma in langs and (note := foreign_cast_out_reason(lemma, langs[lemma], src))]
+    if apply:
+        with conn.cursor() as cur:
+            for wid, _lemma, note in actions:
+                cur.execute(f"""UPDATE {s}.word SET active=false, validity_label='likely-artifact',
+                                    variant_flag_reason='foreign_word', variant_flag_note=%s,
+                                    variant_flagged_at=now(), updated_at=now()
+                                WHERE id=%s""", (note, wid))
+        conn.commit()
+    return {"candidates": len(langs), "cast_out": len(actions), "actions": actions}
+
+
 def compute_difficulty(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> dict:
     """Compute the ex-ante difficulty scalar (+ factor breakdown) for every word.
     Always recomputes every word in scope (no only_missing gate) -- ngram,

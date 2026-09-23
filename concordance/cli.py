@@ -1471,6 +1471,51 @@ def clean_archaic_spellings(
                   f"[bold]{stats['scanned']}[/bold] archaic spellings — {stats['counts']}")
 
 
+@app.command("wiktionary-langs")
+def wiktionary_langs(
+    dump: Optional[Path] = typer.Option(None, "--dump", help="wiktextract JSONL.gz (default: data/wiktextract-en.jsonl.gz)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Build wikt.foreign_term from the English Wiktionary dump: every term
+    whose entries are ONLY in non-English, non-Latin/Greek languages. Used by
+    clean-foreign-words and ingest's foreign-word cast-out. ~2-3 minutes."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    with console.status("[bold]Indexing Wiktionary entry languages…"):
+        stats = db.load_wiktionary_langs(conn, str(dump) if dump else None)
+    conn.close()
+    console.print(f"[green]✓[/green] wiktionary-langs: {stats['pairs']:,} word/language pairs, "
+                  f"[bold]{stats['foreign_only_terms']:,}[/bold] foreign-only terms")
+
+
+@app.command("clean-foreign-words")
+def clean_foreign_words(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    apply: bool = typer.Option(False, "--apply", help="Write changes (default: dry run, list only)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Cast out active words that Wiktionary has only in other languages
+    (never Latin/Greek) and that show no English use (no English dictionary
+    definition, English wordfreq < 2.0, not in Webster's list or WordNet, not
+    in the local English Wiktionary or 0 Dict). Sets likely-artifact +
+    variant_flag_reason='foreign_word'; soft/reversible. Needs
+    `wiktionary-langs` first."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    stats = db.clean_foreign_words(conn, schema, apply=apply)
+    conn.close()
+    if not apply:
+        for _wid, lemma, note in stats["actions"]:
+            console.print(f"  {lemma}  [dim]{note}[/dim]")
+    console.print(f"[green]✓[/green] clean-foreign-words{'' if apply else ' (dry run)'}: "
+                  f"{stats['candidates']} foreign-only per Wiktionary, [bold]{stats['cast_out']}[/bold] cast out")
+
+
 @app.command("expand-synonyms")
 def expand_synonyms(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
