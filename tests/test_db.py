@@ -2855,3 +2855,43 @@ def test_clean_archaic_spellings():
     with conn.cursor() as cur:
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
+
+
+@pg
+def test_fetch_ngrams_bulk_first(tmp_path, monkeypatch):
+    from concordance import ngram, ngram_bulk
+    from concordance.model import Candidate
+    schema, gschema = "cc_test_ngram_bulk", "cc_test_ngram_bulk_src"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        cur.execute(f"DROP SCHEMA IF EXISTS {gschema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    totals = {y: 1_000_000 for y in range(ngram_bulk.FIRST_YEAR, ngram_bulk.LAST_YEAR + 1)}
+    part = tmp_path / "part.tsv"
+    f = ngram_bulk.features({2010: 50}, totals)
+    part.write_text(f"copperware\t{f['peak']!r}\t{f['recent']!r}\t{f['recency_ratio']!r}\t"
+                    f"{f['peak_year']}\t{{{','.join(['0'] * 21 + ['50'])}}}\n")
+    assert db.load_ngram_bulk(conn, [part], totals, ngram_schema=gschema) == {"terms": 1}
+
+    def cand(lemma):
+        c = Candidate(lemma=lemma, pos="NOUN"); c.definition = "x"; return c
+    db.sync_book_results(conn, "Book A", kept=[cand(w) for w in ("copperware", "zzqxv", "well-met")],
+                         rejected=[], schema=schema)
+    calls = []
+    monkeypatch.setattr(ngram, "fetch", lambda w, session: calls.append(w) or
+                        {"peak": 1e-7, "recent": 1e-8, "recency_ratio": 0.1, "peak_year": 1900})
+    stats = db.fetch_ngrams(conn, schema, delay=0, ngram_schema=gschema)
+    assert (stats["bulk"], stats["bulk_absent"], stats["fetched"]) == (1, 1, 1)
+    assert calls == ["well-met"]                 # only the odd shape hits the API
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT w.lemma, g.peak, g.peak_year FROM {schema}.word_ngram g
+                        JOIN {schema}.word w ON w.id = g.word_id""")
+        got = {l: (p, y) for l, p, y in cur.fetchall()}
+        assert got["copperware"] == (f["peak"], f["peak_year"])
+        assert got["zzqxv"] == (0, None)          # absent from print, not "unknown"
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+        cur.execute(f"DROP SCHEMA {gschema} CASCADE")
+    conn.commit()

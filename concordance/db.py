@@ -2498,20 +2498,106 @@ def compute_archaic(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> dict:
     return dict(dist)
 
 
+def load_ngram_bulk(conn, parts: list, totals: dict[int, int], ngram_schema: str = "ngram") -> dict:
+    """Load ngram_bulk.build_tsv's parts into the standalone `ngram` schema
+    (NOT part of apply_schema -- web restarts run that, and a multi-GB load
+    must never hang behind one): staged COPY into ngram.unigram_new, primary
+    key built after the load, then an atomic swap. Also refreshes
+    ngram.decade_total (the per-decade denominators for decade_counts) and
+    ngram.meta. Idempotent: re-running replaces the previous load."""
+    from . import ngram_bulk as nb
+    g = _safe_schema(ngram_schema)
+    with conn.cursor() as cur:
+        cur.execute(f"CREATE SCHEMA IF NOT EXISTS {g}")
+        cur.execute(f"DROP TABLE IF EXISTS {g}.unigram_new")
+        cur.execute(f"""CREATE UNLOGGED TABLE {g}.unigram_new (
+                           term text NOT NULL, peak double precision, recent double precision,
+                           recency_ratio double precision, peak_year smallint, decade_counts bigint[])""")
+        n = 0
+        for part in parts:
+            with open(part, "rb") as fh, cur.copy(
+                    f"COPY {g}.unigram_new (term, peak, recent, recency_ratio, peak_year, decade_counts) "
+                    "FROM STDIN WITH (FORMAT text, NULL '')") as copy:
+                while chunk := fh.read(1 << 20):
+                    copy.write(chunk)
+            conn.commit()
+        cur.execute(f"SELECT count(*), count(DISTINCT term) FROM {g}.unigram_new")
+        n, distinct = cur.fetchone()
+        if n != distinct:
+            raise RuntimeError(f"ngram bulk load has duplicate terms ({n} rows, {distinct} distinct)")
+        cur.execute(f"ALTER TABLE {g}.unigram_new SET LOGGED")
+        cur.execute(f"ALTER TABLE {g}.unigram_new ADD PRIMARY KEY (term)")
+        cur.execute(f"DROP TABLE IF EXISTS {g}.decade_total")
+        cur.execute(f"CREATE TABLE {g}.decade_total (decade smallint PRIMARY KEY, match_count bigint NOT NULL)")
+        for d in nb.DECADES:
+            cur.execute(f"INSERT INTO {g}.decade_total VALUES (%s, %s)",
+                        (d, sum(totals.get(y, 0) for y in range(d, d + 10))))
+        cur.execute(f"""CREATE TABLE IF NOT EXISTS {g}.meta (
+                           dataset text NOT NULL, terms bigint NOT NULL, loaded_at timestamptz NOT NULL)""")
+        cur.execute(f"DELETE FROM {g}.meta")
+        cur.execute(f"INSERT INTO {g}.meta VALUES (%s, %s, now())", (nb.BASE_URL, n))
+        cur.execute(f"DROP TABLE IF EXISTS {g}.unigram")
+        cur.execute(f"ALTER TABLE {g}.unigram_new RENAME TO unigram")
+        cur.execute(f"ALTER INDEX {g}.unigram_new_pkey RENAME TO unigram_pkey")
+    conn.commit()
+    return {"terms": n}
+
+
 def fetch_ngrams(conn, schema: str = DEFAULT_SCHEMA, only_missing: bool = True,
-                 limit: int = 0, delay: float = 0.3) -> dict:
-    """Fetch + cache Google Books Ngram features for words. Returns counts."""
+                 limit: int = 0, delay: float = 0.3, ngram_schema: str = "ngram") -> dict:
+    """Fill word_ngram. Bulk first, then the live API only for what bulk can't
+    answer:
+      - bulk:        lemma found in ngram.unigram (the local v3 dataset --
+                     see ngram_bulk.py / load_ngram_bulk) -- one SQL join;
+      - bulk_absent: a plain lowercase lemma (^[a-z]+$) NOT in ngram.unigram
+                     is genuinely absent from print -- the bulk table holds
+                     every lowercase term Google counted -- so zeros, the
+                     same "not in corpus" row the API returns;
+      - api:         any other shape (hyphen, space, capital, accent) missing
+                     from bulk, whose tokenization bulk 1-grams may not share.
+    Falls back to API-only when the ngram schema hasn't been loaded."""
     import time
     from . import ngram
     s = _safe_schema(schema)
-    where = (f" WHERE NOT EXISTS (SELECT 1 FROM {s}.word_ngram g WHERE g.word_id=w.id)"
-             if only_missing else "")
+    g = _safe_schema(ngram_schema)
+    missing = (f" AND NOT EXISTS (SELECT 1 FROM {s}.word_ngram g WHERE g.word_id=w.id)"
+               if only_missing else "")
+    stats = {"words": 0, "bulk": 0, "bulk_absent": 0, "fetched": 0, "in_corpus": 0, "failed": 0}
+    upsert = f"""INSERT INTO {s}.word_ngram (word_id, peak, recent, recency_ratio, peak_year, fetched_at)
+                 {{select}}
+                 ON CONFLICT (word_id) DO UPDATE SET peak=EXCLUDED.peak, recent=EXCLUDED.recent,
+                     recency_ratio=EXCLUDED.recency_ratio, peak_year=EXCLUDED.peak_year,
+                     fetched_at=EXCLUDED.fetched_at"""
     with conn.cursor() as cur:
-        cur.execute(f"SELECT w.id, w.lemma FROM {s}.word w{where}" + (f" LIMIT {int(limit)}" if limit else ""))
+        cur.execute("SELECT to_regclass(%s)", (f"{g}.unigram",))
+        have_bulk = cur.fetchone()[0] is not None
+        if have_bulk and not limit:
+            cur.execute(upsert.format(select=f"""
+                SELECT w.id, u.peak, u.recent, u.recency_ratio, u.peak_year, now()
+                FROM {s}.word w JOIN {g}.unigram u ON u.term = w.lemma
+                WHERE true{missing}"""))
+            stats["bulk"] = cur.rowcount
+            cur.execute(upsert.format(select=f"""
+                SELECT w.id, 0, 0, NULL, NULL, now() FROM {s}.word w
+                WHERE w.lemma ~ '^[a-z]+$'
+                  AND NOT EXISTS (SELECT 1 FROM {g}.unigram u WHERE u.term = w.lemma){missing}"""))
+            stats["bulk_absent"] = cur.rowcount
+            conn.commit()
+            stats["in_corpus"] = stats["bulk"]
+        api_filter = ("" if not (have_bulk and not limit) else
+                      " AND NOT (w.lemma ~ '^[a-z]+$') AND NOT EXISTS "
+                      f"(SELECT 1 FROM {g}.unigram u WHERE u.term = w.lemma)")
+        # With bulk loaded, the API tier only ever fills rows that don't exist
+        # yet, even on a refetch: the dataset is the same frozen en-2019
+        # corpus the API serves, so re-asking it (rate-limited) buys nothing.
+        api_missing = (f" AND NOT EXISTS (SELECT 1 FROM {s}.word_ngram g WHERE g.word_id=w.id)"
+                       if have_bulk else missing)
+        cur.execute(f"SELECT w.id, w.lemma FROM {s}.word w WHERE true{api_missing}{api_filter}"
+                    + (f" LIMIT {int(limit)}" if limit else ""))
         rows = cur.fetchall()
+    stats["words"] = stats["bulk"] + stats["bulk_absent"] + len(rows)
     session = requests.Session()
     session.headers.update({"User-Agent": "Mozilla/5.0 (concordance vocab tool)"})
-    stats = {"words": len(rows), "fetched": 0, "in_corpus": 0, "failed": 0}
     with conn.cursor() as cur:
         for wid, lemma in rows:
             f = ngram.fetch(lemma, session)

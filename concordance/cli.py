@@ -518,7 +518,8 @@ def ngram(
     limit: int = typer.Option(0, "--limit", "-l", help="Cap number of words fetched."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
-    """Fetch + cache Google Books Ngram features (rarity + recency) into word_ngram."""
+    """Fill word_ngram (rarity + recency): from the local bulk table
+    (`ngram-bulk-load`) where it has the word, live API otherwise."""
     try:
         conn = db.connect(database_url)
     except Exception as exc:  # noqa: BLE001
@@ -526,9 +527,39 @@ def ngram(
     db.apply_schema(conn, schema)
     stats = db.fetch_ngrams(conn, schema, only_missing=not refetch, limit=limit)
     conn.close()
-    console.print(f"[green]✓[/green] ngram: fetched [bold]{stats['fetched']}[/bold]/{stats['words']} "
-                  f"({stats['in_corpus']} in corpus, {stats['failed']} failed)")
+    console.print(f"[green]✓[/green] ngram: {stats['words']} words — [bold]{stats['bulk']}[/bold] from bulk, "
+                  f"{stats['bulk_absent']} absent from print, [bold]{stats['fetched']}[/bold] via API "
+                  f"({stats['failed']} failed)")
 
+
+
+@app.command("ngram-bulk-load")
+def ngram_bulk_load(
+    download: bool = typer.Option(True, "--download/--no-download",
+                                  help="Fetch any missing shards first (~10 GB, resumable, gzip-verified)."),
+    workers: int = typer.Option(8, "--workers", help="Parallel shard scanners."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Build the local Google Books Ngram table (ngram.unigram) from the bulk
+    v3 English 1-gram dataset: every lowercase word-shaped term Google
+    counted, with the same peak/recent/recency features the API returns plus
+    per-decade counts from 1800. Shards cache under $CONCORDANCE_NGRAM_DIR
+    (default ~/.cache/concordance/ngram-v3). Afterwards run `ngram --refetch`
+    to rebuild word_ngram from it."""
+    from . import ngram_bulk
+    if download:
+        console.print("[bold]Downloading Ngram shards (skips complete ones)…[/bold]")
+        ngram_bulk.download()
+    console.print("[bold]Scanning shards…[/bold]")
+    parts = ngram_bulk.build_tsv(workers=workers)
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    console.print("[bold]Loading ngram.unigram…[/bold]")
+    stats = db.load_ngram_bulk(conn, parts, ngram_bulk.open_totals())
+    conn.close()
+    console.print(f"[green]✓[/green] ngram-bulk-load: [bold]{stats['terms']:,}[/bold] terms loaded")
 
 
 @app.command()
@@ -2022,10 +2053,11 @@ def maintain(
         # near-instant finish. This print is the fix: announce the step by name
         # the instant it starts, same as every console.status()-wrapped step
         # already does, before any internal progress has a chance to land.
-        console.print("[bold]Fetching Google Ngram data (rate-limited, one request per word)…[/bold]")
+        console.print("[bold]Filling Google Ngram data (local bulk table; API only for odd shapes)…[/bold]")
         stats = db.fetch_ngrams(conn, schema, only_missing=True, limit=limit)
-        console.print(f"[green]✓[/green] ngram: fetched [bold]{stats['fetched']}[/bold]/{stats['words']} "
-                      f"({stats['in_corpus']} in corpus, {stats['failed']} failed)")
+        console.print(f"[green]✓[/green] ngram: {stats['words']} words — [bold]{stats['bulk']}[/bold] from bulk, "
+                      f"{stats['bulk_absent']} absent from print, [bold]{stats['fetched']}[/bold] via API "
+                      f"({stats['failed']} failed)")
     else:
         console.print("[dim]ngram skipped.[/dim]")
 
