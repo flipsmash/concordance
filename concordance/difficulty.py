@@ -32,6 +32,14 @@ DOMAIN_FIELDS = set("BCFGHIKLMOWY")
 _ZIPF_CEIL = 4.0
 _ZIPF_FLOOR = -2.0
 
+# How far a transparent derivative's zipf moves from its own toward its
+# root's (0 = ignore the root, 1 = full substitution). Full substitution made
+# any derivative of a very common root trivially easy (marbly -> marble,
+# intercurrent -> current both scored 0) on top of the flat morph ease --
+# counting one effect twice. Halfway on the log scale = the geometric mean of
+# the two frequencies: knowing the root helps, the affix still costs something.
+_ROOT_WEIGHT = 0.5
+
 _ARCHAIC_BASE = {"obsolete": 0.25, "archaic": 0.18, "dated": 0.06, "current": 0.0}
 
 
@@ -59,15 +67,16 @@ def unified_zipf(web_zipf: float, ngram_recent: float | None,
     which tracks wordfreq closely where both exist. Not the all-time peak: the
     pre-1800 Ngram corpus is so small a single use reads as a spike (e.g.
     "cognoscibility" peaks in 1674), and faded words are the archaic factor's
-    job anyway. A transparent derivation takes its common root's Zipf when
-    higher (unbuttoned -> button), as effective_zipf does."""
+    job anyway. A transparent derivation whose root wordfreq lists as more
+    common moves _ROOT_WEIGHT of the way toward the root's Zipf (source
+    "root-blend"); a root wordfreq doesn't list (zipf 0) says nothing."""
     if web_zipf > 0:
         z, src = web_zipf, "wordfreq"
     else:
         pz = print_zipf(ngram_recent)
         z, src = (pz, "ngram") if pz is not None else (_ZIPF_FLOOR, "unseen")
-    if root_zipf is not None and root_zipf > z:
-        z, src = root_zipf, "root"
+    if root_zipf is not None and root_zipf > 0 and root_zipf > z:
+        z, src = z + _ROOT_WEIGHT * (root_zipf - z), "root-blend"
     return z, src
 
 
@@ -82,13 +91,18 @@ def score(web_zipf: float, ngram_recent: float | None, ngram_peak: float | None 
     """Return (difficulty 0-100, factors dict incl. a human 'why').
 
     `zipf` in the factors is the unified value rarity is computed from (so the
-    two always move together); `zipf_web`/`zipf_print` are the raw inputs and
-    `zipf_source` says which one won (wordfreq | ngram | root | unseen)."""
+    two always move together); `zipf_web`/`zipf_print`/`zipf_root` are the raw
+    inputs and `zipf_source` says how it was reached (wordfreq | ngram | unseen,
+    or root-blend when a common root pulled it up).
+
+    Morphological transparency is credited ONCE: through the root blend when
+    the root is common enough to apply, else as the flat morph ease."""
     zipf, src = unified_zipf(web_zipf, ngram_recent, root_zipf)
     pz = print_zipf(ngram_recent)
     factors: dict = {"zipf": round(zipf, 2), "zipf_source": src,
                      "zipf_web": round(web_zipf, 2),
-                     "zipf_print": round(pz, 2) if pz is not None else None}
+                     "zipf_print": round(pz, 2) if pz is not None else None,
+                     "zipf_root": round(root_zipf, 2) if root_zipf is not None else None}
 
     rarity = _rarity(zipf)
     factors["rarity"] = round(rarity, 3)
@@ -99,7 +113,7 @@ def score(web_zipf: float, ngram_recent: float | None, ngram_peak: float | None 
     domain = 0.06 if has_domain else 0.0
     factors["domain"] = domain
 
-    morph = -0.10 if morph_transparent else 0.0
+    morph = -0.10 if (morph_transparent and src != "root-blend") else 0.0
     factors["morph"] = morph
 
     total = _clamp(rarity + arch + domain + morph)
@@ -109,7 +123,7 @@ def score(web_zipf: float, ngram_recent: float | None, ngram_peak: float | None 
 
 def _why(zipf, src, ngram_peak, archaic, arch, domain, morph) -> str:
     hard, easy = [], []
-    via = {"ngram": ", from print", "root": ", via root"}.get(src, "")
+    via = {"ngram": ", from print", "root-blend": ", eased toward its root"}.get(src, "")
     if zipf <= 1.0:
         hard.append(f"very rare (zipf {zipf:.1f}{via})")
     elif zipf <= 2.5:
@@ -122,6 +136,8 @@ def _why(zipf, src, ngram_peak, archaic, arch, domain, morph) -> str:
         hard.append("specialised domain")
     if morph < 0:
         easy.append("morphologically transparent")
+    if src == "root-blend" and zipf > 2.5:
+        easy.append("common root")
     s = "hard: " + (", ".join(hard) if hard else "—")
     if easy:
         s += "; eased by: " + ", ".join(easy)

@@ -40,7 +40,26 @@ def test_wordfreq_wins_when_listed_and_root_when_higher():
     assert d.unified_zipf(0.0, 1e-7)[1] == "ngram"
     assert d.unified_zipf(0.0, None) == (d._ZIPF_FLOOR, "unseen")
     assert d.unified_zipf(0.0, 0.0) == (d._ZIPF_FLOOR, "ngram")
-    assert d.unified_zipf(0.0, 1e-9, root_zipf=4.2) == (4.2, "root")
+    z, src = d.unified_zipf(0.0, 1e-9, root_zipf=4.2)      # own print zipf 0.0
+    assert src == "root-blend" and abs(z - 2.1) < 1e-9       # halfway toward the root
+
+
+def test_unlisted_root_is_no_evidence():
+    # oxygenizer -> oxygenize: a root wordfreq doesn't list (zipf 0) must not
+    # beat the word's own (negative) print zipf.
+    z, src = d.unified_zipf(0.0, 1e-11, root_zipf=0.0)
+    assert src == "ngram" and z < 0
+
+
+def test_transparency_credited_once():
+    # a root blend already credits the root; no flat morph ease on top
+    _, f = d.score(0.0, 1e-9, morph_transparent=True, root_zipf=5.0)
+    assert f["zipf_source"] == "root-blend" and f["morph"] == 0.0
+    # transparent but root unlisted -> the flat ease still applies
+    _, f = d.score(0.0, 1e-9, morph_transparent=True, root_zipf=0.0)
+    assert f["morph"] == -0.10
+    # a derivative of a very common root is no longer trivially 0
+    assert d.score(0.0, 3e-9, morph_transparent=True, root_zipf=3.96)[0] > 20   # marbly
 
 
 def test_obsolete_adds_difficulty_weighted_by_confidence():

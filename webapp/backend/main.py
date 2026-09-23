@@ -656,9 +656,10 @@ class WordCategory(BaseModel):
 class DifficultyFactors(BaseModel):
     zipf: float                     # the unified zipf rarity is scaled from
     # Absent on rows scored before the recent-print rarity change.
-    zipf_source: str | None = None  # wordfreq | ngram | root | unseen
+    zipf_source: str | None = None  # wordfreq | ngram | unseen | root-blend
     zipf_web: float | None = None
     zipf_print: float | None = None
+    zipf_root: float | None = None
     rarity: float
     archaic: float
     domain: float
