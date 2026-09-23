@@ -2813,3 +2813,38 @@ def test_clean_dialect_spellings():
     with conn.cursor() as cur:
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
+
+
+@pg
+def test_clean_archaic_spellings():
+    from concordance.model import Candidate
+    schema = "cc_test_archaic_spellings"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    def cand(lemma, definition):
+        c = Candidate(lemma=lemma, pos="VERB"); c.definition = definition; return c
+
+    g = "third-person singular simple present indicative of "
+    db.sync_book_results(conn, "Book A", kept=[cand("vouchsafe", "To condescend to grant.")], rejected=[], schema=schema)
+    db.sync_book_results(conn, "Book B", kept=[
+        cand("thinketh", g + "think"), cand("vouchsafeth", g + "vouchsafe"),
+        cand("smiteth", g + "smite"), cand("reuelation", ""), cand("hest", "Command, injunction."),
+    ], rejected=[], schema=schema)
+
+    db.clean_archaic_spellings(conn, schema, apply=True)
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT lemma, active, variant_flag_reason FROM {schema}.word")
+        got = {l: (a, f) for l, a, f in cur.fetchall()}
+    assert got["thinketh"] == (False, "archaic_common_variant")
+    assert got["reuelation"] == (False, "archaic_common_variant")
+    assert got["vouchsafeth"] == (False, "archaic_duplicate")
+    assert got["smiteth"] == (True, "archaic_review")
+    assert got["hest"] == (True, None)
+    assert got["vouchsafe"] == (True, None)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()

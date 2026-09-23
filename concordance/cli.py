@@ -1416,6 +1416,30 @@ def clean_dialect_spellings(
                   f"[bold]{stats['scanned']}[/bold] dialect respellings — {stats['counts']}")
 
 
+@app.command("clean-archaic-spellings")
+def clean_archaic_spellings(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    apply: bool = typer.Option(False, "--apply", help="Write changes (default: dry run, list only)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Sweep archaic verb inflections (thinketh, findest -- by definition) and
+    early-printing u-for-v spellings (reuelation): cast out those of common
+    words or of words already in the list (book links move to it); flag the
+    rest `archaic_review`. Soft/reversible, recorded in variant_flag_reason."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    stats = db.clean_archaic_spellings(conn, schema, apply=apply)
+    conn.close()
+    if not apply:
+        for kind, _wid, lemma, note, _surv in stats["actions"]:
+            console.print(f"  {kind:24} {lemma}  [dim]{note}[/dim]")
+    console.print(f"[green]✓[/green] clean-archaic-spellings{'' if apply else ' (dry run)'}: "
+                  f"[bold]{stats['scanned']}[/bold] archaic spellings — {stats['counts']}")
+
+
 @app.command("expand-synonyms")
 def expand_synonyms(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),

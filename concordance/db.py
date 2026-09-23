@@ -2464,9 +2464,10 @@ def fetch_gazetteer_names(conn, schema: str = DEFAULT_SCHEMA) -> frozenset[str]:
 
 def compute_archaic(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> dict:
     """Set the archaic-currency ordinal on word_difficulty for every word. Uses the
-    definition register-label + (if present) vocab.wiktionary is_archaic/is_obsolete.
+    definition register-label + (if present) vocab.wiktionary is_archaic/is_obsolete
+    (no Google Books signal -- see archaic.py's docstring for why).
     Always recomputes every word in scope (no only_missing gate) -- definition
-    text and ngram data can both change after the first run, and there's no
+    text can change after the first run, and there's no
     signal to gate a re-check on other than just running it again."""
     from collections import Counter
     from . import archaic as _archaic
@@ -2479,13 +2480,12 @@ def compute_archaic(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> dict:
     cols = "coalesce(k.arc,false), coalesce(k.obs,false)" if have_wik else "false, false"
     dist: Counter = Counter()
     with conn.cursor() as cur:
-        cur.execute(f"""SELECT w.id, w.definition, {cols}, g.peak, g.recency_ratio
+        cur.execute(f"""SELECT w.id, w.definition, {cols}
                         FROM {s}.word w {join}
-                        LEFT JOIN {s}.word_ngram g ON g.word_id = w.id
                         ORDER BY w.id""" + (f" LIMIT {int(limit)}" if limit else ""))
         rows = cur.fetchall()
-        for wid, defn, arc, obs, peak, ratio in rows:
-            flag, evid, conf = _archaic.classify(defn, arc, obs, peak, ratio)
+        for wid, defn, arc, obs in rows:
+            flag, evid, conf = _archaic.classify(defn, arc, obs)
             dist[flag] += 1
             cur.execute(
                 f"""INSERT INTO {s}.word_difficulty (word_id, archaic, archaic_evidence, archaic_confidence, updated_at)
@@ -2631,49 +2631,75 @@ def clean_dialect_spellings(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool =
     purely a dialect/eye-dialect respelling cross-reference (bettah ->
     "Pronunciation spelling of better.") -- see
     validity_score.dialect_respelling_target, which detects by definition,
-    never by word shape. Per word:
-      - dialect_common_variant  cast out: respells a word common enough to
-                                sit above the frequency floor (design rule 3);
-      - dialect_duplicate       cast out: respells a rarer word that is
-                                itself an active, non-respelling entry
-                                (yander -> yonder); book links move to it;
-      - dialect_review          flagged only: respells a rare word not in
-                                the list (onery -> ornery, swarry -> soiree)
-                                -- keep-bias, a human decides.
-    Same soft/reversible, idempotent (dialect_* flags skipped), dry-run-
-    unless-`apply` contract as clean_script_variants."""
+    never by word shape. Kinds dialect_common_variant / dialect_duplicate
+    (cast out) and dialect_review (flag only) -- see _sweep_respellings."""
+    from .validity_score import dialect_respelling_target
+    return _sweep_respellings(
+        conn, schema, "dialect", apply=apply,
+        prefilter="definition ~* '(spelling|form) of'",
+        detect=lambda lemma, definition, min_zipf: dialect_respelling_target(definition))
+
+
+def clean_archaic_spellings(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool = False) -> dict:
+    """`concordance clean-archaic-spellings`: archaic inflections of a verb
+    (thinketh, findest -- validity_score.archaic_inflection_target, by
+    definition + ending) and early-printing u-for-v spellings (reuelation,
+    nerue -- early_modern_uv_target) aren't distinct vocabulary; the modern
+    word is (design rule 3). Kinds archaic_common_variant /
+    archaic_duplicate (cast out) and archaic_review (flag only)."""
+    from .validity_score import archaic_inflection_target, early_modern_uv_target
+    return _sweep_respellings(
+        conn, schema, "archaic", apply=apply,
+        prefilter="(lemma_lc ~ '(eth|est|th|st)$' OR lemma_lc ~ '[aeioulr]u[aeiou]')",
+        detect=lambda lemma, definition, min_zipf: (
+            archaic_inflection_target(lemma, definition) or early_modern_uv_target(lemma, min_zipf)))
+
+
+def _sweep_respellings(conn, schema: str, prefix: str, *, apply: bool, prefilter: str, detect) -> dict:
+    """Shared core of the clean-*-spellings sweeps. `detect(lemma, definition,
+    min_zipf)` returns the standard word an active word merely respells, or
+    None. Per respelling:
+      - <prefix>_common_variant  cast out: the standard word is common enough
+                                 to sit above the frequency floor (rule 3);
+      - <prefix>_duplicate       cast out: the standard word is itself an
+                                 active, non-respelling entry (yander ->
+                                 yonder); book links move to it;
+      - <prefix>_review          flagged only: a rare standard word not in the
+                                 list -- keep-bias, a human decides.
+    Soft/reversible, recorded in variant_flag_*; idempotent (<prefix>_* flags
+    skipped); dry run unless `apply`."""
     from wordfreq import zipf_frequency
     from .config import Config
-    from .validity_score import dialect_respelling_target
     s = _safe_schema(schema)
     min_zipf = Config().min_zipf
     with conn.cursor() as cur:
         cur.execute(f"""SELECT id, lemma, definition FROM {s}.word
-                        WHERE active AND definition ~* '(spelling|form) of'
-                          AND coalesce(variant_flag_reason, '') NOT LIKE 'dialect%%'
-                        ORDER BY id""")
-        found = [(wid, lemma, t) for wid, lemma, d in cur.fetchall()
-                 if (t := dialect_respelling_target(d))]
+                        WHERE active AND {prefilter}
+                          AND coalesce(variant_flag_reason, '') NOT LIKE %s
+                        ORDER BY id""", (f"{prefix}%",))
+        found = [(wid, lemma, tg) for wid, lemma, d in cur.fetchall()
+                 if (tg := detect(lemma.lower(), d, min_zipf))]
         respellings = {lemma.lower() for _, lemma, _ in found}
+        label = "dialect" if prefix == "dialect" else prefix
         actions: list[tuple] = []
         for wid, lemma, target in found:
             z = zipf_frequency(target, "en")
             if z >= min_zipf:
-                actions.append(("dialect_common_variant", wid, lemma,
-                                f"dialect spelling of common '{target}' (zipf {z:.1f})", None))
+                actions.append((f"{prefix}_common_variant", wid, lemma,
+                                f"{label} spelling of common '{target}' (zipf {z:.1f})", None))
                 continue
             twin = None
             if target not in respellings:     # never "keep" a word that's itself a respelling
                 cur.execute(f"SELECT id FROM {s}.word WHERE active AND lemma_lc = %s", (target,))
                 twin = cur.fetchone()
             if twin:
-                actions.append(("dialect_duplicate", wid, lemma, f"dialect spelling of '{target}'", twin[0]))
+                actions.append((f"{prefix}_duplicate", wid, lemma, f"{label} spelling of '{target}'", twin[0]))
             else:
-                actions.append(("dialect_review", wid, lemma, f"dialect spelling of '{target}'", None))
+                actions.append((f"{prefix}_review", wid, lemma, f"{label} spelling of '{target}'", None))
 
         if apply:
             for kind, wid, _lemma, note, survivor in actions:
-                if kind == "dialect_review":
+                if kind.endswith("_review"):
                     cur.execute(f"""UPDATE {s}.word SET variant_flag_reason=%s, variant_flag_note=%s,
                                         variant_flagged_at=now()
                                     WHERE id=%s""", (kind, note, wid))

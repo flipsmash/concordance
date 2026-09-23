@@ -255,3 +255,23 @@ def test_dialect_respelling_target():
     assert t("UK standard spelling of colorization.") is None                 # regional standard, not dialect
     assert t("A protein that inhibits caspase activity") is None              # survivin
     assert t(None) is None
+
+
+def test_archaic_inflection_target():
+    from concordance.validity_score import archaic_inflection_target as a
+    assert a("thinketh", "third-person singular simple present indicative of think") == "think"
+    assert a("risest", "second-person singular simple present indicative of rise") == "rise"
+    assert a("brakest", "second-person singular simple past indicative of break") == "break"
+    # shape without the inflection gloss is not enough -- real words / superlatives
+    assert a("hest", "Command, injunction.") is None
+    assert a("stickiest", "Able or likely to stick.") is None
+    # gloss without the archaic ending is not this rule's business
+    assert a("thinks", "third-person singular simple present indicative of think") is None
+
+
+def test_early_modern_uv_target():
+    from concordance.validity_score import early_modern_uv_target as u
+    assert u("reuelation", 3.5) == "revelation"
+    assert u("nerue", 3.5) == "nerve"
+    for real in ("moue", "bovver", "survivin"):       # wordfreq knows these
+        assert u(real, 3.5) is None, real

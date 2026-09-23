@@ -30,27 +30,17 @@ def test_word_boundary_avoids_false_positives():
     assert archaic.classify("An undated manuscript.")[0] == "current"
 
 
-# --- recency-decline (option 1: recency -> archaic) -----------------------
+# --- no print-trend signal ---------------------------------------------
 
-def test_recency_decline_flags_faded_common_word():
-    flag, ev, conf = archaic.classify("Truly.", ngram_peak=1.6e-5, recency_ratio=0.01)
-    assert flag == "archaic" and "faded" in ev
-
-
-def test_low_peak_decline_does_not_flag():
-    # cangue: decline but tiny peak -> stays current
-    assert archaic.classify("A wooden collar.", ngram_peak=6e-7, recency_ratio=0.01)[0] == "current"
-
-
-def test_high_recency_stays_current():
-    assert archaic.classify("To speak softly.", ngram_peak=1.3e-5, recency_ratio=0.65)[0] == "current"
+def test_print_decline_alone_no_longer_flags():
+    # the removed Ngram recency test was measured uninformative (see archaic.py);
+    # classify() no longer even accepts print data
+    import inspect
+    assert "recency_ratio" not in inspect.signature(archaic.classify).parameters
+    assert archaic.classify("Truly.")[0] == "current"
 
 
 # --- confidence -----------------------------------------------------------
-
-def test_recency_only_is_low_confidence():
-    _, _, conf = archaic.classify("A servant.", ngram_peak=1e-5, recency_ratio=0.01)
-    assert conf == 0.5                                 # the review queue
 
 
 def test_explicit_label_is_high_confidence():
@@ -59,6 +49,6 @@ def test_explicit_label_is_high_confidence():
 
 
 def test_corroborating_signals_boost_confidence():
-    # def-label archaic AND recency both at tier 2 -> nudge above the label's 0.9
-    _, _, conf = archaic.classify("Archaic form of foo.", ngram_peak=1e-5, recency_ratio=0.01)
+    # def-label archaic AND wiktionary archaic both at tier 2 -> nudge above the label's 0.9
+    _, _, conf = archaic.classify("Archaic form of foo.", wik_archaic=True)
     assert conf > 0.9

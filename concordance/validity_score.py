@@ -310,6 +310,43 @@ def dialect_respelling_target(definition: str | None) -> str | None:
     return target or None
 
 
+# "(archaic) third-person singular simple present indicative of think" --
+# Wiktionary's gloss for an archaic verb inflection (thinketh, findest).
+_ARCHAIC_INFLECTION_DEF_RE = re.compile(
+    r"^\s*(?:\([^)]*\)\s*)*(?:archaic\s+)?(?:second|third)-person singular\b[^;.]*?\bof\s+([a-z][a-z'-]*)",
+    re.IGNORECASE)
+
+
+def archaic_inflection_target(word: str, definition: str | None) -> str | None:
+    """The base verb of an archaic -eth/-est inflection (thinketh -> "think",
+    risest -> "rise"), by definition AND shape together: the definition must
+    be Wiktionary's person/number inflection gloss and the word must carry the
+    archaic ending. Shape alone is useless (hest, gest, queth, prest, teth are
+    real words; worldliest/stickiest are ordinary superlatives)."""
+    if not re.search(r"(?:eth|est|th|st)$", word.strip().lower()):
+        return None
+    m = _ARCHAIC_INFLECTION_DEF_RE.match(definition or "")
+    return m.group(1).lower() if m else None
+
+
+def early_modern_uv_target(word: str, min_zipf: float) -> str | None:
+    """The modern word an early-printing u-for-v spelling stands for
+    (reuelation -> "revelation", nerue -> "nerve"), or None. Only fires when
+    wordfreq doesn't know `word` at all AND swapping one medial u (after a
+    vowel/l/r, before a vowel) for v gives a word above the frequency floor --
+    moue (a pout) and bovver are real words wordfreq lists, so they never
+    qualify."""
+    w = word.strip().lower()
+    if zipf_frequency(w, "en") > 0:
+        return None
+    for i in range(1, len(w) - 1):
+        if w[i] == "u" and w[i - 1] in "aeioulr" and w[i + 1] in "aeiou":
+            cand = w[:i] + "v" + w[i + 1:]
+            if zipf_frequency(cand, "en") >= min_zipf:
+                return cand
+    return None
+
+
 def _morph_root(word: str) -> str | None:
     """The most common known root reachable by peeling a SINGLE prefix or a
     SINGLE suffix off `word` — e.g. unbuttoned -> buttoned, bemused -> mused.

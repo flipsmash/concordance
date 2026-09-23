@@ -258,14 +258,19 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
                 # variant_reject_reason computation and pick up a confusing
                 # "flagged for human review" mark on a word already dropped.
                 continue
-            target = validity_score.dialect_respelling_target(cand.definition)
+            target = kind = None
+            if t := validity_score.dialect_respelling_target(cand.definition):
+                target, kind = t, "dialect/eye-dialect spelling"
+            elif t := (validity_score.archaic_inflection_target(cand.lemma, cand.definition)
+                       or validity_score.early_modern_uv_target(cand.lemma, cfg.min_zipf)):
+                target, kind = t, "archaic inflection/spelling"
             if target and zipf_frequency(target, "en") >= cfg.min_zipf:
-                # Design rule 3: a respelling of a common word (bettah,
-                # guvermint) isn't vocabulary. A respelling of a RARE word
-                # is left to clean-dialect-spellings' review flag instead.
+                # Design rule 3: a respelling/archaic form of a common word
+                # (bettah, thinketh, reuelation) isn't vocabulary. One of a
+                # RARE word is left to the clean-*-spellings review flag.
                 cand.verdict = Verdict.DROP
                 cand.reject_reason = RejectReason.MISSPELLING
-                cand.interesting_reason = f"dialect/eye-dialect spelling of common '{target}'"
+                cand.interesting_reason = f"{kind} of common '{target}'"
                 cast_out += 1
                 continue
             reason = junk_pos_reason(cand.part_of_speech)
@@ -282,7 +287,7 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
                 flagged += 1
         if cast_out:
             console.print(f"[dim]{cast_out} more cast out post-enrichment "
-                           "(symbol/proper-noun-only dictionary sense, or dialect respelling).[/dim]")
+                           "(symbol/proper-noun-only dictionary sense, or dialect/archaic respelling).[/dim]")
         if flagged:
             console.print(f"[dim]{flagged} flagged for human review "
                            "(possible foreign word / archaic spelling variant).[/dim]")
