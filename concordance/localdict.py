@@ -16,6 +16,7 @@ import unicodedata
 from typing import Callable
 
 from .model import Candidate, normalize_pos
+from .quizdef import _VARIANT_RE
 
 _COARSE_POS = {"NOUN": "noun", "VERB": "verb", "ADJ": "adjective", "ADV": "adverb"}
 
@@ -111,24 +112,39 @@ def _resolve_real_gloss(
     return None
 
 
-def resolve_stub_definition(headword: str, definition: str, lookup: Callable[[str], Entry | None]) -> str | None:
-    """If `definition` is a bare "abbreviation of X[.]" stub, resolve X's
-    real definition (via `lookup(term) -> Entry | None`, injected so this
-    works against either a pre-built in-ingest lexicon or a live DB) and
-    render an honest, content-bearing replacement. Returns None if `definition`
-    isn't a stub, or if no real content for X could be found."""
+def stub_target_phrase(definition: str) -> str | None:
+    """The raw target phrase out of an "abbreviation of X[.]" stub (e.g.
+    "chimney pot" out of "abbreviation of chimney pot."), or None if
+    `definition` isn't a stub. Public so a caller resolving X through a
+    source other than the local lexicon (e.g. the online dictionary
+    cascade in resolve.py) can look up the same phrase this module would."""
     m = _STUB_RE.match((definition or "").strip())
     if not m:
         return None
     target_raw = re.sub(r"\s*\([^)]*\)\s*$", "", m.group(1).strip())
-    if not target_raw:
+    target_raw = re.sub(r"#\S+$", "", target_raw).strip()  # strip a MediaWiki #Section anchor
+    target_raw = target_raw.strip(" :;,")
+    return target_raw or None
+
+
+def compose_stub_replacement(headword: str, target_raw: str, gloss: str) -> str | None:
+    """Render an honest replacement definition given a stub's headword,
+    its already-resolved target phrase, and the target's real gloss
+    (from wherever it was found -- the local lexicon or an online source).
+    Returns None if `gloss` is empty or itself a stub (don't chain through
+    a still-bogus answer)."""
+    gloss = re.sub(r"\s+", " ", (gloss or "")).strip()  # some sources (online Wiktionary) embed blank lines
+    if not gloss or _MARKUP_RESIDUE_RE.search(gloss) or _is_stub(gloss):
         return None
-    resolved = _resolve_real_gloss(headword, definition, lookup)
-    if resolved is None:
+    # An online source can hand back its own thin cross-reference instead of
+    # real content (e.g. "Bath chair" -> "Alternative form of Bath chair",
+    # literally itself) -- reject rather than compose a definition that's
+    # exactly the "just points at another word" problem this function exists
+    # to fix. _VARIANT_RE is quizdef's own test for "this isn't real
+    # vocabulary content", reused here for the same judgment.
+    if _VARIANT_RE.search(gloss):
         return None
-    _, gloss = resolved
-    if not gloss:
-        return None
+    gloss = gloss.split(";")[0].strip()
     # A length gap of 1-2 characters (chiel/chield, gramary/gramarye,
     # ratlin/ratline) is a trailing-letter spelling variant, not a real
     # clipping -- verified against the live backlog: every case with a gap
@@ -142,6 +158,22 @@ def resolve_stub_definition(headword: str, definition: str, lookup: Callable[[st
     )
     relation = "Abbreviation" if is_abbrev else "Variant spelling"
     return f"{relation} of {target_raw} — {gloss.rstrip('.')}."
+
+
+def resolve_stub_definition(headword: str, definition: str, lookup: Callable[[str], Entry | None]) -> str | None:
+    """If `definition` is a bare "abbreviation of X[.]" stub, resolve X's
+    real definition (via `lookup(term) -> Entry | None`, injected so this
+    works against either a pre-built in-ingest lexicon or a live DB) and
+    render an honest, content-bearing replacement. Returns None if `definition`
+    isn't a stub, or if no real content for X could be found."""
+    target_raw = stub_target_phrase(definition)
+    if not target_raw:
+        return None
+    resolved = _resolve_real_gloss(headword, definition, lookup)
+    if resolved is None:
+        return None
+    _, gloss = resolved
+    return compose_stub_replacement(headword, target_raw, gloss)
 
 
 def build_lexicon(conn, lemmas: set[str], schema: str = "vocab") -> dict[str, list[Entry]]:
