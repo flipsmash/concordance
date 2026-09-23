@@ -284,6 +284,32 @@ def script_reject_reason(word: str, min_zipf: float) -> tuple[str, str] | None:
     return None
 
 
+# A definition that is ONLY a dialect/eye-dialect respelling cross-reference
+# ("Pronunciation spelling of better.", "A dialectal form of folk."),
+# optionally behind leading "(label)" qualifiers. "form of" only counts after
+# dialect(al)/nonstandard -- "An informal form of address" (guvnor) is a real
+# word's gloss, not a respelling. A definition that opens with a real sense
+# and mentions a respelling later (nucular) deliberately doesn't match.
+_DIALECT_DEF_RE = re.compile(
+    r"^\s*(?:\([^)]*\)\s*)*(?:(?:an?|the)\s+)?(?:(?:obsolete|archaic|rare)\s+(?:or|and)\s+)?"
+    r"(?:(?:eye[- ]dialect|pronunciation|non-?standard|informal|colloquial)\s+spelling"
+    r"|(?:dialect(?:al)?|non-?standard)\s+(?:spelling|form))"
+    r"\s+of\s+([^,.;:(\[]+)", re.IGNORECASE)
+
+
+def dialect_respelling_target(definition: str | None) -> str | None:
+    """The standard word a dialect/eye-dialect respelling points at (bettah ->
+    "better", bimeby -> "by and by"), or None if `definition` isn't purely
+    such a cross-reference. Detection is by the definition, never by the
+    word's shape: a dropped-g pattern (-in for -ing) matched only real words
+    live (survivin/securin are proteins, likin/gamin/matin real nouns)."""
+    m = _DIALECT_DEF_RE.match(definition or "")
+    if not m:
+        return None
+    target = m.group(1).strip().strip("'\"").lower()
+    return target or None
+
+
 def _morph_root(word: str) -> str | None:
     """The most common known root reachable by peeling a SINGLE prefix or a
     SINGLE suffix off `word` — e.g. unbuttoned -> buttoned, bemused -> mused.

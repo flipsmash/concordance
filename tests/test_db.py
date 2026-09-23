@@ -2772,3 +2772,44 @@ def test_clean_script_variants():
         assert cur.fetchone()[0] is True
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
+
+
+@pg
+def test_clean_dialect_spellings():
+    from concordance.model import Candidate
+    schema = "cc_test_dialect_spellings"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    def cand(lemma, definition):
+        c = Candidate(lemma=lemma, pos="NOUN"); c.definition = definition; return c
+
+    db.sync_book_results(conn, "Book A", kept=[cand("yonder", "The vast distance.")], rejected=[], schema=schema)
+    db.sync_book_results(conn, "Book B", kept=[
+        cand("bettah", "Pronunciation spelling of better."),
+        cand("yander", "Pronunciation spelling of yonder."),
+        cand("onery", "Pronunciation spelling of ornery."),
+        cand("guvnor", "An informal form of address; see guv."),
+    ], rejected=[], schema=schema)
+
+    assert db.clean_dialect_spellings(conn, schema)["counts"] == {
+        "dialect_common_variant": 1, "dialect_duplicate": 1, "dialect_review": 1}
+    db.clean_dialect_spellings(conn, schema, apply=True)
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT lemma, active, variant_flag_reason FROM {schema}.word")
+        got = {l: (a, f) for l, a, f in cur.fetchall()}
+        assert got["bettah"] == (False, "dialect_common_variant")
+        assert got["yander"] == (False, "dialect_duplicate")
+        assert got["onery"] == (True, "dialect_review")
+        assert got["guvnor"] == (True, None)
+        assert got["yonder"] == (True, None)
+        cur.execute(f"""SELECT count(*) FROM {schema}.word_book wb JOIN {schema}.word w ON w.id=wb.word_id
+                        WHERE w.lemma='yonder'""")
+        assert cur.fetchone()[0] == 2                      # yander's book link moved over
+    assert db.clean_dialect_spellings(conn, schema, apply=True)["counts"] == {}   # idempotent
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()

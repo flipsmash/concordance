@@ -240,3 +240,18 @@ def test_validity_gate_drops_script_junk_before_local_dict():
         c = Candidate(lemma=word, pos="NOUN")
         gate.judge(c)
         assert c.verdict is Verdict.DROP and c.reject_reason is reason
+
+
+def test_dialect_respelling_target():
+    from concordance.validity_score import dialect_respelling_target as t
+    assert t("Pronunciation spelling of better.") == "better"
+    assert t("Eye dialect spelling of talk, representing New York City English.") == "talk"
+    assert t("An obsolete or dialectal form of bayonet.") == "bayonet"
+    assert t("(now Appalachia) Pronunciation spelling of coil. [To wind...]") == "coil"
+    assert t("Pronunciation spelling of by and by.") == "by and by"
+    # real glosses that merely mention a form/spelling are not respellings
+    assert t("An informal form of address; see guv.") is None                 # guvnor
+    assert t("(botany) Nut-shaped; (humorous) Pronunciation spelling of nuclear.") is None
+    assert t("UK standard spelling of colorization.") is None                 # regional standard, not dialect
+    assert t("A protein that inhibits caspase activity") is None              # survivin
+    assert t(None) is None

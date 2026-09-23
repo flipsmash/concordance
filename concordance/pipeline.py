@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rich.console import Console
+from wordfreq import zipf_frequency
 
 from . import clean, db, extract, floor, judge, localdict, master, mw, output, propernouns, resolve, tokenize, validity, validity_score
 from .dictionary import make_session
@@ -257,6 +258,16 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
                 # variant_reject_reason computation and pick up a confusing
                 # "flagged for human review" mark on a word already dropped.
                 continue
+            target = validity_score.dialect_respelling_target(cand.definition)
+            if target and zipf_frequency(target, "en") >= cfg.min_zipf:
+                # Design rule 3: a respelling of a common word (bettah,
+                # guvermint) isn't vocabulary. A respelling of a RARE word
+                # is left to clean-dialect-spellings' review flag instead.
+                cand.verdict = Verdict.DROP
+                cand.reject_reason = RejectReason.MISSPELLING
+                cand.interesting_reason = f"dialect/eye-dialect spelling of common '{target}'"
+                cast_out += 1
+                continue
             reason = junk_pos_reason(cand.part_of_speech)
             if reason:
                 cand.verdict = Verdict.DROP
@@ -271,7 +282,7 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
                 flagged += 1
         if cast_out:
             console.print(f"[dim]{cast_out} more cast out post-enrichment "
-                           "(symbol/proper-noun-only dictionary sense).[/dim]")
+                           "(symbol/proper-noun-only dictionary sense, or dialect respelling).[/dim]")
         if flagged:
             console.print(f"[dim]{flagged} flagged for human review "
                            "(possible foreign word / archaic spelling variant).[/dim]")

@@ -2606,17 +2606,83 @@ def clean_script_variants(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool = F
                                         variant_flagged_at=now()
                                     WHERE id=%s AND variant_flag_reason IS NULL""", (kind, note, wid))
                     continue
-                if survivor is not None:
-                    cur.execute(f"""INSERT INTO {s}.word_book (word_id, book_id)
-                                    SELECT %s, book_id FROM {s}.word_book WHERE word_id=%s
-                                    ON CONFLICT DO NOTHING""", (survivor, wid))
-                cur.execute(f"""UPDATE {s}.word SET active=false, variant_flag_reason=%s,
-                                    variant_flag_note=%s, variant_flagged_at=now(), updated_at=now()
-                                WHERE id=%s""", (kind, note, wid))
+                _cast_out_variant(cur, s, wid, kind, note, survivor)
             conn.commit()
 
     from collections import Counter
     return {"scanned": len(rows), "counts": dict(Counter(a[0] for a in actions)), "actions": actions}
+
+
+def _cast_out_variant(cur, s: str, wid: int, kind: str, note: str, survivor: int | None) -> None:
+    """Soft-delete a spelling variant, recording why in variant_flag_*; when
+    it duplicates a surviving word, copy its book links onto the survivor
+    first so book pages/stats don't lose the word."""
+    if survivor is not None:
+        cur.execute(f"""INSERT INTO {s}.word_book (word_id, book_id)
+                        SELECT %s, book_id FROM {s}.word_book WHERE word_id=%s
+                        ON CONFLICT DO NOTHING""", (survivor, wid))
+    cur.execute(f"""UPDATE {s}.word SET active=false, variant_flag_reason=%s,
+                        variant_flag_note=%s, variant_flagged_at=now(), updated_at=now()
+                    WHERE id=%s""", (kind, note, wid))
+
+
+def clean_dialect_spellings(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool = False) -> dict:
+    """`concordance clean-dialect-spellings`: active words whose definition is
+    purely a dialect/eye-dialect respelling cross-reference (bettah ->
+    "Pronunciation spelling of better.") -- see
+    validity_score.dialect_respelling_target, which detects by definition,
+    never by word shape. Per word:
+      - dialect_common_variant  cast out: respells a word common enough to
+                                sit above the frequency floor (design rule 3);
+      - dialect_duplicate       cast out: respells a rarer word that is
+                                itself an active, non-respelling entry
+                                (yander -> yonder); book links move to it;
+      - dialect_review          flagged only: respells a rare word not in
+                                the list (onery -> ornery, swarry -> soiree)
+                                -- keep-bias, a human decides.
+    Same soft/reversible, idempotent (dialect_* flags skipped), dry-run-
+    unless-`apply` contract as clean_script_variants."""
+    from wordfreq import zipf_frequency
+    from .config import Config
+    from .validity_score import dialect_respelling_target
+    s = _safe_schema(schema)
+    min_zipf = Config().min_zipf
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT id, lemma, definition FROM {s}.word
+                        WHERE active AND definition ~* '(spelling|form) of'
+                          AND coalesce(variant_flag_reason, '') NOT LIKE 'dialect%%'
+                        ORDER BY id""")
+        found = [(wid, lemma, t) for wid, lemma, d in cur.fetchall()
+                 if (t := dialect_respelling_target(d))]
+        respellings = {lemma.lower() for _, lemma, _ in found}
+        actions: list[tuple] = []
+        for wid, lemma, target in found:
+            z = zipf_frequency(target, "en")
+            if z >= min_zipf:
+                actions.append(("dialect_common_variant", wid, lemma,
+                                f"dialect spelling of common '{target}' (zipf {z:.1f})", None))
+                continue
+            twin = None
+            if target not in respellings:     # never "keep" a word that's itself a respelling
+                cur.execute(f"SELECT id FROM {s}.word WHERE active AND lemma_lc = %s", (target,))
+                twin = cur.fetchone()
+            if twin:
+                actions.append(("dialect_duplicate", wid, lemma, f"dialect spelling of '{target}'", twin[0]))
+            else:
+                actions.append(("dialect_review", wid, lemma, f"dialect spelling of '{target}'", None))
+
+        if apply:
+            for kind, wid, _lemma, note, survivor in actions:
+                if kind == "dialect_review":
+                    cur.execute(f"""UPDATE {s}.word SET variant_flag_reason=%s, variant_flag_note=%s,
+                                        variant_flagged_at=now()
+                                    WHERE id=%s""", (kind, note, wid))
+                else:
+                    _cast_out_variant(cur, s, wid, kind, note, survivor)
+            conn.commit()
+
+    from collections import Counter
+    return {"scanned": len(found), "counts": dict(Counter(a[0] for a in actions)), "actions": actions}
 
 
 def compute_difficulty(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> dict:
