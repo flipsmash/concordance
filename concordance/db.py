@@ -1320,7 +1320,8 @@ _POS_TO_TAGGER = {"noun": "NOUN", "verb": "VERB", "adjective": "ADJ", "adverb": 
 
 def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
                      use_web: bool = False, model_path: str | None = None,
-                     recheck_after_days: int = 14, oed_schema: str = "oed") -> dict:
+                     recheck_after_days: int = 14, oed_schema: str = "oed",
+                     validity_labels: set[str] | None = None) -> dict:
     """The single definition-acquisition pass for words whose definition is
     still blank: one candidate SELECT, one lexicon build, one per-row trip
     through resolve.resolve_definition at whatever depth `use_web` allows
@@ -1370,7 +1371,21 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
     is skipped entirely rather than re-run through the full cascade (Wordnik
     pacing included) again -- without this, every `maintain` run would
     re-grind the entire permanently-undefined tail through Wordnik/web-search
-    forever, not just the first time it's ever seen."""
+    forever, not just the first time it's ever seen.
+
+    `validity_labels`: restrict to words already scored (by an earlier pass
+    through this same function) with one of these validity_score.estimate()
+    labels -- e.g. {'likely-valid', 'uncertain'} to skip the 'likely-artifact'
+    tail (probably OCR noise) on an expensive WEB/LLM-backed run. A word
+    never scored yet (validity_label IS NULL) is excluded when this filter
+    is given, matching the intent of "only the words already triaged as
+    worth the deeper search" -- run once without the filter first if the
+    backlog hasn't been scored yet at all.
+
+    Only considers currently-active words: an inactive word with a blank
+    definition (already cast out/pruned some other way) isn't shown to
+    anyone, so re-running the full network+LLM cascade against it is pure
+    waste -- confirmed 521 such rows live in the table at once."""
     from . import deepdef, localdict, resolve, validity_score
     from .config import Config
     from .dictionary import make_session
@@ -1381,11 +1396,13 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
         cur.execute(
             f"""SELECT id, lemma, part_of_speech, sentence, chapter, as_seen
                 FROM {s}.word
-                WHERE coalesce(definition,'') = ''
+                WHERE active AND coalesce(definition,'') = ''
                   AND (validity_checked_at IS NULL
                        OR validity_checked_at < now() - (%s * interval '1 day'))
+                  {"AND validity_label = ANY(%s)" if validity_labels else ""}
                 ORDER BY flagged_undefined_at NULLS LAST, lemma""" +
-            (f" LIMIT {int(limit)}" if limit else ""), (recheck_after_days,))
+            (f" LIMIT {int(limit)}" if limit else ""),
+            (recheck_after_days, list(validity_labels)) if validity_labels else (recheck_after_days,))
         rows = cur.fetchall()
 
     stats = {"attempted": len(rows), "defined": 0, "still_undefined": 0, "cast_out": 0}
