@@ -347,7 +347,7 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
         )}
         {factors && (
           <div className="difficulty-factors-grid">
-            <span>zipf</span>
+            <span>zipf{factors.zipf_source && factors.zipf_source !== 'wordfreq' ? ` (${factors.zipf_source})` : ''}</span>
             <span>{factors.zipf.toFixed(2)}</span>
             <span>rarity</span>
             <span>{factors.rarity.toFixed(3)}</span>

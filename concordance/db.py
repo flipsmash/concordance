@@ -2527,11 +2527,12 @@ def compute_difficulty(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> di
     import statistics
     from psycopg.types.json import Json
     from . import difficulty as _diff
-    from .validity_score import _morph_root, effective_zipf
+    from wordfreq import zipf_frequency
+    from .validity_score import _morph_root
     s = _safe_schema(schema)
     with conn.cursor() as cur:
         cur.execute(f"""
-            SELECT w.id, w.lemma, g.peak, d.archaic, d.archaic_confidence, coalesce(dom.fields,'')
+            SELECT w.id, w.lemma, g.peak, g.recent, d.archaic, d.archaic_confidence, coalesce(dom.fields,'')
             FROM {s}.word w
             LEFT JOIN {s}.word_ngram g ON g.word_id = w.id
             LEFT JOIN {s}.word_difficulty d ON d.word_id = w.id
@@ -2541,11 +2542,14 @@ def compute_difficulty(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> di
             ORDER BY w.id""" + (f" LIMIT {int(limit)}" if limit else ""))
         rows = cur.fetchall()
         scores = []
-        for wid, lemma, peak, archaic, aconf, fields in rows:
-            zipf = effective_zipf(lemma)
+        for wid, lemma, peak, recent, archaic, aconf, fields in rows:
+            key = lemma.strip().lower()
+            root = _morph_root(key)
             has_domain = any(f in _diff.DOMAIN_FIELDS for f in fields)
-            morph = _morph_root(lemma) is not None
-            sc, factors = _diff.score(zipf, peak, archaic or "current", aconf, has_domain, morph)
+            sc, factors = _diff.score(
+                zipf_frequency(key, "en"), recent, peak, archaic or "current", aconf,
+                has_domain, morph_transparent=root is not None,
+                root_zipf=zipf_frequency(root, "en") if root else None)
             scores.append(sc)
             cur.execute(
                 f"""INSERT INTO {s}.word_difficulty (word_id, difficulty, difficulty_factors, updated_at)
