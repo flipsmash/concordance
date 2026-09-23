@@ -329,6 +329,25 @@ def archaic_inflection_target(word: str, definition: str | None) -> str | None:
     return m.group(1).lower() if m else None
 
 
+# "Obsolete spelling of bread.", "An obsolete form of spill.", "Archaic
+# spelling of boulder." -- a word whose ENTIRE gloss is a pointer to its
+# modern spelling (design rule 3). Leading "(label)" qualifiers allowed; a
+# definition opening with a real sense (entiendo, remigate) doesn't match.
+_OBSOLETE_SPELLING_DEF_RE = re.compile(
+    r"^\s*(?:\([^)]*\)\s*)*(?:(?:an?|the)\s+)?(?:(?:obsolete|archaic|rare|dated)\s+(?:or|and)\s+)?"
+    r"(?:obsolete|archaic)(?:\s+(?:or|and)\s+[a-z]+)?\s+(?:spelling|form)\s+of\s+([^,.;:(\[\u2014]+)",
+    re.IGNORECASE)
+
+
+def obsolete_spelling_target(definition: str | None) -> str | None:
+    """The modern word an obsolete/archaic spelling points at (breade ->
+    "bread", bowpot -> "bough pot"), or None."""
+    m = _OBSOLETE_SPELLING_DEF_RE.match(definition or "")
+    if not m:
+        return None
+    return m.group(1).strip().strip("'\"").lower() or None
+
+
 def early_modern_uv_target(word: str, min_zipf: float) -> str | None:
     """The modern word an early-printing u-for-v spelling stands for
     (reuelation -> "revelation", nerue -> "nerve"), or None. Only fires when

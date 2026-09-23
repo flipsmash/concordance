@@ -275,3 +275,15 @@ def test_early_modern_uv_target():
     assert u("nerue", 3.5) == "nerve"
     for real in ("moue", "bovver", "survivin"):       # wordfreq knows these
         assert u(real, 3.5) is None, real
+
+
+def test_obsolete_spelling_target():
+    from concordance.validity_score import obsolete_spelling_target as o
+    assert o("Obsolete spelling of bread.") == "bread"
+    assert o("An obsolete form of spill.") == "spill"
+    assert o("Archaic spelling of boulder.") == "boulder"
+    assert o("Obsolete form of embassage (“message, embassy”).") == "embassage"
+    assert o("Obsolete form of good nature.") == "good nature"
+    # a real sense first, or a non-spelling gloss, is not a pointer
+    assert o("(obsolete) To attend to; to apply oneself to.; Obsolete form of intend.") is None
+    assert o("A grotesque creature of folklore.") is None

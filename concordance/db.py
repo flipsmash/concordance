@@ -2637,7 +2637,7 @@ def clean_dialect_spellings(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool =
     return _sweep_respellings(
         conn, schema, "dialect", apply=apply,
         prefilter="definition ~* '(spelling|form) of'",
-        detect=lambda lemma, definition, min_zipf: dialect_respelling_target(definition))
+        detect=lambda lemma, definition, min_zipf: (dialect_respelling_target(definition), "definition"))
 
 
 def clean_archaic_spellings(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool = False) -> dict:
@@ -2646,50 +2646,82 @@ def clean_archaic_spellings(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool =
     definition + ending) and early-printing u-for-v spellings (reuelation,
     nerue -- early_modern_uv_target) aren't distinct vocabulary; the modern
     word is (design rule 3). Kinds archaic_common_variant /
-    archaic_duplicate (cast out) and archaic_review (flag only)."""
-    from .validity_score import archaic_inflection_target, early_modern_uv_target
+    archaic_duplicate (cast out) and archaic_review (flag only). Also any
+    word whose whole definition is "Obsolete/Archaic spelling|form of X"
+    (validity_score.obsolete_spelling_target)."""
+    from .validity_score import (archaic_inflection_target, early_modern_uv_target,
+                                 obsolete_spelling_target)
     return _sweep_respellings(
         conn, schema, "archaic", apply=apply,
-        prefilter="(lemma_lc ~ '(eth|est|th|st)$' OR lemma_lc ~ '[aeioulr]u[aeiou]')",
+        prefilter=("(lemma_lc ~ '(eth|est|th|st)$' OR lemma_lc ~ '[aeioulr]u[aeiou]'"
+                   " OR definition ~* '(obsolete|archaic)[a-z ]* (spelling|form) of')"),
         detect=lambda lemma, definition, min_zipf: (
-            archaic_inflection_target(lemma, definition) or early_modern_uv_target(lemma, min_zipf)))
+            (t, "definition") if (t := archaic_inflection_target(lemma, definition)
+                                  or obsolete_spelling_target(definition))
+            else (early_modern_uv_target(lemma, min_zipf), "spelling")))
+
+
+# Definition sources that fuzzy-match and can return a different word's
+# gloss; their "X spelling of Y" claims are review-only (see _sweep_respellings).
+_UNTRUSTED_DEF_SOURCES = frozenset({"datamuse", "Web (LLM-extracted)", "corpus"})
+
+# Real respelling pairs score >= ~0.73 (palkee/palki, polliwig/pollywog);
+# a bogus gloss's target scores far lower (shakester/shiksa 0.40).
+_TWIN_MIN_SIMILARITY = 0.6
 
 
 def _sweep_respellings(conn, schema: str, prefix: str, *, apply: bool, prefilter: str, detect) -> dict:
     """Shared core of the clean-*-spellings sweeps. `detect(lemma, definition,
-    min_zipf)` returns the standard word an active word merely respells, or
-    None. Per respelling:
+    min_zipf)` returns (standard word an active word merely respells | None,
+    evidence) where evidence is "definition" or "spelling". Definition
+    evidence from a fuzzy-lookup source (_UNTRUSTED_DEF_SOURCES) is never
+    enough to cast out -- datamuse hands back a NEARBY word's gloss
+    (spurcidical -> "Obsolete form of suicidal", phytosophy -> "...of
+    philosophy") -- so those always go to <prefix>_review. Per respelling:
       - <prefix>_common_variant  cast out: the standard word is common enough
                                  to sit above the frequency floor (rule 3);
       - <prefix>_duplicate       cast out: the standard word is itself an
                                  active, non-respelling entry (yander ->
-                                 yonder); book links move to it;
+                                 yonder) spelled recognizably alike; book
+                                 links move to it. Dissimilar pairs go to
+                                 review instead: a bogus source gloss
+                                 (shakester -> "shiksa") must not move book
+                                 links onto an unrelated word;
       - <prefix>_review          flagged only: a rare standard word not in the
                                  list -- keep-bias, a human decides.
     Soft/reversible, recorded in variant_flag_*; idempotent (<prefix>_* flags
     skipped); dry run unless `apply`."""
+    from difflib import SequenceMatcher
     from wordfreq import zipf_frequency
     from .config import Config
     s = _safe_schema(schema)
     min_zipf = Config().min_zipf
     with conn.cursor() as cur:
-        cur.execute(f"""SELECT id, lemma, definition FROM {s}.word
+        cur.execute(f"""SELECT id, lemma, definition, coalesce(definition_source, '') FROM {s}.word
                         WHERE active AND {prefilter}
                           AND coalesce(variant_flag_reason, '') NOT LIKE %s
                         ORDER BY id""", (f"{prefix}%",))
-        found = [(wid, lemma, tg) for wid, lemma, d in cur.fetchall()
-                 if (tg := detect(lemma.lower(), d, min_zipf))]
-        respellings = {lemma.lower() for _, lemma, _ in found}
+        found = []
+        for wid, lemma, d, src in cur.fetchall():
+            tg, evidence = detect(lemma.lower(), d, min_zipf)
+            if tg:
+                found.append((wid, lemma, tg, evidence == "definition" and src in _UNTRUSTED_DEF_SOURCES, src))
+        respellings = {lemma.lower() for _, lemma, *_ in found}
         label = "dialect" if prefix == "dialect" else prefix
         actions: list[tuple] = []
-        for wid, lemma, target in found:
+        for wid, lemma, target, untrusted, src in found:
             z = zipf_frequency(target, "en")
+            if untrusted:
+                actions.append((f"{prefix}_review", wid, lemma,
+                                f"{label} spelling of '{target}'? (per {src} -- unverified)", None))
+                continue
             if z >= min_zipf:
                 actions.append((f"{prefix}_common_variant", wid, lemma,
                                 f"{label} spelling of common '{target}' (zipf {z:.1f})", None))
                 continue
             twin = None
-            if target not in respellings:     # never "keep" a word that's itself a respelling
+            if (target not in respellings     # never "keep" a word that's itself a respelling
+                    and SequenceMatcher(None, lemma.lower(), target).ratio() >= _TWIN_MIN_SIMILARITY):
                 cur.execute(f"SELECT id FROM {s}.word WHERE active AND lemma_lc = %s", (target,))
                 twin = cur.fetchone()
             if twin:

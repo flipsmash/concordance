@@ -2833,7 +2833,12 @@ def test_clean_archaic_spellings():
     db.sync_book_results(conn, "Book B", kept=[
         cand("thinketh", g + "think"), cand("vouchsafeth", g + "vouchsafe"),
         cand("smiteth", g + "smite"), cand("reuelation", ""), cand("hest", "Command, injunction."),
+        cand("breade", "Obsolete spelling of bread."),
     ], rejected=[], schema=schema)
+    # a fuzzy-lookup source's "spelling of" claim is review-only, never a cast-out
+    bogus = cand("spurcidical", "Obsolete form of suicidal.")
+    bogus.definition_source = "datamuse"
+    db.sync_book_results(conn, "Book C", kept=[bogus], rejected=[], schema=schema)
 
     db.clean_archaic_spellings(conn, schema, apply=True)
     with conn.cursor() as cur:
@@ -2845,6 +2850,8 @@ def test_clean_archaic_spellings():
     assert got["smiteth"] == (True, "archaic_review")
     assert got["hest"] == (True, None)
     assert got["vouchsafe"] == (True, None)
+    assert got["breade"] == (False, "archaic_common_variant")
+    assert got["spurcidical"] == (True, "archaic_review")
     with conn.cursor() as cur:
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
