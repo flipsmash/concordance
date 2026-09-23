@@ -237,6 +237,53 @@ def variant_reject_reason(word: str) -> tuple["RejectReason", str] | None:
     return None
 
 
+# Letterforms/ligatures that ASCII-fold to plain English spelling. þ/ȝ/ð are
+# NOT here: a word still using them is Middle English / Old Norse, rejected
+# outright by script_reject_reason rather than folded to a modern twin.
+_FOLD = {"æ": "ae", "œ": "oe", "ħ": "h", "ß": "ss", "ø": "o", "ł": "l",
+         "đ": "d", "ı": "i", "ʼ": "'", "’": "'"}
+_ARCHAIC_LETTERS = set("þȝð")
+
+
+def fold_spelling(word: str) -> str:
+    """Accent/ligature-folded ASCII spelling: fellòw -> fellow, hæmorrhage ->
+    haemorrhage, cortège -> cortege. Identity for plain-ASCII words."""
+    import unicodedata
+    w = "".join(_FOLD.get(ch, ch) for ch in word.strip().lower())
+    return "".join(ch for ch in unicodedata.normalize("NFKD", w) if not unicodedata.combining(ch))
+
+
+def script_reject_reason(word: str, min_zipf: float) -> tuple[str, str] | None:
+    """(kind, note) when a word's SPELLING alone proves it isn't English
+    vocabulary worth keeping (design rule 3), else None. Deliberately narrow
+    -- only signals with no real false-positive class:
+
+      script_foreign        a letter from a non-Latin script (Greek etc.)
+      script_archaic_letter þ/ȝ/ð: Middle English / Old Norse spelling
+      script_common_variant the accent/ligature-folded spelling is itself a
+                            word common enough to sit above the frequency
+                            floor (monèy, retúrn, crookèd) -- an archaic/OCR
+                            spelling of a common word
+
+    An accented word whose folded form is itself RARE (mélange, uræus,
+    crispèd) is not rejected here: that is a real rare word in a variant
+    spelling, and the keep-bias rule sends it to human review instead."""
+    import unicodedata
+    w = word.strip().lower()
+    if w.isascii():
+        return None
+    mapped = "".join(_FOLD.get(ch, ch) for ch in w)       # ʼ is a "letter" but not a script
+    if any(ch.isalpha() and "LATIN" not in unicodedata.name(ch, "") for ch in mapped):
+        return "script_foreign", "non-Latin script"
+    if _ARCHAIC_LETTERS & set(w):
+        return "script_archaic_letter", "Middle English / Old Norse letterform (þ/ȝ/ð)"
+    folded = fold_spelling(w)
+    z = zipf_frequency(folded, "en")
+    if folded != w and z >= min_zipf:
+        return "script_common_variant", f"accented/ligature spelling of common '{folded}' (zipf {z:.1f})"
+    return None
+
+
 def _morph_root(word: str) -> str | None:
     """The most common known root reachable by peeling a SINGLE prefix or a
     SINGLE suffix off `word` — e.g. unbuttoned -> buttoned, bemused -> mused.

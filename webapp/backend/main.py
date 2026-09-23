@@ -239,6 +239,10 @@ class WordRow(BaseModel):
     validity_score: float | None
     validity_label: str | None
     validity_notes: str | None
+    # Suspected variant-spelling/foreign/unverified marks (never auto-cleared)
+    # -- exposed so the review list can filter to them; see apply_schema.
+    variant_flag_reason: str | None = None
+    variant_flag_note: str | None = None
 
 
 class WordPage(BaseModel):
@@ -256,6 +260,7 @@ def list_words(
     dir: Literal["asc", "desc"] = "asc",
     pos: str | None = None,
     validity_label: Literal["likely-valid", "uncertain", "likely-artifact"] | None = None,
+    variant_flag: str | None = None,
     q: str | None = None,
     letter: str | None = Query(None, min_length=1, max_length=1),
     _: dict = Depends(require_admin),
@@ -271,6 +276,9 @@ def list_words(
     if validity_label:
         filters.append("w.validity_label = %s")
         params.append(validity_label)
+    if variant_flag:
+        filters.append("w.variant_flag_reason = %s")
+        params.append(variant_flag)
     if letter:
         filters.append("w.lemma_lc LIKE %s")
         params.append(f"{letter.lower()}%")
@@ -307,7 +315,8 @@ def list_words(
 
         cur.execute(
             f"""SELECT w.id, w.lemma, w.part_of_speech, w.definition, d.difficulty, w.rescued_from_reject,
-                       w.validity_score, w.validity_label, w.validity_notes
+                       w.validity_score, w.validity_label, w.validity_notes,
+                       w.variant_flag_reason, w.variant_flag_note
                 FROM {SCHEMA}.word w
                 LEFT JOIN {SCHEMA}.word_difficulty d ON d.word_id = w.id
                 WHERE w.active{where_extra}
@@ -319,7 +328,8 @@ def list_words(
 
     items = [
         WordRow(id=r[0], lemma=r[1], part_of_speech=r[2], definition=r[3], difficulty=r[4],
-                 rescued_from_reject=r[5], validity_score=r[6], validity_label=r[7], validity_notes=r[8])
+                 rescued_from_reject=r[5], validity_score=r[6], validity_label=r[7], validity_notes=r[8],
+                 variant_flag_reason=r[9], variant_flag_note=r[10])
         for r in rows
     ]
     return WordPage(items=items, total=total, page=page, page_size=page_size)
@@ -331,6 +341,17 @@ def pos_values(_: dict = Depends(require_admin)) -> list[str]:
         cur.execute(
             f"""SELECT DISTINCT w.part_of_speech FROM {SCHEMA}.word w
                 WHERE w.active AND coalesce(w.part_of_speech, '') <> ''
+                ORDER BY 1"""
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
+@app.get("/api/variant-flag-values", response_model=list[str])
+def variant_flag_values(_: dict = Depends(require_admin)) -> list[str]:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT DISTINCT w.variant_flag_reason FROM {SCHEMA}.word w
+                WHERE w.active AND w.variant_flag_reason IS NOT NULL
                 ORDER BY 1"""
         )
         return [r[0] for r in cur.fetchall()]

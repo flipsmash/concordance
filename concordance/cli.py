@@ -1366,6 +1366,31 @@ def dedupe_plurals(
                   f"{stats['left_inactive']} left inactive (deliberate prior decision)")
 
 
+@app.command("clean-script-variants")
+def clean_script_variants(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    apply: bool = typer.Option(False, "--apply", help="Write changes (default: dry run, list only)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Sweep active non-ASCII words: cast out non-Latin script, þ/ȝ/ð spellings,
+    accented spellings of common words, and accented duplicates of an active
+    word (book links copied to the survivor); flag the rest `script_review`
+    for the review list. Soft/reversible; each cast-out records a script_*
+    reason in variant_flag_reason."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    stats = db.clean_script_variants(conn, schema, apply=apply)
+    conn.close()
+    if not apply:
+        for kind, _wid, lemma, note, _surv in stats["actions"]:
+            console.print(f"  {kind:22} {lemma}  [dim]{note}[/dim]")
+    console.print(f"[green]✓[/green] clean-script-variants{'' if apply else ' (dry run)'}: "
+                  f"[bold]{stats['scanned']}[/bold] non-ASCII words — {stats['counts']}")
+
+
 @app.command("expand-synonyms")
 def expand_synonyms(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),

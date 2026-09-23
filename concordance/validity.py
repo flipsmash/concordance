@@ -33,7 +33,8 @@ from wordfreq import zipf_frequency
 
 from .config import Config
 from .model import Candidate, RejectReason, Verdict
-from .validity_score import _english_fraction, _FOREIGN_ENGLISH_FRACTION, _FOREIGN_MIN_TOKENS
+from .validity_score import (_english_fraction, _FOREIGN_ENGLISH_FRACTION, _FOREIGN_MIN_TOKENS,
+                             script_reject_reason)
 
 _CORPUS_PRESENT = 0.0  # wordfreq returns 0.0 for tokens it has never seen
 
@@ -156,6 +157,19 @@ class ValidityGate:
         if cand.verdict is not None:
             return
         word = cand.lemma
+
+        # -1. Spelling alone proves it isn't English vocabulary (non-Latin
+        #     script, þ/ȝ/ð, or an accented spelling of a common word) -- ahead
+        #     of the local Wiktionary, whose translingual/Middle English
+        #     entries would otherwise vouch for exactly these.
+        script = script_reject_reason(word, self.cfg.min_zipf)
+        if script:
+            kind, note = script
+            cand.verdict = Verdict.DROP
+            cand.reject_reason = (RejectReason.FOREIGN_LANGUAGE if kind == "script_foreign"
+                                  else RejectReason.MISSPELLING)
+            cand.interesting_reason = note
+            return
 
         # 0. Local Wiktionary dump — cheap, curated, and structurally free of
         #    proper nouns (see module docstring). Checked before even the

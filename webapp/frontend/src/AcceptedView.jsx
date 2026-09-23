@@ -25,6 +25,8 @@ function AcceptedView() {
   const [pos, setPos] = useState('')
   const [posOptions, setPosOptions] = useState([])
   const [validityLabel, setValidityLabel] = useState('')
+  const [variantFlag, setVariantFlag] = useState('')
+  const [flagOptions, setFlagOptions] = useState([])
   const [qInput, setQInput] = useState('')
   const [q, setQ] = useState('')
   const [letter, setLetter] = useState('')
@@ -33,6 +35,10 @@ function AcceptedView() {
     fetch(`${API_BASE}/api/pos-values`)
       .then((res) => res.json())
       .then(setPosOptions)
+      .catch(() => {})
+    fetch(`${API_BASE}/api/variant-flag-values`)
+      .then((res) => res.json())
+      .then(setFlagOptions)
       .catch(() => {})
   }, [])
 
@@ -51,7 +57,7 @@ function AcceptedView() {
     pageSize: PAGE_SIZE,
     defaultSort: 'difficulty',
     defaultDir: 'asc',
-    extraParams: { pos, validity_label: validityLabel, q, letter },
+    extraParams: { pos, validity_label: validityLabel, variant_flag: variantFlag, q, letter },
   })
 
   function handlePosChange(value) {
@@ -61,6 +67,11 @@ function AcceptedView() {
 
   function handleValidityLabelChange(value) {
     setValidityLabel(value)
+    resetPage()
+  }
+
+  function handleVariantFlagChange(value) {
+    setVariantFlag(value)
     resetPage()
   }
 
@@ -104,6 +115,17 @@ function AcceptedView() {
             {VALIDITY_LABELS.map((v) => (
               <option key={v} value={v}>
                 {v}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="pos-filter">
+          Flag:{' '}
+          <select value={variantFlag} onChange={(e) => handleVariantFlagChange(e.target.value)}>
+            <option value="">All</option>
+            {flagOptions.map((f) => (
+              <option key={f} value={f}>
+                {f}
               </option>
             ))}
           </select>
@@ -173,7 +195,15 @@ function AcceptedView() {
                 <td className="difficulty">{w.difficulty != null ? Math.round(w.difficulty) : '—'}</td>
                 <td className="validity-score">{w.validity_score != null ? w.validity_score.toFixed(2) : '—'}</td>
                 <td className="validity-label">{w.validity_label || '—'}</td>
-                <td className="validity-notes">{w.validity_notes || '—'}</td>
+                <td className="validity-notes">
+                  {w.validity_notes || (w.variant_flag_reason ? '' : '—')}
+                  {w.variant_flag_reason && (
+                    <div className="muted">
+                      flag: {w.variant_flag_reason}
+                      {w.variant_flag_note ? ` — ${w.variant_flag_note}` : ''}
+                    </div>
+                  )}
+                </td>
                 <td className="actions">
                   <AddToSetMenu wordIds={[w.id]} label="+ Set" title="Add to set" />
                   <button type="button" className="delete-btn" onClick={() => handleDelete(w.id)}>

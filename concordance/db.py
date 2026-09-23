@@ -2519,6 +2519,89 @@ def fetch_ngrams(conn, schema: str = DEFAULT_SCHEMA, only_missing: bool = True,
     return stats
 
 
+def clean_script_variants(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool = False) -> dict:
+    """`concordance clean-script-variants`: sweep ACTIVE words with a non-ASCII
+    lemma -- the one place junk concentrates among the words Google Books
+    never shows in recent print (Greek quotations, þ/ȝ Middle English, poetic
+    accents on common words, accented duplicates of words already present).
+
+    Per word, one of:
+      - cast out (active=false) when validity_score.script_reject_reason says
+        the spelling alone proves it isn't vocabulary (the same gate ingest
+        now applies up front);
+      - dedupe when its accent/ligature-folded spelling is ALREADY an active
+        word (vicuña/vicuna): one survives, the other is cast out as
+        `script_duplicate`, and the loser's book links are copied onto the
+        survivor so book pages/stats don't lose the word. The ASCII row
+        survives unless only the accented one carries quiz history or a
+        definition;
+      - otherwise flagged `script_review` (NOT deactivated): a real rare word
+        in a variant spelling (mélange, uræus, crispèd) -- keep-bias says a
+        human decides, via the review list's flag filter.
+
+    Every cast-out records its kind in variant_flag_reason (distinct
+    script_* values, so the deleted-as-difficulty-signal dataset can exclude
+    them -- these weren't pruned for being easy). Soft and reversible like
+    every other removal here. Idempotent: words already carrying a script_*
+    flag are skipped. Dry run unless `apply`."""
+    from .config import Config
+    from .validity_score import fold_spelling, script_reject_reason
+    s = _safe_schema(schema)
+    min_zipf = Config().min_zipf
+    history_sql = " + ".join(
+        f"(SELECT count(*) FROM {s}.{tbl} x WHERE x.word_id = w.id)"
+        for tbl in ("quiz_answer", "word_review_schedule", "word_set_item"))
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT w.id, w.lemma, coalesce(w.definition,'') <> '', {history_sql}
+                        FROM {s}.word w WHERE w.active AND NOT w.lemma ~ '^[\\x01-\\x7f]*$'
+                          -- already swept: an active script_* word is either
+                          -- awaiting review or was reactivated by a human --
+                          -- never re-cast-out behind their back
+                          AND coalesce(w.variant_flag_reason, '') NOT LIKE 'script%%'
+                        ORDER BY w.id""")
+        rows = cur.fetchall()
+        actions: list[tuple] = []          # (kind, loser_id, lemma, note, survivor_id|None)
+        for wid, lemma, has_def, hist in rows:
+            script = script_reject_reason(lemma, min_zipf)
+            if script:
+                actions.append((script[0], wid, lemma, script[1], None))
+                continue
+            folded = fold_spelling(lemma)
+            cur.execute(f"""SELECT w.id, coalesce(w.definition,'') <> '', {history_sql}
+                            FROM {s}.word w WHERE w.active AND w.lemma_lc = %s""", (folded,))
+            twin = cur.fetchone()
+            if twin:
+                tid, t_def, t_hist = twin
+                keep_accented = (hist and not t_hist) or (has_def and not t_def and not t_hist)
+                if keep_accented:
+                    actions.append(("script_duplicate", tid, folded,
+                                    f"duplicate of accented spelling '{lemma}'", wid))
+                else:
+                    actions.append(("script_duplicate", wid, lemma,
+                                    f"accented/ligature spelling of '{folded}'", tid))
+            else:
+                actions.append(("script_review", wid, lemma, f"variant spelling of '{folded}'?", None))
+
+        if apply:
+            for kind, wid, _lemma, note, survivor in actions:
+                if kind == "script_review":
+                    cur.execute(f"""UPDATE {s}.word SET variant_flag_reason=%s, variant_flag_note=%s,
+                                        variant_flagged_at=now()
+                                    WHERE id=%s AND variant_flag_reason IS NULL""", (kind, note, wid))
+                    continue
+                if survivor is not None:
+                    cur.execute(f"""INSERT INTO {s}.word_book (word_id, book_id)
+                                    SELECT %s, book_id FROM {s}.word_book WHERE word_id=%s
+                                    ON CONFLICT DO NOTHING""", (survivor, wid))
+                cur.execute(f"""UPDATE {s}.word SET active=false, variant_flag_reason=%s,
+                                    variant_flag_note=%s, variant_flagged_at=now(), updated_at=now()
+                                WHERE id=%s""", (kind, note, wid))
+            conn.commit()
+
+    from collections import Counter
+    return {"scanned": len(rows), "counts": dict(Counter(a[0] for a in actions)), "actions": actions}
+
+
 def compute_difficulty(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> dict:
     """Compute the ex-ante difficulty scalar (+ factor breakdown) for every word.
     Always recomputes every word in scope (no only_missing gate) -- ngram,

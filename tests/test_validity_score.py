@@ -208,3 +208,35 @@ def test_variant_reject_reason_flags_archaic_spelling():
 
 def test_variant_reject_reason_none_for_a_real_word():
     assert V.variant_reject_reason("armiger") is None
+
+
+# --- spelling-alone rejects (design rule 3) ---------------------------------
+
+def test_fold_spelling():
+    from concordance.validity_score import fold_spelling
+    assert fold_spelling("fellòw") == "fellow"
+    assert fold_spelling("hæmorrhage") == "haemorrhage"
+    assert fold_spelling("cortège") == "cortege"
+    assert fold_spelling("mustnʼt") == "mustn't"
+    assert fold_spelling("ceraunomancy") == "ceraunomancy"
+
+
+def test_script_reject_reason_narrow_classes():
+    from concordance.validity_score import script_reject_reason as r
+    assert r("χαλκὸς", 3.5)[0] == "script_foreign"
+    assert r("þusent", 3.5)[0] == "script_archaic_letter"
+    assert r("monèy", 3.5)[0] == "script_common_variant"      # accented common word
+    # real rare words in a variant spelling are NOT rejected -- review, not drop
+    for w in ("mélange", "uræus", "crispèd", "cortège", "ceraunomancy", "mustnʼt"):
+        assert r(w, 3.5) is None, w
+
+
+def test_validity_gate_drops_script_junk_before_local_dict():
+    from concordance.config import Config
+    from concordance.model import Candidate, RejectReason, Verdict
+    from concordance.validity import ValidityGate
+    gate = ValidityGate(Config(), local_dict={"þusent", "χαλκὸς"})   # would otherwise KEEP
+    for word, reason in (("þusent", RejectReason.MISSPELLING), ("χαλκὸς", RejectReason.FOREIGN_LANGUAGE)):
+        c = Candidate(lemma=word, pos="NOUN")
+        gate.judge(c)
+        assert c.verdict is Verdict.DROP and c.reject_reason is reason

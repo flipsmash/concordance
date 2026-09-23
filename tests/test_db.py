@@ -2724,3 +2724,51 @@ def test_compute_personal_difficulty_is_idempotent():
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
     conn.close()
+
+
+@pg
+def test_clean_script_variants():
+    from concordance.model import Candidate
+    schema = "cc_test_script_variants"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    def cand(lemma):
+        c = Candidate(lemma=lemma, pos="NOUN"); c.definition = f"def of {lemma}"; return c
+
+    db.sync_book_results(conn, "Book A", kept=[cand("vicuna")], rejected=[], schema=schema)
+    db.sync_book_results(conn, "Book B", kept=[cand(w) for w in ("vicuña", "χαλκὸς", "monèy", "mélange")],
+                         rejected=[], schema=schema)
+
+    dry = db.clean_script_variants(conn, schema)
+    assert dry["counts"] == {"script_duplicate": 1, "script_foreign": 1,
+                             "script_common_variant": 1, "script_review": 1}
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT count(*) FROM {schema}.word WHERE NOT active")
+        assert cur.fetchone()[0] == 0                      # dry run writes nothing
+
+    db.clean_script_variants(conn, schema, apply=True)
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT lemma, active, variant_flag_reason FROM {schema}.word ORDER BY lemma")
+        got = {l: (a, f) for l, a, f in cur.fetchall()}
+        assert got["vicuna"] == (True, None)               # ASCII twin survives
+        assert got["vicuña"] == (False, "script_duplicate")
+        assert got["χαλκὸς"] == (False, "script_foreign")
+        assert got["monèy"] == (False, "script_common_variant")
+        assert got["mélange"] == (True, "script_review")   # flagged, never dropped
+        # the duplicate's book link moved onto the survivor
+        cur.execute(f"""SELECT b.title FROM {schema}.word_book wb JOIN {schema}.book b ON b.id=wb.book_id
+                        JOIN {schema}.word w ON w.id=wb.word_id WHERE w.lemma='vicuna' ORDER BY 1""")
+        assert [r[0] for r in cur.fetchall()] == ["Book A", "Book B"]
+        # a human reactivating a swept word is respected on re-run
+        cur.execute(f"UPDATE {schema}.word SET active=true WHERE lemma='monèy'")
+    conn.commit()
+    assert db.clean_script_variants(conn, schema, apply=True)["counts"] == {}
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT active FROM {schema}.word WHERE lemma='monèy'")
+        assert cur.fetchone()[0] is True
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
