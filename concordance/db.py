@@ -2908,6 +2908,52 @@ def foreign_only_langs(conn, lemmas, wikt_schema: str = "wikt") -> dict[str, lis
         return {term: langs for term, langs in cur.fetchall()}
 
 
+def english_reference_terms(conn, lemmas) -> set[str]:
+    """The lemmas (lowercased) with an entry in the local English Wiktionary
+    (vocab.wiktionary) or 0 Dict (oed.entry) -- one query for the batch."""
+    lemmas = sorted({l.lower() for l in lemmas})
+    if not lemmas:
+        return set()
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('vocab.wiktionary'), to_regclass('oed.entry')")
+        have_wik, have_oed = cur.fetchone()
+        found: set[str] = set()
+        if have_wik:
+            cur.execute("SELECT lower(term) FROM vocab.wiktionary WHERE term = ANY(%s) OR term = ANY(%s)",
+                        (lemmas, [l.capitalize() for l in lemmas]))
+            found |= {r[0] for r in cur.fetchall()}
+        if have_oed:
+            cur.execute("SELECT lower(headword_norm) FROM oed.entry WHERE headword_norm = ANY(%s) "
+                        "OR headword_norm = ANY(%s)", (lemmas, [l.capitalize() for l in lemmas]))
+            found |= {r[0] for r in cur.fetchall()}
+    return found & set(lemmas)
+
+
+def clear_stale_foreign_flags(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool = False) -> dict:
+    """`concordance clear-foreign-flags`: the old cross-language-Zipf
+    heuristic (validity_score.foreign_language_hint) flagged ~2k active words
+    variant_flag_reason='foreign_language', mostly real English (haft,
+    glaive). Clear the flag wherever validity_score.english_evidence finds
+    any sign of English use; the rest keep it for review. Dry run unless
+    `apply`."""
+    from .validity_score import english_evidence
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT id, lemma_lc, coalesce(definition_source,'') FROM {s}.word
+                        WHERE active AND variant_flag_reason = 'foreign_language'""")
+        rows = cur.fetchall()
+    ref = english_reference_terms(conn, [l for _, l, _ in rows])
+    cleared = [(wid, l, ev) for wid, l, src in rows if (ev := english_evidence(l, src, l in ref))]
+    if apply:
+        with conn.cursor() as cur:
+            cur.execute(f"""UPDATE {s}.word SET variant_flag_reason=NULL, variant_flag_note=NULL
+                            WHERE id = ANY(%s) AND variant_flag_reason = 'foreign_language'""",
+                        ([wid for wid, _, _ in cleared],))
+        conn.commit()
+    return {"flagged": len(rows), "cleared": len(cleared), "kept": len(rows) - len(cleared),
+            "actions": cleared}
+
+
 def clean_foreign_words(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool = False,
                         wikt_schema: str = "wikt") -> dict:
     """`concordance clean-foreign-words`: cast out active words that are

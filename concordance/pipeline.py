@@ -255,6 +255,7 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
         # (one query for the whole shortlist); foreign_cast_out_reason below
         # adds the per-word English-usage checks. Latin/Greek never qualify.
         foreign = db.foreign_only_langs(conn, [c.lemma for c in shortlist])
+        english_ref = db.english_reference_terms(conn, [c.lemma for c in shortlist])
         for cand in shortlist:
             if cand.verdict is Verdict.DROP:
                 # Already cast out above (e.g. _enrich_one's MW foreign-
@@ -294,6 +295,10 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
                 cast_out += 1
                 continue
             variant = validity_score.variant_reject_reason(cand.lemma)
+            if (variant and variant[0] is RejectReason.FOREIGN_LANGUAGE
+                    and validity_score.english_evidence(cand.lemma, cand.definition_source,
+                                                        cand.lemma.lower() in english_ref)):
+                variant = None   # the zipf-only foreign hint is outweighed by any English evidence
             if variant:
                 cand.variant_flag_reason, cand.variant_flag_note = variant[0].value, variant[1]
                 flagged += 1

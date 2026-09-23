@@ -1516,6 +1516,29 @@ def clean_foreign_words(
                   f"{stats['candidates']} foreign-only per Wiktionary, [bold]{stats['cast_out']}[/bold] cast out")
 
 
+@app.command("clear-foreign-flags")
+def clear_foreign_flags(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    apply: bool = typer.Option(False, "--apply", help="Write changes (default: dry run, list only)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Clear the old heuristic 'foreign_language' review flag from active
+    words that show any English use (English Wiktionary/0 Dict entry, English
+    dictionary definition, wordfreq, Webster list, WordNet)."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    stats = db.clear_stale_foreign_flags(conn, schema, apply=apply)
+    conn.close()
+    if not apply:
+        for _wid, lemma, ev in stats["actions"]:
+            console.print(f"  {lemma}  [dim]{ev}[/dim]")
+    console.print(f"[green]✓[/green] clear-foreign-flags{'' if apply else ' (dry run)'}: "
+                  f"[bold]{stats['cleared']}[/bold] of {stats['flagged']} cleared, {stats['kept']} kept for review")
+
+
 @app.command("expand-synonyms")
 def expand_synonyms(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),

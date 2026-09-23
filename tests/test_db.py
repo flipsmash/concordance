@@ -2933,3 +2933,31 @@ def test_clean_foreign_words(monkeypatch):
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
         cur.execute(f"DROP SCHEMA {wikt} CASCADE")
     conn.commit()
+
+
+@pg
+def test_clear_stale_foreign_flags():
+    from concordance.model import Candidate
+    schema = "cc_test_clear_foreign_flags"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    def cand(lemma, src):
+        c = Candidate(lemma=lemma, pos="NOUN"); c.definition = "x"; c.definition_source = src; return c
+    db.sync_book_results(conn, "Book A", kept=[cand("haft", ""), cand("zzbeber", "Web (LLM-extracted)"),
+                                               cand("zzdefd", "Merriam-Webster API")],
+                         rejected=[], schema=schema)
+    with conn.cursor() as cur:
+        cur.execute(f"UPDATE {schema}.word SET variant_flag_reason='foreign_language'")
+    conn.commit()
+    assert db.clear_stale_foreign_flags(conn, schema)["cleared"] == 2      # dry run
+    db.clear_stale_foreign_flags(conn, schema, apply=True)
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT lemma, variant_flag_reason FROM {schema}.word")
+        got = dict(cur.fetchall())
+        assert got == {"haft": None, "zzdefd": None, "zzbeber": "foreign_language"}
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()

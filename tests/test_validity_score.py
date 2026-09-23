@@ -298,3 +298,12 @@ def test_foreign_cast_out_reason_requires_every_english_check_to_fail():
     assert f("miteinander", ["German"], "Local Wiktionary (DB) (synonym of 'x')") is None
     assert f("haft", ["Danish"], "") is None                                   # common in English
     assert f("glaive", ["French"], "") is None                                 # Webster list / WordNet
+
+
+def test_english_evidence():
+    from concordance.validity_score import english_evidence as e
+    assert e("zzqx", "", True)                                 # English Wiktionary / 0 Dict entry
+    assert e("zzqx", "Merriam-Webster API", False)             # English dictionary definition
+    assert e("haft", "", False)                                # wordfreq / wordlist
+    assert e("zzqx", "datamuse", False) is None
+    assert e("zzqx", "Web (LLM-extracted)", False) is None

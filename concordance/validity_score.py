@@ -374,6 +374,26 @@ _NON_ENGLISH_EVIDENCE_SOURCES = frozenset({"", "datamuse", "dm", "Web (LLM-extra
 _FOREIGN_MAX_EN_ZIPF = 2.0
 
 
+def english_evidence(word: str, definition_source: str | None, in_english_reference: bool) -> str | None:
+    """The first sign `word` is used in English, or None: an English
+    Wiktionary / 0 Dict entry (`in_english_reference`, looked up in bulk by
+    db.english_reference_terms), a definition from an English dictionary, an
+    English wordfreq Zipf >= 2.0, the Webster-derived list, or WordNet. The
+    same signals foreign_cast_out_reason requires ALL be absent."""
+    w = word.strip().lower()
+    if in_english_reference:
+        return "English Wiktionary / 0 Dict entry"
+    if (definition_source or "").split(" (synonym")[0] not in _NON_ENGLISH_EVIDENCE_SOURCES:
+        return f"defined by {definition_source}"
+    if zipf_frequency(w, "en") >= _FOREIGN_MAX_EN_ZIPF:
+        return "common in English (wordfreq)"
+    if w in _wordset():
+        return "in the Webster word list"
+    if _in_wordnet(w):
+        return "in WordNet"
+    return None
+
+
 def foreign_cast_out_reason(word: str, foreign_langs: list[str] | None,
                             definition_source: str | None) -> str | None:
     """Note for casting a word out as foreign, or None to keep it.
