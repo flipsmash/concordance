@@ -3401,6 +3401,37 @@ def set_book_publication_info(cur, book_id: int, publication_year: int | None,
     )
 
 
+def fill_publication_years(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0) -> dict:
+    """`archive-metadata --fill-years`: publication_year for archived .txt
+    books that lack one, from their own title page
+    (archive_metadata.title_page_year, era-checked). Fills only NULL columns
+    (set_book_publication_info), deriving an era from the year when that's
+    missing too. Commits every 500 books so a long run keeps its progress."""
+    from . import archive_metadata as am
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT id, archive_path, publication_era FROM {s}.book
+                        WHERE publication_year IS NULL AND archive_path ILIKE '%%.txt'
+                        ORDER BY id""" + (f" LIMIT {int(limit)}" if limit else ""))
+        rows = cur.fetchall()
+    stats = {"checked": len(rows), "filled": 0, "missing_file": 0}
+    with conn.cursor() as cur:
+        for i, (book_id, path, era) in enumerate(rows, 1):
+            try:
+                raw = Path(path).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                stats["missing_file"] += 1
+                continue
+            year = am.title_page_year(raw, era)
+            if year:
+                set_book_publication_info(cur, book_id, year, era or am.year_to_era(year), schema)
+                stats["filled"] += 1
+            if i % 500 == 0:
+                conn.commit()
+    conn.commit()
+    return stats
+
+
 def compute_book_similarity(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
                             top_k: int = 20, min_shared_words: int = 3,
                             max_df_fraction: float = 0.5) -> dict:

@@ -266,3 +266,30 @@ def test_fetch_gutenberg_rdf_degrades_to_empty_on_network_failure(monkeypatch):
 
     result = am.fetch_gutenberg_rdf(36)
     assert result == {"publication_year": None, "publication_era": None, "genre_hints": []}
+
+
+# --- title-page publication year ---------------------------------------------
+
+from concordance import archive_metadata as am  # noqa: E402
+
+
+def test_era_year_range():
+    assert am.era_year_range("late 19th century") == (1862, 1905)
+    assert am.era_year_range("early 1870s") == (1868, 1875)
+    assert am.era_year_range("1800s") == (1800, 1899)
+    assert am.era_year_range("399 BC") is None and am.era_year_range(None) is None
+
+
+def test_title_page_year_earliest_in_era():
+    page = ("THE ROAD\n\nBY\n\nJACK LONDON\n\nNEW YORK\nTHE MACMILLAN COMPANY\n1907\n\n"
+            "Copyright, 1907. Reprinted 1915.\n\nTranscribed 2004.")
+    assert am.title_page_year(page, "early 20th century") == 1907
+    # the edition year is outside a mid-19th-century era, the original isn't
+    assert am.title_page_year("LONDON:\nSMITH, ELDER\n1849\n\nNew edition, 1902", "mid-19th century") == 1849
+
+
+def test_title_page_year_roman_and_no_era_rules():
+    assert am.title_page_year("EDINBURGH\nMDCCCLXXXIX\n", "late 19th century") == 1889
+    # with no era only an explicit statement counts, never a bare title-page year
+    assert am.title_page_year("A BOOK\n1850\n", None) is None
+    assert am.title_page_year("First published in 1850.", None) == 1850

@@ -288,6 +288,86 @@ def fetch_publication_info(gutenberg_id: int, timeout: float = 15.0) -> tuple[in
     return year, era
 
 
+# --- publication year from the book's own title page ----------------------
+#
+# Gutenberg's RDF summary (fetch_publication_info) states an era hedge for
+# most books but almost never a year (0/20 in a live sample of books lacking
+# one), so the year comes from the front matter instead -- "Copyright,
+# 1902", "First published 1895", a title-page imprint line ("LONDON: ...
+# 1854"), a lone year or Roman-numeral year line. A candidate only counts if
+# it falls inside the book's known era (reprint/edition/transcription years
+# usually don't); with no era, only an explicit copyright/published statement
+# counts. The earliest surviving candidate wins (an original before a later
+# edition). ~58% of era-only books resolve on a live sample.
+
+_FRONT_MATTER_CHARS = 8000
+_YEAR = r"(1[4-9]\d\d|20[0-2]\d)"
+_STATED_YEAR_RE = re.compile(
+    r"(?:copyright(?:ed)?,?\s*(?:\u00a9|\(c\))?\s*(?:by\s+[^\n]{0,40}?)?"
+    r"|first\s+(?:published|printed|edition)[^\n]{0,20}?|published\s+(?:in\s+)?|printed\s+(?:in\s+)?)"
+    + _YEAR, re.IGNORECASE)
+_IMPRINT_CITY_RE = re.compile(
+    r"\b(london|new york|boston|philadelphia|edinburgh|chicago|oxford|cambridge|dublin|paris|glasgow|toronto)\b",
+    re.IGNORECASE)
+_ROMAN_YEAR_RE = re.compile(r"\bM{1,2}(?:CM|CD|D?C{0,4})(?:XC|XL|L?X{0,4})(?:IX|IV|V?I{0,4})\b")
+_ROMAN = {"M": 1000, "D": 500, "C": 100, "L": 50, "X": 10, "V": 5, "I": 1}
+
+
+def _roman_value(s: str) -> int:
+    total = 0
+    for i, ch in enumerate(s):
+        v = _ROMAN[ch]
+        total += -v if i + 1 < len(s) and _ROMAN[s[i + 1]] > v else v
+    return total
+
+
+def era_year_range(era: str | None) -> tuple[int, int] | None:
+    """The plausible year span of an era hedge, with a little slack: "late
+    19th century" -> (1862, 1904) (same thirds as year_to_era), "early
+    1870s" -> (1868, 1875), "1800s" -> (1800, 1899). None for anything
+    else (BC dates, free text)."""
+    if not era:
+        return None
+    e = era.strip().lower().replace("mid-", "mid ")
+    m = re.fullmatch(r"(early|mid|late)?\s*(\d+)(?:st|nd|rd|th) century", e)
+    if m:
+        start = (int(m.group(2)) - 1) * 100 + 1
+        a, b = {"early": (0, 33), "mid": (33, 67), "late": (66, 100), None: (0, 100)}[m.group(1)]
+        return start + a - 5, start + b + 4
+    m = re.fullmatch(r"(early|mid|late)?\s*(\d{3})0s", e)
+    if m:
+        decade = int(m.group(2)) * 10
+        if m.group(1) is None and decade % 100 == 0:
+            return decade, decade + 99                  # "1800s" reads as the century
+        a, b = {"early": (0, 4), "mid": (3, 7), "late": (6, 10), None: (0, 10)}[m.group(1)]
+        return decade + a - 2, decade + b + 1
+    return None
+
+
+def title_page_year(raw_text: str, era: str | None) -> int | None:
+    """Original publication year from a Gutenberg .txt's front matter, or
+    None -- see the section comment above for the rules."""
+    front = strip_gutenberg_boilerplate(raw_text)[:_FRONT_MATTER_CHARS]
+    stated = [int(m.group(1)) for m in _STATED_YEAR_RE.finditer(front)]
+    title_page: list[int] = []
+    for line in front.split("\n"):
+        line = line.strip()
+        if not line or len(line) > 70:
+            continue
+        imprint = bool(_IMPRINT_CITY_RE.search(line))
+        for y in re.findall(r"\b" + _YEAR + r"\b", line):
+            if imprint or re.fullmatch(r"[\[(]?" + y + r"[.\])]?", line):
+                title_page.append(int(y))
+        for r in _ROMAN_YEAR_RE.findall(line):
+            if len(r) >= 4 and (imprint or re.fullmatch(r"[\[(]?" + r + r"[.\])]?", line)):
+                y = _roman_value(r)
+                if 1450 <= y <= 1950:
+                    title_page.append(y)
+    span = era_year_range(era)
+    ok = ([y for y in stated + title_page if span[0] <= y <= span[1]] if span else stated)
+    return min(ok) if ok else None
+
+
 def compute_book_metadata(path, *, skip_network: bool = False, delay: float = 0.3) -> dict:
     """word_count/distinct_nonstop_word_count/publication_year/publication_era
     for a single book file -- the one place this logic lives, shared by
@@ -320,6 +400,10 @@ def compute_book_metadata(path, *, skip_network: bool = False, delay: float = 0.
                 if year and not era:
                     era = year_to_era(year)
                 time.sleep(delay)
+        if year is None:
+            year = title_page_year(raw, era)     # local fallback -- the RDF rarely states a year
+            if year and not era:
+                era = year_to_era(year)
     else:
         from .extract import extract as extract_book
 

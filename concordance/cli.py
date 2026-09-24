@@ -682,6 +682,10 @@ def archive_metadata_cmd(
         False, "--skip-network",
         help="Skip Gutenberg lookups; only compute word stats + archive_path."),
     delay: float = typer.Option(0.3, "--delay", help="Seconds to wait between Gutenberg requests."),
+    fill_years: bool = typer.Option(
+        False, "--fill-years",
+        help="Instead of the usual pass: fill publication_year for already-archived books that lack "
+             "one, from each .txt's own title page (checked against its known era). Local only."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Backfill word_count/distinct_nonstop_word_count/archive_path (and,
@@ -711,7 +715,15 @@ def archive_metadata_cmd(
     books already done -- the Gutenberg lookup is the slow part (~11.5k
     requests at a full corpus's scale, politely paced via --delay),
     expected to run for hours on a full backlog. Deliberately not part of
-    `maintain`, same reasoning as wordnik-pron/commons-download."""
+    `maintain`, same reasoning as wordnik-pron/commons-download.
+
+    --fill-years is a separate pass for the books the normal run skips
+    (archive_path already set) but that still lack a publication_year --
+    most of them, since Gutenberg's summary states an era but rarely a
+    year. It reads each .txt's front matter (archive_metadata.
+    title_page_year: copyright/published statements, imprint and title-page
+    year lines, Roman-numeral years), keeps only years inside the book's
+    known era, and never overwrites an existing value. No network."""
     from . import archive_metadata as am
 
     try:
@@ -719,6 +731,14 @@ def archive_metadata_cmd(
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
     db.apply_schema(conn, schema)
+
+    if fill_years:
+        stats = db.fill_publication_years(conn, schema, limit=limit)
+        conn.close()
+        console.print(f"[green]✓[/green] archive-metadata --fill-years: [bold]{stats['filled']}[/bold] of "
+                      f"{stats['checked']} books without a year filled from their title page"
+                      + (f" ({stats['missing_file']} archive files missing)" if stats["missing_file"] else ""))
+        return
 
     era_stats = db.backfill_publication_era(conn, schema)
     if era_stats["backfilled"]:
