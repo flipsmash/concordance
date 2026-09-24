@@ -1487,7 +1487,8 @@ def wiktionary_langs(
         stats = db.load_wiktionary_langs(conn, str(dump) if dump else None)
     conn.close()
     console.print(f"[green]✓[/green] wiktionary-langs: {stats['pairs']:,} word/language pairs, "
-                  f"[bold]{stats['foreign_only_terms']:,}[/bold] foreign-only terms")
+                  f"[bold]{stats['foreign_only_terms']:,}[/bold] foreign-only terms, "
+                  f"{stats['historic_terms']:,} Middle/Old-English-only terms")
 
 
 @app.command("clean-foreign-words")
@@ -1537,6 +1538,33 @@ def clear_foreign_flags(
             console.print(f"  {lemma}  [dim]{ev}[/dim]")
     console.print(f"[green]✓[/green] clear-foreign-flags{'' if apply else ' (dry run)'}: "
                   f"[bold]{stats['cleared']}[/bold] of {stats['flagged']} cleared, {stats['kept']} kept for review")
+
+
+@app.command("clean-context-language")
+def clean_context_language(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    apply: bool = typer.Option(False, "--apply", help="Write changes (default: dry run, list only)."),
+    workers: int = typer.Option(8, "--workers", help="Parallel book scanners."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """For active likely-artifact/uncertain words, read every use in their
+    source books; cast out those whose every classifiable sentence is Old
+    English, Middle English or a foreign language (fastText language ID +
+    Wiktionary Middle English markers). Needs `wiktionary-langs` first."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    with console.status("[bold]Reading source books…"):
+        stats = db.clean_non_english_context(conn, schema, apply=apply, workers=workers)
+    conn.close()
+    if not apply:
+        for _wid, lemma, note in stats["actions"]:
+            console.print(f"  {lemma}  [dim]{note}[/dim]")
+    console.print(f"[green]✓[/green] clean-context-language{'' if apply else ' (dry run)'}: "
+                  f"{stats['words']} words checked, {stats['found_in_books']} found in their books, "
+                  f"[bold]{stats['cast_out']}[/bold] cast out")
 
 
 @app.command("expand-synonyms")

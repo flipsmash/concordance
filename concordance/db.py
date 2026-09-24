@@ -2841,7 +2841,8 @@ def load_wiktionary_langs(conn, dump_path: str | None = None, wikt_schema: str =
     language's entries, each tagged with its language), build
     <wikt_schema>.foreign_term -- terms (lowercased) that have entries ONLY in
     languages outside English-family/Translingual and outside Latin/Greek,
-    with those languages. Standalone schema, not apply_schema (a large load).
+    with those languages -- and <wikt_schema>.historic_term, terms that are
+    ONLY Middle/Old English (context_lang's Middle English markers). Standalone schema, not apply_schema (a large load).
     A byte-level grep pulls each entry's top-level "word"/"lang" pair (always
     adjacent, in that order) so the multi-GB JSON never needs parsing."""
     import subprocess
@@ -2876,9 +2877,22 @@ def load_wiktionary_langs(conn, dump_path: str | None = None, wikt_schema: str =
         cur.execute(f"ALTER TABLE {g}.foreign_term ADD PRIMARY KEY (term)")
         cur.execute(f"SELECT count(*) FROM {g}.foreign_term")
         foreign = cur.fetchone()[0]
+        # Middle/Old English markers for context_lang: entries ONLY in those
+        # languages -- anything also modern English, Scots or Translingual
+        # would mark ordinary archaic or dialect prose as medieval.
+        cur.execute(f"DROP TABLE IF EXISTS {g}.historic_term")
+        cur.execute(f"""CREATE TABLE {g}.historic_term AS
+                        SELECT term FROM {g}.term_lang_raw
+                        GROUP BY term
+                        HAVING bool_or(lang IN ('Middle English', 'Old English'))
+                           AND NOT bool_or(lang IN ('English', 'Scots', 'Translingual',
+                                                    'Early Modern English'))""")
+        cur.execute(f"ALTER TABLE {g}.historic_term ADD PRIMARY KEY (term)")
+        cur.execute(f"SELECT count(*) FROM {g}.historic_term")
+        historic = cur.fetchone()[0]
         cur.execute(f"DROP TABLE {g}.term_lang_raw")
     conn.commit()
-    return {"pairs": n, "foreign_only_terms": foreign}
+    return {"pairs": n, "foreign_only_terms": foreign, "historic_terms": historic}
 
 
 def foreign_only_langs(conn, lemmas, wikt_schema: str = "wikt") -> dict[str, list[str]]:
@@ -2984,6 +2998,84 @@ def clean_foreign_words(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool = Fal
                                 WHERE id=%s""", (note, wid))
         conn.commit()
     return {"candidates": len(langs), "cast_out": len(actions), "actions": actions}
+
+
+_CTX_CLASSIFIER = None
+
+
+def _ctx_init(historic_terms):
+    global _CTX_CLASSIFIER
+    from .context_lang import ContextClassifier
+    _CTX_CLASSIFIER = ContextClassifier(historic_terms)
+
+
+def _ctx_scan_book(item):
+    """Worker: one book -> {word id: [(kind, detail), ...]} for its target words."""
+    from .context_lang import occurrences
+    path, words = item
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    return {wid: [_CTX_CLASSIFIER.classify(sent, words[wid]) for sent in sents]
+            for wid, sents in occurrences(text, words).items()}
+
+
+def clean_non_english_context(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool = False,
+                              labels=("likely-artifact", "uncertain"), workers: int = 8,
+                              wikt_schema: str = "wikt") -> dict:
+    """`concordance clean-context-language`: for active words with one of
+    `labels`, find every use in their source books (book.archive_path) and
+    classify each sentence (context_lang.ContextClassifier). A word is cast
+    out only when it was found, at least one sentence was classifiable, and
+    NONE was modern English -- i.e. every use is Old/Middle English or a
+    foreign language. Too-short/ambiguous sentences never count either way;
+    a word not found in its books is kept. Cast out = active=false,
+    variant_flag_reason='non_english_context' with the languages seen.
+    Dry run unless `apply`."""
+    from collections import Counter, defaultdict
+    from multiprocessing import Pool
+    from .context_lang import target_forms
+    s, g = _safe_schema(schema), _safe_schema(wikt_schema)
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass(%s)", (f"{g}.historic_term",))
+        if cur.fetchone()[0] is None:
+            raise RuntimeError(f"{g}.historic_term missing -- run `concordance wiktionary-langs` first")
+        cur.execute(f"SELECT term FROM {g}.historic_term")
+        historic = {r[0] for r in cur.fetchall()}
+        cur.execute(f"""SELECT w.id, w.lemma_lc, w.as_seen, b.archive_path
+                        FROM {s}.word w
+                        JOIN {s}.word_book wb ON wb.word_id = w.id
+                        JOIN {s}.book b ON b.id = wb.book_id
+                        WHERE w.active AND w.validity_label = ANY(%s) AND b.archive_path IS NOT NULL""",
+                    (list(labels),))
+        by_book: dict[str, dict[int, set[str]]] = defaultdict(dict)
+        lemmas: dict[int, str] = {}
+        for wid, lemma, seen, path in cur.fetchall():
+            by_book[path][wid] = target_forms(lemma, seen)
+            lemmas[wid] = lemma
+    found: dict[int, list] = defaultdict(list)
+    with Pool(workers, initializer=_ctx_init, initargs=(historic,)) as pool:
+        for result in pool.imap_unordered(_ctx_scan_book, list(by_book.items()), chunksize=8):
+            for wid, kinds in result.items():
+                found[wid].extend(kinds)
+    actions = []
+    for wid, kinds in found.items():
+        determinate = [(k, d) for k, d in kinds if k != "unknown"]
+        if determinate and all(k != "english" for k, _ in determinate):
+            langs = Counter("Middle/Old English" if k == "middle_english" else d for k, d in determinate)
+            note = (f"all {len(determinate)} classifiable use(s) in source books are non-modern-English: "
+                    + ", ".join(f"{lang} ×{n}" for lang, n in langs.most_common()))
+            actions.append((wid, lemmas[wid], note))
+    if apply:
+        with conn.cursor() as cur:
+            for wid, _lemma, note in actions:
+                cur.execute(f"""UPDATE {s}.word SET active=false, variant_flag_reason='non_english_context',
+                                    variant_flag_note=%s, variant_flagged_at=now(), updated_at=now()
+                                WHERE id=%s""", (note, wid))
+        conn.commit()
+    return {"words": len(lemmas), "found_in_books": len(found), "cast_out": len(actions),
+            "actions": actions}
 
 
 def compute_difficulty(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> dict:
