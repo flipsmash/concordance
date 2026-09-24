@@ -51,3 +51,31 @@
   color: var(--text);
   padding-bottom: 20px;
 }
+
+.viz-popularity-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.viz-popularity-form input {
+  flex: 1 1 240px;
+  min-width: 0;
+  padding: 7px 10px;
+  font: inherit;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--rule-strong);
+  border-radius: 4px;
+}
+
+.viz-popularity-form button {
+  padding: 7px 14px;
+  font: inherit;
+  font-weight: 600;
+  color: var(--paper);
+  background: var(--rail-accent);
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}

@@ -2326,3 +2326,26 @@ def test_categories_dendrogram_clusters_by_meaning_and_orders_words_by_book_coun
         assert data["tree"]["size"] == 3
     finally:
         restore()
+
+
+@pg
+def test_ngram_trend_validation_and_lookup():
+    schema = "cc_test_ngram_trend"
+    client, conn, restore = _setup(schema)
+    try:
+        assert client.get("/api/browse/ngram-trend?term=a&term=b&term=c&term=d&term=e").status_code == 400
+        assert client.get("/api/browse/ngram-trend?term=%20").status_code == 400
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('ngram.unigram')")
+            loaded = cur.fetchone()[0] is not None
+        r = client.get("/api/browse/ngram-trend?term=Telegraph&term=zzqxvnotaword")
+        if not loaded:
+            assert r.status_code == 503
+            return
+        data = r.json()
+        assert data["decades"][0] == 1800 and len(data["decades"]) == 22
+        tele, bogus = data["series"]
+        assert tele["term"] == "telegraph" and tele["found"] and max(tele["per_million"]) > 1
+        assert not bogus["found"] and bogus["per_million"] == [0.0] * 22
+    finally:
+        restore()

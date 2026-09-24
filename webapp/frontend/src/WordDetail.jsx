@@ -365,7 +365,12 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
           {word.ngram_peak != null && (
             <>
               <span>ngram peak</span>
-              <span>{word.ngram_peak.toExponential(2)}</span>
+              <span>
+                {word.ngram_peak.toExponential(2)}{' '}
+                <Link to={`/app/visualizations/popularity?${new URLSearchParams({ terms: word.lemma.toLowerCase() })}`}>
+                  popularity over time →
+                </Link>
+              </span>
             </>
           )}
           {word.ngram_recent != null && (

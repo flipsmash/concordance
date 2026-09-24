@@ -79,6 +79,7 @@ function Visualizations() {
   const [authorGrowth, setAuthorGrowth] = useState([])
   const [wordGrowth, setWordGrowth] = useState([])
   const [growthMode, setGrowthMode] = useState('daily')
+  const [popularityInput, setPopularityInput] = useState('')
 
   useEffect(() => {
     fetch(`${API_BASE}/api/browse/growth?metric=books`)
@@ -302,6 +303,30 @@ function Visualizations() {
             navigate(`/app/authors?${new URLSearchParams({ overall_difficulty_band: b.label })}`)
           }
         />
+      </section>
+
+      <section className="browse-facets viz-section">
+        <h2 className="viz-heading">Popularity over time</h2>
+        <p className="viz-description">
+          How often any word appeared in English books, decade by decade since 1800 (Google Books).
+          Compare up to four, separated by commas.
+        </p>
+        <form
+          className="viz-popularity-form"
+          onSubmit={(e) => {
+            e.preventDefault()
+            const terms = popularityInput.split(',').map((t) => t.trim()).filter(Boolean)
+            if (terms.length) navigate(`/app/visualizations/popularity?${new URLSearchParams({ terms: terms.join(',') })}`)
+          }}
+        >
+          <input
+            value={popularityInput}
+            onChange={(e) => setPopularityInput(e.target.value)}
+            placeholder="e.g. telegraph, wireless, radio"
+            aria-label="Terms to chart"
+          />
+          <button type="submit">Chart it →</button>
+        </form>
       </section>
 
       <section className="browse-facets viz-section">

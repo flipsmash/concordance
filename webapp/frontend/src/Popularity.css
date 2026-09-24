@@ -1,0 +1,147 @@
+/* Tokens from AppShell.css's :root (light/dark handled there). */
+.pop-page {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 28px 24px 64px;
+}
+
+.pop-crumb {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--ink-soft);
+  text-decoration: none;
+}
+
+.pop-crumb:hover { color: var(--rail-accent); }
+
+.pop-title {
+  margin: 10px 0 6px;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 30px;
+  color: var(--ink);
+}
+
+.pop-lede {
+  margin: 0 0 18px;
+  max-width: 640px;
+  font-family: var(--font-ui);
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+
+.pop-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.pop-input {
+  flex: 1 1 280px;
+  min-width: 0;
+  padding: 8px 10px;
+  font-family: var(--font-ui);
+  font-size: 15px;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--rule-strong);
+  border-radius: 4px;
+}
+
+.pop-input:focus-visible {
+  outline: 2px solid var(--rail-accent);
+  outline-offset: 1px;
+}
+
+.pop-button {
+  padding: 8px 16px;
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--paper);
+  background: var(--rail-accent);
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.pop-log {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.pop-examples {
+  margin: 10px 0 18px;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  color: var(--ink-soft);
+}
+
+.pop-example {
+  margin: 0 6px 4px 0;
+  padding: 2px 8px;
+  font: inherit;
+  color: var(--ink);
+  background: var(--paper-raised);
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  cursor: pointer;
+}
+
+.pop-example:hover { border-color: var(--rail-accent); }
+
+.pop-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.pop-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px 3px 10px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--ink);
+  border: 1px solid var(--rule);
+  border-radius: 14px;
+}
+
+.pop-chip .trend-swatch { width: 14px; }
+
+.pop-chip-x {
+  padding: 0 6px;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--ink-soft);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.pop-chip-x:hover { color: var(--ink); }
+
+.pop-missing {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.pop-source {
+  margin-top: 18px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+@media (max-width: 500px) {
+  .pop-page { padding: 20px 16px 48px; }
+}

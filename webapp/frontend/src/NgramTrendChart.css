@@ -1,0 +1,160 @@
+/* Series slots: the validated categorical order (blue, orange, aqua,
+   yellow) -- adjacent-pair CVD ΔE >= 8.4 and normal-vision >= 19.8 in both
+   modes on this app's surfaces (#ffffff / #12161b); dark is its own
+   selected step set, not a flip. Aqua/yellow sit under 3:1 on white, so
+   labels + the table view carry identity (relief rule). */
+.trend-root {
+  --trend-1: #2a78d6;
+  --trend-2: #eb6834;
+  --trend-3: #1baf7a;
+  --trend-4: #eda100;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .trend-root {
+    --trend-1: #3987e5;
+    --trend-2: #d95926;
+    --trend-3: #199e70;
+    --trend-4: #c98500;
+  }
+}
+
+:root[data-theme="dark"] .trend-root {
+  --trend-1: #3987e5;
+  --trend-2: #d95926;
+  --trend-3: #199e70;
+  --trend-4: #c98500;
+}
+
+.trend-slot-1 { --slot: var(--trend-1); }
+.trend-slot-2 { --slot: var(--trend-2); }
+.trend-slot-3 { --slot: var(--trend-3); }
+.trend-slot-4 { --slot: var(--trend-4); }
+
+.trend-plot {
+  position: relative;
+}
+
+.trend-svg {
+  display: block;
+  overflow: visible;
+}
+
+.trend-grid {
+  stroke: var(--rule);
+  stroke-width: 1;
+}
+
+.trend-axis {
+  font-family: var(--font-data);
+  font-size: 11px;
+  fill: var(--ink-soft);
+}
+
+.trend-unit {
+  font-family: var(--font-ui);
+  font-size: 11px;
+}
+
+.trend-line {
+  fill: none;
+  stroke: var(--slot);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.trend-crosshair {
+  stroke: var(--rule-strong);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.trend-dot {
+  fill: var(--slot);
+  stroke: var(--paper);          /* 2px surface ring where marks overlap */
+  stroke-width: 2;
+}
+
+.trend-endlabel {
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  font-weight: 500;
+  fill: var(--ink);
+}
+
+.trend-tooltip {
+  position: absolute;
+  top: 12px;
+  min-width: 150px;
+  padding: 8px 10px;
+  background: var(--paper);
+  border: 1px solid var(--rule-strong);
+  border-radius: 4px;
+  box-shadow: 0 6px 18px -10px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  color: var(--ink);
+}
+
+.trend-tooltip-title {
+  font-family: var(--font-data);
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  margin-bottom: 4px;
+}
+
+.trend-tooltip-row {
+  display: grid;
+  grid-template-columns: 10px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  line-height: 1.6;
+}
+
+.trend-tooltip-value {
+  font-family: var(--font-data);
+}
+
+.trend-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--slot);
+}
+
+.trend-table-toggle {
+  margin-top: 10px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.trend-table-toggle summary {
+  cursor: pointer;
+}
+
+.trend-table {
+  margin-top: 8px;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  color: var(--ink);
+}
+
+.trend-table th,
+.trend-table td {
+  padding: 3px 12px 3px 0;
+  text-align: right;
+  border-bottom: 1px dotted var(--rule);
+}
+
+.trend-table th:first-child,
+.trend-table td:first-child {
+  text-align: left;
+}
+
+.trend-table td {
+  font-family: var(--font-data);
+}
