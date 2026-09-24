@@ -36,7 +36,9 @@ function layoutTree(tree, rowIndexByCode) {
   return nodes
 }
 
-function CategoryTree() {
+// The tree + rows alone -- embedded under the Categories page's overlap
+// graph, and wrapped by the standalone page below.
+export function CategoryTreeView() {
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
   const [hovered, setHovered] = useState(null)
@@ -63,79 +65,85 @@ function CategoryTree() {
   const onPath = (n) => hovered !== null && n.lo <= hovered && hovered <= n.hi
 
   return (
+    <div className="cattree-body" style={{ '--row-h': `${ROW_H}px` }}>
+      <svg
+        className="cattree-svg"
+        width={TREE_W + 2}
+        height={height}
+        viewBox={`0 0 ${TREE_W + 2} ${height}`}
+        aria-hidden="true"
+      >
+        {nodes.filter((n) => !n.leaf).map((n, i) => {
+          const hot = onPath(n)
+          return (
+            <g key={i} className={hot ? 'cattree-link is-hot' : 'cattree-link'}>
+              <path d={`M${n.x},${n.a.y} V${n.b.y}`} />
+              <path d={`M${n.x},${n.a.y} H${n.a.x}`} />
+              <path d={`M${n.x},${n.b.y} H${n.b.x}`} />
+            </g>
+          )
+        })}
+      </svg>
+
+      <ol className="cattree-rows">
+        {data.leaves.map((leaf, i) => {
+          const color = colorForBucket(leaf.bucket)
+          const more = leaf.word_count - leaf.words.length
+          const listUrl = `/app/words?${new URLSearchParams({
+            top_code: leaf.code,
+            sort: 'book_count',
+            dir: 'desc',
+          })}`
+          return (
+            <li
+              key={leaf.code}
+              className={hovered === i ? 'cattree-row is-hot' : 'cattree-row'}
+              onMouseEnter={() => setHovered(i)}
+              onMouseLeave={() => setHovered(null)}
+            >
+              <span className="cattree-swatch" style={{ background: color }} />
+              <span className="cattree-code" style={{ color }}>{leaf.code}</span>
+              <span className="cattree-name" title={leaf.name}>{leaf.name}</span>
+              <span className="cattree-count">{leaf.word_count.toLocaleString()}</span>
+              <span className="cattree-words">
+                {leaf.words.map((w, j) => (
+                  <span key={w.id}>
+                    {j > 0 && <span className="cattree-sep" aria-hidden="true"> · </span>}
+                    <Link
+                      to={`/app/words/${w.id}`}
+                      className="cattree-word"
+                      title={`${w.lemma} — in ${w.book_count.toLocaleString()} book${w.book_count === 1 ? '' : 's'}`}
+                    >
+                      {w.lemma}
+                    </Link>
+                  </span>
+                ))}
+              </span>
+              <Link to={listUrl} className="cattree-more" title={`All ${leaf.word_count} words, most-used first`}>
+                {more > 0 ? `all ${leaf.word_count.toLocaleString()}` : 'list'} <span aria-hidden="true">→</span>
+              </Link>
+            </li>
+          )
+        })}
+      </ol>
+    </div>
+  )
+}
+
+export const CATEGORY_TREE_BLURB =
+  'Every finest-grained subject category, clustered by what its words mean, so related fields ' +
+  'sit together even when the USAS scheme files them apart. Each row lists the category\u2019s ' +
+  'words, those used in the most books first.'
+
+function CategoryTree() {
+  return (
     <div className="cattree-page">
       <header className="cattree-header">
         <Link to="/app/visualizations" className="cattree-crumb">← Visualizations</Link>
         <h1 className="cattree-title">Categories by meaning</h1>
-        <p className="cattree-lede">
-          Every finest-grained subject category, clustered by what its words mean, so related
-          fields sit together even when the USAS scheme files them apart. Each row lists the
-          category&rsquo;s words, those used in the most books first.
-        </p>
+        <p className="cattree-lede">{CATEGORY_TREE_BLURB}</p>
       </header>
-
-      <div className="cattree-body" style={{ '--row-h': `${ROW_H}px` }}>
-        <svg
-          className="cattree-svg"
-          width={TREE_W + 2}
-          height={height}
-          viewBox={`0 0 ${TREE_W + 2} ${height}`}
-          aria-hidden="true"
-        >
-          {nodes.filter((n) => !n.leaf).map((n, i) => {
-            const hot = onPath(n)
-            return (
-              <g key={i} className={hot ? 'cattree-link is-hot' : 'cattree-link'}>
-                <path d={`M${n.x},${n.a.y} V${n.b.y}`} />
-                <path d={`M${n.x},${n.a.y} H${n.a.x}`} />
-                <path d={`M${n.x},${n.b.y} H${n.b.x}`} />
-              </g>
-            )
-          })}
-        </svg>
-
-        <ol className="cattree-rows">
-          {data.leaves.map((leaf, i) => {
-            const color = colorForBucket(leaf.bucket)
-            const more = leaf.word_count - leaf.words.length
-            const listUrl = `/app/words?${new URLSearchParams({
-              top_code: leaf.code,
-              sort: 'book_count',
-              dir: 'desc',
-            })}`
-            return (
-              <li
-                key={leaf.code}
-                className={hovered === i ? 'cattree-row is-hot' : 'cattree-row'}
-                onMouseEnter={() => setHovered(i)}
-                onMouseLeave={() => setHovered(null)}
-              >
-                <span className="cattree-swatch" style={{ background: color }} />
-                <span className="cattree-code" style={{ color }}>{leaf.code}</span>
-                <span className="cattree-name" title={leaf.name}>{leaf.name}</span>
-                <span className="cattree-count">{leaf.word_count.toLocaleString()}</span>
-                <span className="cattree-words">
-                  {leaf.words.map((w, j) => (
-                    <span key={w.id}>
-                      {j > 0 && <span className="cattree-sep" aria-hidden="true"> · </span>}
-                      <Link
-                        to={`/app/words/${w.id}`}
-                        className="cattree-word"
-                        title={`${w.lemma} — in ${w.book_count.toLocaleString()} book${w.book_count === 1 ? '' : 's'}`}
-                      >
-                        {w.lemma}
-                      </Link>
-                    </span>
-                  ))}
-                </span>
-                <Link to={listUrl} className="cattree-more" title={`All ${leaf.word_count} words, most-used first`}>
-                  {more > 0 ? `all ${leaf.word_count.toLocaleString()}` : 'list'} <span aria-hidden="true">→</span>
-                </Link>
-              </li>
-            )
-          })}
-        </ol>
-      </div>
+      <CategoryTreeView />
     </div>
   )
 }

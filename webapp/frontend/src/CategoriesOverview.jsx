@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import CategoryOverlapGraph from './CategoryOverlapGraph'
+import { CATEGORY_TREE_BLURB, CategoryTreeView } from './CategoryTree'
 import { colorForBucket } from './domainColors'
 import './Browse.css'
 import './Categories.css'
@@ -57,6 +58,12 @@ function CategoriesOverview() {
       <section className="browse-facets viz-section">
         <h2 className="viz-heading">How much do these categories overlap?</h2>
         <CategoryOverlapGraph basePath="/app/categories" />
+      </section>
+
+      <section className="browse-facets viz-section">
+        <h2 className="viz-heading">Categories by meaning</h2>
+        <p className="viz-description">{CATEGORY_TREE_BLURB}</p>
+        <CategoryTreeView />
       </section>
     </div>
   )
