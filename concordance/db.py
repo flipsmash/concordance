@@ -2922,9 +2922,11 @@ def foreign_only_langs(conn, lemmas, wikt_schema: str = "wikt") -> dict[str, lis
         return {term: langs for term, langs in cur.fetchall()}
 
 
-def english_reference_terms(conn, lemmas) -> set[str]:
+def english_reference_terms(conn, lemmas, *, exclude_misspelling_glosses: bool = False) -> set[str]:
     """The lemmas (lowercased) with an entry in the local English Wiktionary
-    (vocab.wiktionary) or 0 Dict (oed.entry) -- one query for the batch."""
+    (vocab.wiktionary) or 0 Dict (oed.entry) -- one query for the batch.
+    exclude_misspelling_glosses: a Wiktionary entry that only says
+    "misspelling of X" doesn't count (Wiktionary lists common typos)."""
     lemmas = sorted({l.lower() for l in lemmas})
     if not lemmas:
         return set()
@@ -2933,7 +2935,9 @@ def english_reference_terms(conn, lemmas) -> set[str]:
         have_wik, have_oed = cur.fetchone()
         found: set[str] = set()
         if have_wik:
-            cur.execute("SELECT lower(term) FROM vocab.wiktionary WHERE term = ANY(%s) OR term = ANY(%s)",
+            cur.execute("SELECT lower(term) FROM vocab.wiktionary WHERE (term = ANY(%s) OR term = ANY(%s))"
+                        + (" AND definition !~* '(misspelling|misspelt|typo(graphical)? error) (of|for)'"
+                           if exclude_misspelling_glosses else ""),
                         (lemmas, [l.capitalize() for l in lemmas]))
             found |= {r[0] for r in cur.fetchall()}
         if have_oed:
@@ -2950,19 +2954,35 @@ def clear_stale_foreign_flags(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool
     glaive). Clear the flag wherever validity_score.english_evidence finds
     any sign of English use; the rest keep it for review. Dry run unless
     `apply`."""
+    return _clear_stale_flags(conn, schema, "foreign_language", apply=apply, strict=False)
+
+
+def clear_stale_misspelling_flags(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool = False) -> dict:
+    """`concordance clear-misspelling-flags`: the SymSpell near-neighbor
+    heuristic (validity_score.unambiguous_dominant_neighbor) flagged ~9k
+    active words 'misspelling', mostly real words (titlark -> "titular",
+    gasalier -> "cavalier"). Clear the flag where a CURATED source vouches
+    for the word -- English Wiktionary (not a "misspelling of" gloss), 0
+    Dict, an English dictionary definition, Webster list, WordNet. wordfreq
+    doesn't count: common misspellings have web footprints."""
+    return _clear_stale_flags(conn, schema, "misspelling", apply=apply, strict=True)
+
+
+def _clear_stale_flags(conn, schema: str, reason: str, *, apply: bool, strict: bool) -> dict:
     from .validity_score import english_evidence
     s = _safe_schema(schema)
     with conn.cursor() as cur:
-        cur.execute(f"""SELECT id, lemma_lc, coalesce(definition_source,'') FROM {s}.word
-                        WHERE active AND variant_flag_reason = 'foreign_language'""")
+        cur.execute(f"""SELECT id, lemma_lc, coalesce(definition_source,''), coalesce(definition,'')
+                        FROM {s}.word WHERE active AND variant_flag_reason = %s""", (reason,))
         rows = cur.fetchall()
-    ref = english_reference_terms(conn, [l for _, l, _ in rows])
-    cleared = [(wid, l, ev) for wid, l, src in rows if (ev := english_evidence(l, src, l in ref))]
+    ref = english_reference_terms(conn, [l for _, l, _, _ in rows], exclude_misspelling_glosses=strict)
+    cleared = [(wid, l, ev) for wid, l, src, d in rows
+               if (ev := english_evidence(l, src, l in ref, use_wordfreq=not strict, definition=d))]
     if apply:
         with conn.cursor() as cur:
             cur.execute(f"""UPDATE {s}.word SET variant_flag_reason=NULL, variant_flag_note=NULL
-                            WHERE id = ANY(%s) AND variant_flag_reason = 'foreign_language'""",
-                        ([wid for wid, _, _ in cleared],))
+                            WHERE id = ANY(%s) AND variant_flag_reason = %s""",
+                        ([wid for wid, _, _ in cleared], reason))
         conn.commit()
     return {"flagged": len(rows), "cleared": len(cleared), "kept": len(rows) - len(cleared),
             "actions": cleared}

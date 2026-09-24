@@ -1567,6 +1567,30 @@ def clean_context_language(
                   f"[bold]{stats['cast_out']}[/bold] cast out")
 
 
+@app.command("clear-misspelling-flags")
+def clear_misspelling_flags(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    apply: bool = typer.Option(False, "--apply", help="Write changes (default: dry run, list only)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Clear the old heuristic 'misspelling' review flag from active words a
+    curated source vouches for (English Wiktionary entry that isn't a
+    "misspelling of" gloss, 0 Dict, English dictionary definition, Webster
+    list, WordNet). wordfreq doesn't count -- typos have web footprints."""
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    db.apply_schema(conn, schema)
+    stats = db.clear_stale_misspelling_flags(conn, schema, apply=apply)
+    conn.close()
+    if not apply:
+        for _wid, lemma, ev in stats["actions"]:
+            console.print(f"  {lemma}  [dim]{ev}[/dim]")
+    console.print(f"[green]✓[/green] clear-misspelling-flags{'' if apply else ' (dry run)'}: "
+                  f"[bold]{stats['cleared']}[/bold] of {stats['flagged']} cleared, {stats['kept']} kept for review")
+
+
 @app.command("expand-synonyms")
 def expand_synonyms(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),

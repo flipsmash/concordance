@@ -2961,3 +2961,33 @@ def test_clear_stale_foreign_flags():
         assert got == {"haft": None, "zzdefd": None, "zzbeber": "foreign_language"}
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
+
+
+@pg
+def test_clear_stale_misspelling_flags():
+    from concordance.model import Candidate
+    schema = "cc_test_clear_misspelling_flags"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    def cand(lemma, src, definition):
+        c = Candidate(lemma=lemma, pos="NOUN"); c.definition = definition; c.definition_source = src; return c
+    db.sync_book_results(conn, "Book A", kept=[
+        cand("titlark", "", ""),                                        # WordNet / Webster list
+        cand("zzfashinable", "Web (LLM-extracted)", "stylish"),          # no curated source
+        cand("zzglossed", "Merriam-Webster API", "A kind of lamp."),     # English dictionary
+        cand("zztypo", "Wiktionary", "Misspelling of typo."),           # gloss is itself a typo note
+    ], rejected=[], schema=schema)
+    with conn.cursor() as cur:
+        cur.execute(f"UPDATE {schema}.word SET variant_flag_reason='misspelling'")
+    conn.commit()
+    db.clear_stale_misspelling_flags(conn, schema, apply=True)
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT lemma, variant_flag_reason FROM {schema}.word")
+        assert dict(cur.fetchall()) == {"titlark": None, "zzglossed": None,
+                                        "zzfashinable": "misspelling", "zztypo": "misspelling"}
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()

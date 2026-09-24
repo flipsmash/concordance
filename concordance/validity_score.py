@@ -374,18 +374,28 @@ _NON_ENGLISH_EVIDENCE_SOURCES = frozenset({"", "datamuse", "dm", "Web (LLM-extra
 _FOREIGN_MAX_EN_ZIPF = 2.0
 
 
-def english_evidence(word: str, definition_source: str | None, in_english_reference: bool) -> str | None:
+_MISSPELLING_GLOSS_RE = re.compile(r"\b(misspelling|misspelt|typo)\b", re.IGNORECASE)
+
+
+def english_evidence(word: str, definition_source: str | None, in_english_reference: bool,
+                     *, use_wordfreq: bool = True, definition: str | None = None) -> str | None:
     """The first sign `word` is used in English, or None: an English
     Wiktionary / 0 Dict entry (`in_english_reference`, looked up in bulk by
     db.english_reference_terms), a definition from an English dictionary, an
     English wordfreq Zipf >= 2.0, the Webster-derived list, or WordNet. The
-    same signals foreign_cast_out_reason requires ALL be absent."""
+    same signals foreign_cast_out_reason requires ALL be absent.
+
+    For a suspected MISSPELLING pass use_wordfreq=False -- common misspellings
+    have real web footprints, so only curated sources count -- and the
+    definition, so a dictionary that merely glosses it as "misspelling of X"
+    doesn't count as vouching for it."""
     w = word.strip().lower()
     if in_english_reference:
         return "English Wiktionary / 0 Dict entry"
-    if (definition_source or "").split(" (synonym")[0] not in _NON_ENGLISH_EVIDENCE_SOURCES:
+    if ((definition_source or "").split(" (synonym")[0] not in _NON_ENGLISH_EVIDENCE_SOURCES
+            and not _MISSPELLING_GLOSS_RE.search(definition or "")):
         return f"defined by {definition_source}"
-    if zipf_frequency(w, "en") >= _FOREIGN_MAX_EN_ZIPF:
+    if use_wordfreq and zipf_frequency(w, "en") >= _FOREIGN_MAX_EN_ZIPF:
         return "common in English (wordfreq)"
     if w in _wordset():
         return "in the Webster word list"

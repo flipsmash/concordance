@@ -307,3 +307,13 @@ def test_english_evidence():
     assert e("haft", "", False)                                # wordfreq / wordlist
     assert e("zzqx", "datamuse", False) is None
     assert e("zzqx", "Web (LLM-extracted)", False) is None
+
+
+def test_english_evidence_strict_mode_for_misspellings():
+    from concordance.validity_score import english_evidence as e
+    # common typos have web footprints: wordfreq alone doesn't clear a misspelling flag
+    assert e("recieve", "", False, use_wordfreq=True)
+    assert e("recieve", "", False, use_wordfreq=False) is None
+    # a dictionary that only glosses it as a misspelling doesn't vouch for it
+    assert e("zzqx", "Wiktionary", False, use_wordfreq=False, definition="Misspelling of receive.") is None
+    assert e("zzqx", "Wiktionary", False, use_wordfreq=False, definition="A small songbird.")

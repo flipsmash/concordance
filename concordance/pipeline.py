@@ -256,6 +256,8 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
         # adds the per-word English-usage checks. Latin/Greek never qualify.
         foreign = db.foreign_only_langs(conn, [c.lemma for c in shortlist])
         english_ref = db.english_reference_terms(conn, [c.lemma for c in shortlist])
+        curated_ref = db.english_reference_terms(conn, [c.lemma for c in shortlist],
+                                                 exclude_misspelling_glosses=True)
         for cand in shortlist:
             if cand.verdict is Verdict.DROP:
                 # Already cast out above (e.g. _enrich_one's MW foreign-
@@ -299,6 +301,11 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
                     and validity_score.english_evidence(cand.lemma, cand.definition_source,
                                                         cand.lemma.lower() in english_ref)):
                 variant = None   # the zipf-only foreign hint is outweighed by any English evidence
+            if (variant and variant[0] is RejectReason.MISSPELLING
+                    and validity_score.english_evidence(
+                        cand.lemma, cand.definition_source, cand.lemma.lower() in curated_ref,
+                        use_wordfreq=False, definition=cand.definition)):
+                variant = None   # a curated source vouches for it -- not a typo of its neighbor
             if variant:
                 cand.variant_flag_reason, cand.variant_flag_note = variant[0].value, variant[1]
                 flagged += 1
