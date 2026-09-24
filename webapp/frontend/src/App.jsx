@@ -39,6 +39,7 @@ const CategorySubsubfieldDetail = lazy(() => import('./CategorySubsubfieldDetail
 const CategorySubsubsubfieldDetail = lazy(() => import('./CategorySubsubsubfieldDetail'))
 const Visualizations = lazy(() => import('./Visualizations'))
 const DomainMap = lazy(() => import('./DomainMap'))
+const CategoryTree = lazy(() => import('./CategoryTree'))
 const Sets = lazy(() => import('./Sets'))
 const SetDetail = lazy(() => import('./SetDetail'))
 const FlashcardRun = lazy(() => import('./FlashcardRun'))
@@ -144,6 +145,14 @@ function App() {
               element={
                 <Suspense fallback={<div className="page-loading">Loading…</div>}>
                   <Visualizations />
+                </Suspense>
+              }
+            />
+            <Route
+              path="visualizations/category-tree"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <CategoryTree />
                 </Suspense>
               }
             />

@@ -13,6 +13,7 @@ import { usePagedTable } from './usePagedTable'
 import './Browse.css'
 
 const API_BASE = ''
+const WORD_SORTS = new Set(['lemma', 'difficulty', 'part_of_speech', 'book_count'])
 const ARCHAIC_VALUES = ['current', 'dated', 'archaic', 'obsolete']
 const PAGE_SIZE = 30
 const SORT_FIELDS = [
@@ -340,8 +341,10 @@ function Browse() {
     usePagedTable({
       endpoint: '/api/browse/words',
       pageSize: PAGE_SIZE,
-      defaultSort: 'lemma',
-      defaultDir: 'asc',
+      // A deep link can open pre-sorted (the category tree's "all N →" asks
+      // for most-used first); only the first render reads it.
+      defaultSort: WORD_SORTS.has(searchParams.get('sort')) ? searchParams.get('sort') : 'lemma',
+      defaultDir: searchParams.get('dir') === 'desc' ? 'desc' : 'asc',
       extraParams: {
         author: author || '',
         book_id: bookIds,

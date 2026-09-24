@@ -36,7 +36,9 @@ Mixing these up in either direction is the bug to avoid.
 from __future__ import annotations
 
 import itertools
+import json
 import math
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Literal
@@ -3607,3 +3609,117 @@ def browse_domain_map(
             nodes = _domain_vectors_to_map(tuples, id_is_int=False)
 
     return DomainMapResponse(entity=entity, nodes=nodes)
+
+
+# --- /api/browse/categories/dendrogram -----------------------------------
+#
+# Every LEAF USAS category (no child categories) that has active words,
+# clustered by meaning: each leaf's centroid is the mean definition
+# embedding of its active words, joined by average linkage on cosine
+# distance (the usual pairing for embeddings), so semantically neighbouring
+# categories sit together even across USAS branches (the time fields
+# cluster; food/drink/drugs cluster; measurement sits with numbers). Leaves
+# arrive in dendrogram order, each carrying its most-used words (by how many
+# books use them) for the page's inline word strip.
+#
+# ~200 leaves -> computed on request (one ~2s aggregate query + a trivial
+# linkage), cached in-process for an hour per schema rather than a new
+# precompute table: category membership changes only when words are
+# classified/pruned, and an hour-stale strip is harmless.
+
+_CATEGORY_TREE_WORDS = 40                 # words per leaf strip (the page shows as many as fit)
+_CATEGORY_TREE_TTL = 3600
+_category_tree_cache: dict[str, tuple[float, "CategoryDendrogramResponse"]] = {}
+
+
+class CategoryTreeWord(BaseModel):
+    id: int
+    lemma: str
+    book_count: int
+
+
+class CategoryTreeLeaf(BaseModel):
+    code: str
+    name: str
+    bucket: str | None           # usas_domains color bucket of its top-level field
+    word_count: int
+    words: list[CategoryTreeWord]  # most-used first (book count desc, then lemma)
+
+
+class CategoryDendrogramNode(BaseModel):
+    code: str | None = None      # set on leaves only
+    size: int
+    distance: float | None = None
+    left: "CategoryDendrogramNode | None" = None
+    right: "CategoryDendrogramNode | None" = None
+
+
+CategoryDendrogramNode.model_rebuild()
+
+
+class CategoryDendrogramResponse(BaseModel):
+    tree: CategoryDendrogramNode | None
+    leaves: list[CategoryTreeLeaf]  # dendrogram (top-to-bottom) order
+
+
+def _category_dendrogram_compute(schema: str) -> CategoryDendrogramResponse:
+    import numpy as np
+    from scipy.cluster.hierarchy import linkage, to_tree
+
+    leaf_cte = f"""leaf AS (SELECT c.id, c.code, c.name FROM {schema}.category c
+                            WHERE NOT EXISTS (SELECT 1 FROM {schema}.category k WHERE k.parent_id = c.id))"""
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"""WITH {leaf_cte}
+            SELECT l.code, l.name, count(DISTINCT w.id), avg(e.definition_vector)::text
+            FROM leaf l
+            JOIN {schema}.word_category wc ON wc.category_id = l.id
+            JOIN {schema}.word w ON w.id = wc.word_id AND w.active
+            LEFT JOIN {schema}.word_embedding e ON e.word_id = w.id
+            GROUP BY l.code, l.name""")
+        stats = [r for r in cur.fetchall() if r[3]]      # a leaf with no embedded word can't be placed
+        cur.execute(f"""WITH {leaf_cte},
+            bc AS (SELECT word_id, count(*) AS n FROM {schema}.word_book GROUP BY word_id),
+            ranked AS (
+                SELECT l.code, w.id, w.lemma, coalesce(bc.n, 0) AS n,
+                       row_number() OVER (PARTITION BY l.code
+                                          ORDER BY coalesce(bc.n, 0) DESC, w.lemma_lc) AS rk
+                FROM leaf l
+                JOIN {schema}.word_category wc ON wc.category_id = l.id
+                JOIN {schema}.word w ON w.id = wc.word_id AND w.active
+                LEFT JOIN bc ON bc.word_id = w.id)
+            SELECT code, id, lemma, n FROM ranked WHERE rk <= %s ORDER BY code, rk""",
+                    (_CATEGORY_TREE_WORDS,))
+        words: dict[str, list[CategoryTreeWord]] = {}
+        for code, wid, lemma, n in cur.fetchall():
+            words.setdefault(code, []).append(CategoryTreeWord(id=wid, lemma=lemma, book_count=n))
+    if not stats:
+        return CategoryDendrogramResponse(tree=None, leaves=[])
+    leaves = [CategoryTreeLeaf(code=code, name=name, word_count=n, words=words.get(code, []),
+                               bucket=usas_domains.bucket_for(code[0]))
+              for code, name, n, _vec in stats]
+    if len(leaves) == 1:
+        return CategoryDendrogramResponse(tree=CategoryDendrogramNode(code=leaves[0].code, size=1),
+                                          leaves=leaves)
+    # pgvector's text form is "[x,y,...]" -- valid JSON.
+    X = np.array([json.loads(vec) for *_, vec in stats])
+    root = to_tree(linkage(X, method="average", metric="cosine"))
+
+    def build(node) -> CategoryDendrogramNode:
+        if node.is_leaf():
+            return CategoryDendrogramNode(code=leaves[node.id].code, size=1)
+        return CategoryDendrogramNode(size=node.count, distance=float(node.dist),
+                                      left=build(node.left), right=build(node.right))
+
+    ordered = [leaves[i] for i in root.pre_order()]
+    return CategoryDendrogramResponse(tree=build(root), leaves=ordered)
+
+
+@router.get("/api/browse/categories/dendrogram", response_model=CategoryDendrogramResponse)
+def categories_dendrogram(_: dict = Depends(_main.require_viewer)) -> CategoryDendrogramResponse:
+    now = time.monotonic()
+    hit = _category_tree_cache.get(_main.SCHEMA)
+    if hit and now - hit[0] < _CATEGORY_TREE_TTL:
+        return hit[1]
+    result = _category_dendrogram_compute(_main.SCHEMA)
+    _category_tree_cache[_main.SCHEMA] = (now, result)
+    return result

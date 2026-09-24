@@ -305,6 +305,17 @@ function Visualizations() {
       </section>
 
       <section className="browse-facets viz-section">
+        <h2 className="viz-heading">Categories by meaning</h2>
+        <p className="viz-description">
+          Every finest-grained subject category in a dendrogram, clustered by what its words
+          mean, with each category&rsquo;s words listed alongside, most-used first.
+        </p>
+        <Link to="/app/visualizations/category-tree" className="browse-quiz-link">
+          Open the tree →
+        </Link>
+      </section>
+
+      <section className="browse-facets viz-section">
         <h2 className="viz-heading">Works &amp; authors by discipline category</h2>
         <p className="viz-description">
           See how vocabulary distributes across subject-matter fields (science, law, arts…) --

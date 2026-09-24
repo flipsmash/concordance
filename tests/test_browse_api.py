@@ -2285,3 +2285,44 @@ def test_category_leaders_top_code_counts_descendant_too():
         assert items[0]["category_word_count"] == 20
     finally:
         restore()
+
+
+@pg
+def test_categories_dendrogram_clusters_by_meaning_and_orders_words_by_book_count():
+    schema = "cc_test_category_dendrogram"
+    client, conn, restore = _setup(schema)
+    try:
+        def vec(axis):
+            v = [0.0] * 384
+            v[axis] = 1.0
+            v[2] = 0.05                     # keep every vector non-degenerate
+            return "[" + ",".join(map(str, v)) + "]"
+
+        parent = _category(conn, schema, "F", "Food & Farming", level=0)
+        f1 = _category(conn, schema, "F1", "Food", level=1)
+        f2 = _category(conn, schema, "F2", "Drinks", level=1)
+        t1 = _category(conn, schema, "T1", "Time", level=1)
+        with conn.cursor() as cur:
+            cur.execute(f"UPDATE {schema}.category SET parent_id=%s WHERE id IN (%s, %s)", (parent, f1, f2))
+        books = [_insert_book(conn, schema, f"Book {i}") for i in range(3)]
+        for lemma, cat, axis, nbooks in [("bread", f1, 0, 1), ("pottage", f1, 0, 3),
+                                         ("ale", f2, 0, 2), ("hour", t1, 1, 1)]:
+            wid = _insert_word(conn, schema, lemma)
+            _tag_domain(conn, schema, wid, cat)
+            for b in books[:nbooks]:
+                _link(conn, schema, wid, b)
+            with conn.cursor() as cur:
+                cur.execute(f"INSERT INTO {schema}.word_embedding (word_id, definition_vector) VALUES (%s, %s)",
+                            (wid, vec(axis)))
+        conn.commit()
+
+        data = client.get("/api/browse/categories/dendrogram").json()
+        codes = [leaf["code"] for leaf in data["leaves"]]
+        assert sorted(codes) == ["F1", "F2", "T1"]          # the non-leaf parent F is excluded
+        assert abs(codes.index("F1") - codes.index("F2")) == 1  # similar meaning -> adjacent
+        f1_leaf = next(leaf for leaf in data["leaves"] if leaf["code"] == "F1")
+        assert [w["lemma"] for w in f1_leaf["words"]] == ["pottage", "bread"]   # most books first
+        assert f1_leaf["word_count"] == 2 and f1_leaf["bucket"]
+        assert data["tree"]["size"] == 3
+    finally:
+        restore()

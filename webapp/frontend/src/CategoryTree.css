@@ -1,0 +1,181 @@
+/* Category dendrogram page. Tokens from AppShell.css's :root (light/dark
+   handled there): --paper/--paper-raised/--ink/--ink-soft/--rule/
+   --rule-strong/--rail-accent/--gild and the three font roles. Rows and
+   the SVG share --row-h so every leaf lands exactly on its row. */
+
+.cattree-page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 28px 24px 64px;
+}
+
+.cattree-crumb {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--ink-soft);
+  text-decoration: none;
+}
+
+.cattree-crumb:hover {
+  color: var(--rail-accent);
+}
+
+.cattree-title {
+  margin: 10px 0 6px;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 30px;
+  color: var(--ink);
+}
+
+.cattree-lede {
+  margin: 0 0 22px;
+  max-width: 680px;
+  font-family: var(--font-ui);
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+
+.cattree-body {
+  display: flex;
+  align-items: flex-start;
+  border-top: 1px solid var(--rule);
+}
+
+.cattree-svg {
+  flex-shrink: 0;
+  overflow: visible;
+}
+
+.cattree-link path {
+  fill: none;
+  stroke: var(--rule-strong);
+  stroke-width: 1.2;
+  transition: stroke 120ms ease;
+}
+
+.cattree-link.is-hot path {
+  stroke: var(--gild);
+  stroke-width: 2;
+}
+
+.cattree-rows {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cattree-row {
+  display: grid;
+  grid-template-columns: 4px 58px minmax(120px, 230px) 52px minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 10px;
+  height: var(--row-h);
+  padding-right: 6px;
+  border-bottom: 1px dotted var(--rule);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.cattree-row.is-hot {
+  background: var(--paper-raised);
+}
+
+.cattree-swatch {
+  align-self: stretch;
+  margin: 6px 0;
+  border-radius: 2px;
+}
+
+.cattree-code {
+  font-family: var(--font-data);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.cattree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.cattree-count {
+  font-family: var(--font-data);
+  font-size: 11.5px;
+  text-align: right;
+  color: var(--ink-soft);
+}
+
+/* The strip holds 40 words; only what fits shows, fading out at the edge. */
+.cattree-words {
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent);
+  font-family: var(--font-display);
+  font-size: 14px;
+  color: var(--ink);
+}
+
+.cattree-word {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+}
+
+.cattree-word:hover {
+  color: var(--rail-accent);
+  border-bottom-color: var(--rail-accent);
+}
+
+.cattree-sep {
+  color: var(--rule-strong);
+}
+
+.cattree-more {
+  font-size: 12px;
+  color: var(--ink-soft);
+  text-decoration: none;
+}
+
+.cattree-more:hover,
+.cattree-row.is-hot .cattree-more {
+  color: var(--rail-accent);
+}
+
+.cattree-word:focus-visible,
+.cattree-more:focus-visible {
+  outline: 2px solid var(--rail-accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cattree-link path { transition: none; }
+}
+
+/* Phones: the tree can't share a 30px row with the text, so it drops out
+   (the rows keep dendrogram order) and each row becomes two lines. */
+@media (max-width: 720px) {
+  .cattree-page { padding: 20px 16px 48px; }
+  .cattree-svg { display: none; }
+  .cattree-row {
+    grid-template-columns: 4px 52px minmax(0, 1fr) auto;
+    grid-template-areas:
+      "sw code name count"
+      "sw words words more";
+    height: auto;
+    row-gap: 2px;
+    padding: 6px 0;
+  }
+  .cattree-swatch { grid-area: sw; }
+  .cattree-code { grid-area: code; }
+  .cattree-name { grid-area: name; }
+  .cattree-count { grid-area: count; }
+  .cattree-words { grid-area: words; }
+  .cattree-more { grid-area: more; }
+}
