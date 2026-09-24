@@ -23,6 +23,18 @@ from webapp.backend import main as _main
 router = APIRouter()
 
 
+class WordOfTheDay(BaseModel):
+    id: int
+    lemma: str
+    part_of_speech: str | None
+    definition: str
+    difficulty: float
+
+
+# Word-of-the-day eligibility: hard but real, cleanly defined vocabulary.
+_WOTD_MIN_DIFFICULTY, _WOTD_MAX_DIFFICULTY = 75, 100
+
+
 class HomeSummary(BaseModel):
     total_words: int
     total_books: int
@@ -32,6 +44,7 @@ class HomeSummary(BaseModel):
     most_acclaimed_author: str | None
     hardest_word: str | None
     quiz_questions_answered: int
+    word_of_the_day: WordOfTheDay | None
 
 
 @router.get("/api/home/summary", response_model=HomeSummary)
@@ -99,6 +112,28 @@ def home_summary(_: dict = Depends(_main.require_viewer)) -> HomeSummary:
         )
         quiz_questions_answered = cur.fetchone()[0]
 
+        # "Random" but stable for the whole day and the same for every viewer:
+        # order the eligible pool by a hash of (word id, today's date) --
+        # no stored state, rotates at midnight server time. Quizzable rules
+        # out cross-reference definitions ("form of X"); flagged/artifact
+        # words are ones a curator hasn't cleared.
+        cur.execute(
+            f"""SELECT w.id, w.lemma, w.part_of_speech, w.definition, wd.difficulty
+                FROM {_main.SCHEMA}.word w
+                JOIN {_main.SCHEMA}.word_difficulty wd ON wd.word_id = w.id
+                WHERE w.active AND wd.quizzable
+                  AND wd.difficulty BETWEEN %s AND %s
+                  AND coalesce(w.definition, '') <> ''
+                  AND w.variant_flag_reason IS NULL
+                  AND coalesce(w.validity_label, '') <> 'likely-artifact'
+                ORDER BY md5(w.id::text || current_date::text)
+                LIMIT 1""",
+            (_WOTD_MIN_DIFFICULTY, _WOTD_MAX_DIFFICULTY),
+        )
+        row = cur.fetchone()
+        word_of_the_day = (WordOfTheDay(id=row[0], lemma=row[1], part_of_speech=row[2],
+                                        definition=row[3], difficulty=row[4]) if row else None)
+
     # Not a query -- usas.categories()'s level field marks the 21 top-level
     # USAS discourse fields, the same fixed set browse.py's own _TOP_CODES
     # derives at import time (its own comment: "21 static (code, name) pairs
@@ -115,4 +150,5 @@ def home_summary(_: dict = Depends(_main.require_viewer)) -> HomeSummary:
         most_acclaimed_author=most_acclaimed_author,
         hardest_word=hardest_word,
         quiz_questions_answered=quiz_questions_answered,
+        word_of_the_day=word_of_the_day,
     )

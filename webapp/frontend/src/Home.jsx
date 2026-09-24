@@ -22,6 +22,35 @@ function Num({ n }) {
   return <span className="home-num">{fmt.format(n)}</span>
 }
 
+// First sense only, and without a leading "(label)" -- the card has room for
+// one clean line of meaning; the entry page carries the rest.
+function firstSense(definition) {
+  const first = definition.split(/;\s+/)[0].trim()
+  return first.replace(/^\([^)]*\)\s*/, '').replace(/\.?$/, '.')
+}
+
+const dayFmt = new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric' })
+
+function WordOfTheDay({ word }) {
+  return (
+    <Link to={`/app/words/${word.id}`} className="home-wotd">
+      <div className="home-wotd-eyebrow">
+        <span>Word of the Day</span>
+        <span className="home-wotd-date">{dayFmt.format(new Date())}</span>
+      </div>
+      <div className="home-wotd-head">
+        <span className="home-wotd-lemma">{word.lemma}</span>
+        {word.part_of_speech && <span className="home-wotd-pos">{word.part_of_speech}</span>}
+      </div>
+      <p className="home-wotd-def">{firstSense(word.definition)}</p>
+      <div className="home-wotd-foot">
+        <span className="home-wotd-difficulty">difficulty {Math.round(word.difficulty)}</span>
+        <span className="home-wotd-more">See entry <span aria-hidden="true">→</span></span>
+      </div>
+    </Link>
+  )
+}
+
 function Home() {
   const [summary, setSummary] = useState(null)
   const [error, setError] = useState('')
@@ -63,6 +92,8 @@ function Home() {
           principal words in a body of work, with the passages in which they occur.
         </p>
       </div>
+
+      {summary.word_of_the_day && <WordOfTheDay word={summary.word_of_the_day} />}
 
       <hr className="home-rule" />
 

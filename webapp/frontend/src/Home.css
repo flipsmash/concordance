@@ -44,6 +44,118 @@
   font-weight: 700;
 }
 
+/* Word of the day: a raised index card with a gilt spine -- upright sans
+   definition, so it reads as an entry, not a second italic epigraph like
+   the concordance definition above it. */
+.home-wotd {
+  display: block;
+  margin: 34px auto 0;
+  max-width: 460px;
+  padding: 18px 22px 16px 24px;
+  background: var(--paper-raised);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--gild);
+  border-radius: 4px;
+  text-decoration: none;
+  color: var(--ink);
+  text-align: left;
+  animation: home-rise 260ms ease-out;
+  transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+
+.home-wotd:hover {
+  border-color: var(--rule-strong);
+  border-left-color: var(--gild);
+  box-shadow: 0 6px 18px -12px rgba(0, 0, 0, 0.45);
+  transform: translateY(-1px);
+}
+
+.home-wotd:focus-visible {
+  outline: 2px solid var(--rail-accent);
+  outline-offset: 3px;
+}
+
+.home-wotd-eyebrow {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--gild);
+}
+
+.home-wotd-date {
+  font-family: var(--font-data);
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  color: var(--ink-soft);
+}
+
+.home-wotd-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.home-wotd-lemma {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 30px;
+  line-height: 1.15;
+  color: var(--rail-accent);
+  overflow-wrap: anywhere;
+}
+
+.home-wotd-pos {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 15px;
+  color: var(--ink-soft);
+}
+
+.home-wotd-def {
+  margin: 8px 0 0;
+  font-family: var(--font-ui);
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--ink);
+}
+
+.home-wotd-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dotted var(--rule-strong);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.home-wotd-difficulty {
+  font-family: var(--font-data);
+}
+
+.home-wotd-more {
+  transition: color 120ms ease;
+}
+
+.home-wotd:hover .home-wotd-more {
+  color: var(--rail-accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-wotd { animation: none; transition: none; }
+  .home-wotd:hover { transform: none; }
+}
+
 .home-rule {
   margin: 34px auto;
   width: 140px;
@@ -153,5 +265,11 @@
   }
   .home-colophon {
     font-size: 18px;
+  }
+  .home-wotd {
+    padding: 16px 16px 14px 18px;
+  }
+  .home-wotd-lemma {
+    font-size: 26px;
   }
 }
