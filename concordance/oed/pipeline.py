@@ -232,7 +232,8 @@ def _flush_pronunciation(conn: psycopg.Connection, batch: list[tuple[int, fitz.P
         )
 
 
-def _prune_out_of_order(conn: psycopg.Connection, volume_id: int, cfg: OedConfig) -> int:
+def _prune_out_of_order(conn: psycopg.Connection, volume_id: int, cfg: OedConfig,
+                        only_detector: str | None = None) -> int:
     """sequence.py's whole-volume alphabetical-order cleanup (see
     ingest_volume) -- deletes entries out of first-letter order.
 
@@ -244,9 +245,16 @@ def _prune_out_of_order(conn: psycopg.Connection, volume_id: int, cfg: OedConfig
     from the 04:00 backup. Within one page the relative order of old and new
     rows doesn't matter at first-letter granularity."""
     with conn.cursor() as cur:
-        cur.execute(f"select id, headword from {cfg.schema}.entry where volume_id = %s "
+        cur.execute(f"select id, headword, detector from {cfg.schema}.entry where volume_id = %s "
                     f"order by page_number, id", (volume_id,))
-        out_of_order = sequence.find_out_of_order_ids(cur.fetchall())
+        rows = cur.fetchall()
+        out_of_order = sequence.find_out_of_order_ids([(i, h) for i, h, _ in rows])
+        if only_detector:
+            # The check sees the whole volume but may only delete this pass's
+            # own rows: LNDS ties are broken arbitrarily, and a noisy neighbour
+            # ("fthro") once cost a real original entry ("throat").
+            det = {i: d for i, _, d in rows}
+            out_of_order = {i for i in out_of_order if det[i] == only_detector}
         if out_of_order:
             cur.execute(f"delete from {cfg.schema}.entry where id = any(%s)", (list(out_of_order),))
     return len(out_of_order)
@@ -322,7 +330,7 @@ def add_missing_entries(path: Path, conn: psycopg.Connection, cfg: OedConfig, co
         if not dry_run and page_num % 50 == 0:
             conn.commit()
     if not dry_run:
-        stats["pruned"] = _prune_out_of_order(conn, volume_id, cfg)
+        stats["pruned"] = _prune_out_of_order(conn, volume_id, cfg, only_detector="v2")
         conn.commit()
     return stats
 

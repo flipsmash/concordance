@@ -276,6 +276,15 @@ def test_prune_out_of_order_survives_appended_second_pass():
         add(hw, page, "v2")
     conn.commit()
     assert _prune_out_of_order(conn, vid, OedConfig(schema=schema)) == 0
+    # a noisy v2 row that breaks order is removable; an original v1 row never is
+    add("zebra", 0, "v2")
+    add("aardvark", 3, "v1")
+    conn.commit()
+    _prune_out_of_order(conn, vid, OedConfig(schema=schema), only_detector="v2")
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT headword FROM {schema}.entry ORDER BY id")
+        left = [r[0] for r in cur.fetchall()]
+    assert "aardvark" in left and "zebra" not in left
     with conn.cursor() as cur:
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
