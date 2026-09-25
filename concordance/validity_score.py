@@ -284,70 +284,6 @@ def script_reject_reason(word: str, min_zipf: float) -> tuple[str, str] | None:
     return None
 
 
-# A definition that is ONLY a dialect/eye-dialect respelling cross-reference
-# ("Pronunciation spelling of better.", "A dialectal form of folk."),
-# optionally behind leading "(label)" qualifiers. "form of" only counts after
-# dialect(al)/nonstandard -- "An informal form of address" (guvnor) is a real
-# word's gloss, not a respelling. A definition that opens with a real sense
-# and mentions a respelling later (nucular) deliberately doesn't match.
-_DIALECT_DEF_RE = re.compile(
-    r"^\s*(?:\([^)]*\)\s*)*(?:(?:an?|the)\s+)?(?:(?:obsolete|archaic|rare)\s+(?:or|and)\s+)?"
-    r"(?:(?:eye[- ]dialect|pronunciation|non-?standard|informal|colloquial)\s+spelling"
-    r"|(?:dialect(?:al)?|non-?standard)\s+(?:spelling|form))"
-    r"\s+of\s+([^,.;:(\[]+)", re.IGNORECASE)
-
-
-def dialect_respelling_target(definition: str | None) -> str | None:
-    """The standard word a dialect/eye-dialect respelling points at (bettah ->
-    "better", bimeby -> "by and by"), or None if `definition` isn't purely
-    such a cross-reference. Detection is by the definition, never by the
-    word's shape: a dropped-g pattern (-in for -ing) matched only real words
-    live (survivin/securin are proteins, likin/gamin/matin real nouns)."""
-    m = _DIALECT_DEF_RE.match(definition or "")
-    if not m:
-        return None
-    target = m.group(1).strip().strip("'\"").lower()
-    return target or None
-
-
-# "(archaic) third-person singular simple present indicative of think" --
-# Wiktionary's gloss for an archaic verb inflection (thinketh, findest).
-_ARCHAIC_INFLECTION_DEF_RE = re.compile(
-    r"^\s*(?:\([^)]*\)\s*)*(?:archaic\s+)?(?:second|third)-person singular\b[^;.]*?\bof\s+([a-z][a-z'-]*)",
-    re.IGNORECASE)
-
-
-def archaic_inflection_target(word: str, definition: str | None) -> str | None:
-    """The base verb of an archaic -eth/-est inflection (thinketh -> "think",
-    risest -> "rise"), by definition AND shape together: the definition must
-    be Wiktionary's person/number inflection gloss and the word must carry the
-    archaic ending. Shape alone is useless (hest, gest, queth, prest, teth are
-    real words; worldliest/stickiest are ordinary superlatives)."""
-    if not re.search(r"(?:eth|est|th|st)$", word.strip().lower()):
-        return None
-    m = _ARCHAIC_INFLECTION_DEF_RE.match(definition or "")
-    return m.group(1).lower() if m else None
-
-
-# "Obsolete spelling of bread.", "An obsolete form of spill.", "Archaic
-# spelling of boulder." -- a word whose ENTIRE gloss is a pointer to its
-# modern spelling (design rule 3). Leading "(label)" qualifiers allowed; a
-# definition opening with a real sense (entiendo, remigate) doesn't match.
-_OBSOLETE_SPELLING_DEF_RE = re.compile(
-    r"^\s*(?:\([^)]*\)\s*)*(?:(?:an?|the)\s+)?(?:(?:obsolete|archaic|rare|dated)\s+(?:or|and)\s+)?"
-    r"(?:obsolete|archaic)(?:\s+(?:or|and)\s+[a-z]+)?\s+(?:spelling|form)\s+of\s+([^,.;:(\[\u2014]+)",
-    re.IGNORECASE)
-
-
-def obsolete_spelling_target(definition: str | None) -> str | None:
-    """The modern word an obsolete/archaic spelling points at (breade ->
-    "bread", bowpot -> "bough pot"), or None."""
-    m = _OBSOLETE_SPELLING_DEF_RE.match(definition or "")
-    if not m:
-        return None
-    return m.group(1).strip().strip("'\"").lower() or None
-
-
 def early_modern_uv_target(word: str, min_zipf: float) -> str | None:
     """The modern word an early-printing u-for-v spelling stands for
     (reuelation -> "revelation", nerue -> "nerve"), or None. Only fires when
@@ -428,47 +364,6 @@ def foreign_cast_out_reason(word: str, foreign_langs: list[str] | None,
         return None
     shown = ", ".join(sorted(foreign_langs)[:4]) + ("…" if len(foreign_langs) > 4 else "")
     return f"foreign ({shown} per Wiktionary); no English entry or usage"
-
-
-# --- the gloss a classifier / embedder may see ------------------------------
-#
-# A definition that points at another spelling ("Variant spelling of faggot —
-# A bundle of sticks...", "Obsolete form of intend.", "Plural of goblin.")
-# must never let the TARGET word into semantic judgments about THIS word: the
-# target can carry senses the pointer doesn't (faggot's slur sense got fagot
-# tagged S3.2 "Relationship: Intimate/sexual" despite a bundle-of-sticks gloss
-# and a sentence about fagots lit for Latimer and Ridley). Only the pointer's
-# own gloss (after its dash) survives; a bare pointer contributes nothing.
-
-_POINTER_QUALIFIER = (r"(?:alternative|variant|obsolete|archaic|dated|rare|non-?standard|informal|dialect(?:al)?"
-                      r"|eye[- ]dialect|pronunciation|mis-?spelling|standard|british|american|us|uk|scottish"
-                      r"|scots|older|early|later|contracted|clipped|irregular|poetic|historical|rare)")
-_POINTER_RE = re.compile(
-    r"^\s*(?:\([^)]*\)\s*)*(?:(?:an?|the)\s+)?(?:"
-    rf"(?:{_POINTER_QUALIFIER}\s+(?:(?:or|and|,)\s*)?)+(?:spelling|form|variant)s?\s+of\b"
-    r"|(?:variant|plural|misspelling|diminutive)\s+of\b"
-    r"|(?:first|second|third)-person\b[^.;\u2014]{0,80}?\bof\b"
-    r"|(?:simple\s+)?(?:past|present)\s+(?:tense|participle)\b[^.;\u2014]{0,40}?\bof\b"
-    r"|(?:comparative|superlative)\s+(?:form\s+)?of\b"
-    r")", re.IGNORECASE)
-_GLOSS_DASH_RE = re.compile(r"\s(?:\u2014|\u2013|--|-)\s|:\s")
-_CLAUSE_SPLIT_RE = re.compile(r"(?<=[.;])\s+")
-
-
-def classification_gloss(definition: str | None) -> str:
-    """`definition` with every cross-reference to another spelling removed --
-    the text semantic classification (and anything else judging THIS word's
-    meaning) should see. A pointer clause with its own gloss keeps only the
-    gloss; a bare pointer clause is dropped; other clauses pass through."""
-    kept = []
-    for clause in _CLAUSE_SPLIT_RE.split((definition or "").strip()):
-        if not _POINTER_RE.match(clause):
-            kept.append(clause)
-            continue
-        parts = _GLOSS_DASH_RE.split(clause, maxsplit=1)
-        if len(parts) == 2 and parts[1].strip():
-            kept.append(parts[1].strip())
-    return " ".join(kept).strip()
 
 
 def _morph_root(word: str) -> str | None:

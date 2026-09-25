@@ -9,7 +9,7 @@ from pathlib import Path
 from rich.console import Console
 from wordfreq import zipf_frequency
 
-from . import clean, db, extract, floor, judge, localdict, master, mw, output, propernouns, resolve, tokenize, validity, validity_score
+from . import clean, crossref, db, extract, floor, judge, localdict, master, mw, output, propernouns, resolve, tokenize, validity, validity_score
 from .dictionary import make_session
 from .config import Config
 from .model import Candidate, RejectReason, Verdict, junk_pos_reason
@@ -273,10 +273,10 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
                 cast_out += 1
                 continue
             target = kind = None
-            if t := validity_score.dialect_respelling_target(cand.definition):
+            if t := crossref.dialect_respelling_target(cand.definition):
                 target, kind = t, "dialect/eye-dialect spelling"
-            elif t := (validity_score.archaic_inflection_target(cand.lemma, cand.definition)
-                       or validity_score.obsolete_spelling_target(cand.definition)
+            elif t := (crossref.archaic_inflection_target(cand.lemma, cand.definition)
+                       or crossref.obsolete_spelling_target(cand.definition)
                        or validity_score.early_modern_uv_target(cand.lemma, cfg.min_zipf)):
                 target, kind = t, "archaic inflection/spelling"
             if target and zipf_frequency(target, "en") >= cfg.min_zipf:

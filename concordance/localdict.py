@@ -16,7 +16,7 @@ import unicodedata
 from typing import Callable
 
 from .model import Candidate, normalize_pos
-from .quizdef import _VARIANT_RE
+from .crossref import abbreviation_target, is_abbreviation_stub, mentions_pointer
 
 _COARSE_POS = {"NOUN": "noun", "VERB": "verb", "ADJ": "adjective", "ADV": "adverb"}
 
@@ -30,11 +30,8 @@ Entry = tuple[str, str, str, str, bool, bool]  # pos, definition, ipa, etymology
 # letters). The dump gives no way to tell those apart from the label alone,
 # so resolve_stub_definition() ignores the label and resolves X's own real
 # definition instead, choosing an honest relation word by shape.
-_STUB_RE = re.compile(r"^abbreviation of\s+(.+?)\.?$", re.IGNORECASE)
-
-
-def _is_stub(definition: str) -> bool:
-    return bool(_STUB_RE.match((definition or "").strip()))
+# (Parsing lives in crossref.abbreviation_target.)
+_is_stub = is_abbreviation_stub
 
 
 def _fold_accents(s: str) -> str:
@@ -95,10 +92,9 @@ def _resolve_real_gloss(
     definition = (definition or "").strip()
     if not definition or _MARKUP_RESIDUE_RE.search(definition):
         return None
-    m = _STUB_RE.match(definition)
-    if not m:
+    target_raw = abbreviation_target(definition)
+    if target_raw is None:
         return (term, definition)
-    target_raw = re.sub(r"\s*\([^)]*\)\s*$", "", m.group(1).strip())
     if not target_raw:
         return None
     for key in _target_candidates(target_raw):
@@ -118,10 +114,9 @@ def stub_target_phrase(definition: str) -> str | None:
     `definition` isn't a stub. Public so a caller resolving X through a
     source other than the local lexicon (e.g. the online dictionary
     cascade in resolve.py) can look up the same phrase this module would."""
-    m = _STUB_RE.match((definition or "").strip())
-    if not m:
+    target_raw = abbreviation_target(definition)
+    if target_raw is None:
         return None
-    target_raw = re.sub(r"\s*\([^)]*\)\s*$", "", m.group(1).strip())
     target_raw = re.sub(r"#\S+$", "", target_raw).strip()  # strip a MediaWiki #Section anchor
     target_raw = target_raw.strip(" :;,")
     return target_raw or None
@@ -140,9 +135,9 @@ def compose_stub_replacement(headword: str, target_raw: str, gloss: str) -> str 
     # real content (e.g. "Bath chair" -> "Alternative form of Bath chair",
     # literally itself) -- reject rather than compose a definition that's
     # exactly the "just points at another word" problem this function exists
-    # to fix. _VARIANT_RE is quizdef's own test for "this isn't real
+    # to fix. mentions_pointer is quizdef's own test for "this isn't real
     # vocabulary content", reused here for the same judgment.
-    if _VARIANT_RE.search(gloss):
+    if mentions_pointer(gloss):
         return None
     gloss = gloss.split(";")[0].strip()
     # A length gap of 1-2 characters (chiel/chield, gramary/gramarye,
@@ -228,10 +223,7 @@ def stub_target_candidates(definition: str) -> list[str]:
     from stored text, not from a lexicon already covering them -- so
     expand_lexicon_for_stubs's own scan (which only sees words already in
     the lexicon) would miss them entirely."""
-    m = _STUB_RE.match((definition or "").strip())
-    if not m:
-        return []
-    target_raw = re.sub(r"\s*\([^)]*\)\s*$", "", m.group(1).strip())
+    target_raw = abbreviation_target(definition)
     return _target_candidates(target_raw) if target_raw else []
 
 
@@ -246,10 +238,7 @@ def expand_lexicon_for_stubs(conn, lexicon: dict[str, list[Entry]], schema: str 
         needed: set[str] = set()
         for entries in list(lexicon.values()):
             for _pos, definition, *_rest in entries:
-                m = _STUB_RE.match((definition or "").split(";")[0].strip())
-                if not m:
-                    continue
-                target_raw = re.sub(r"\s*\([^)]*\)\s*$", "", m.group(1).strip())
+                target_raw = abbreviation_target((definition or "").split(";")[0])
                 if not target_raw:
                     continue
                 needed.update(k for k in _target_candidates(target_raw) if k not in lexicon)

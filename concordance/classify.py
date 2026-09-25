@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 
 from . import db, usas, wndomains
-from .validity_score import classification_gloss
+from .crossref import classification_gloss
 from .config import Config
 
 # assignable code -> label, and a compact reference block for the prompt

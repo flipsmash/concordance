@@ -1983,19 +1983,13 @@ def import_defined_words(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
     return stats
 
 
-_PLURAL_OF_RE = re.compile(
-    r"^(?:alternative |archaic |dialectal |obsolete )?plural (?:form )?of (\S+?)\.?$",
-    re.IGNORECASE,
-)
-
-
 def dedupe_plural_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
                               use_web: bool = True, model_path: str | None = None) -> dict:
     """`concordance dedupe-plurals`: a definition that just says "plural of X"
     isn't real vocabulary content -- the word IS real (a dictionary vouched
     for it as its own headword), but it's redundant scaffolding once X exists
     as its own properly-defined entry. quizdef.quizzable() already excludes
-    these from quizzes (_VARIANT_RE matches "plural of"), so this isn't a
+    these from quizzes (crossref.mentions_pointer matches "plural of"), so this isn't a
     correctness fix -- it's consolidation: for every such word, resolve its
     singular X and soft-delete the plural (active=false, same reversible
     pattern as every other removal in this codebase -- never a hard delete).
@@ -2028,7 +2022,7 @@ def dedupe_plural_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int 
                      gets flagged_undefined if the cascade can't define it,
                      same as any other word -- refill/deepen will keep
                      trying on later runs."""
-    from . import deepdef, localdict, resolve
+    from . import crossref, deepdef, localdict, resolve
     from .config import Config
     from .dictionary import make_session
     from .model import Candidate, Occurrence, junk_pos_reason
@@ -2036,12 +2030,12 @@ def dedupe_plural_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int 
     s = _safe_schema(schema)
     # Broad SQL prefilter (plain substring, case-insensitive) + precise
     # Python-side regex match below -- NOT a direct `~*` on
-    # _PLURAL_OF_RE.pattern. Postgres's regex dialect is POSIX ERE, which
+    # crossref._PLURAL_OF_RE.pattern. Postgres's regex dialect is POSIX ERE, which
     # doesn't support Python re's non-greedy `+?`, so the exact same pattern
     # string silently matches a different (smaller) row set in each engine
     # -- confirmed empirically. A plain literal substring has no such
     # quantifiers so it's safe to run directly in Postgres as a superset
-    # filter; _PLURAL_OF_RE.match() (needed anyway, to parse the singular
+    # filter; crossref.plural_target() (needed anyway, to parse the singular
     # out) does the real, precise matching in Python.
     with conn.cursor() as cur:
         cur.execute(
@@ -2058,11 +2052,10 @@ def dedupe_plural_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int 
 
     parsed = []
     for wid, lemma, defn, pos, sentence, chapter, as_seen in rows:
-        m = _PLURAL_OF_RE.match((defn or "").strip())
-        if not m:
+        singular = crossref.plural_target(defn)
+        if not singular:
             stats["unparsed"] += 1
             continue
-        singular = m.group(1).strip(".,;").lower()
         parsed.append((wid, lemma, pos, sentence, chapter, as_seen, singular))
     if not parsed:
         return stats
@@ -2137,7 +2130,7 @@ def expand_synonym_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int
                                use_web: bool = True, model_path: str | None = None) -> dict:
     """`concordance expand-synonyms`: a definition that just says "synonym of
     X" is a real data-quality problem, not merely a quizzability one (unlike
-    "plural of X", quizdef._VARIANT_RE doesn't even exclude these from
+    "plural of X", crossref.mentions_pointer doesn't even exclude these from
     quizzing today -- "synonym" was never in its word list). But the fix is
     the OPPOSITE of dedupe-plurals': a synonym is a genuinely distinct
     headword worth keeping on its own, not redundant scaffolding for another
@@ -2792,10 +2785,10 @@ def clean_dialect_spellings(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool =
     """`concordance clean-dialect-spellings`: active words whose definition is
     purely a dialect/eye-dialect respelling cross-reference (bettah ->
     "Pronunciation spelling of better.") -- see
-    validity_score.dialect_respelling_target, which detects by definition,
+    crossref.dialect_respelling_target, which detects by definition,
     never by word shape. Kinds dialect_common_variant / dialect_duplicate
     (cast out) and dialect_review (flag only) -- see _sweep_respellings."""
-    from .validity_score import dialect_respelling_target
+    from .crossref import dialect_respelling_target
     return _sweep_respellings(
         conn, schema, "dialect", apply=apply,
         prefilter="definition ~* '(spelling|form) of'",
@@ -2804,15 +2797,15 @@ def clean_dialect_spellings(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool =
 
 def clean_archaic_spellings(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool = False) -> dict:
     """`concordance clean-archaic-spellings`: archaic inflections of a verb
-    (thinketh, findest -- validity_score.archaic_inflection_target, by
+    (thinketh, findest -- crossref.archaic_inflection_target, by
     definition + ending) and early-printing u-for-v spellings (reuelation,
     nerue -- early_modern_uv_target) aren't distinct vocabulary; the modern
     word is (design rule 3). Kinds archaic_common_variant /
     archaic_duplicate (cast out) and archaic_review (flag only). Also any
     word whose whole definition is "Obsolete/Archaic spelling|form of X"
-    (validity_score.obsolete_spelling_target)."""
-    from .validity_score import (archaic_inflection_target, early_modern_uv_target,
-                                 obsolete_spelling_target)
+    (crossref.obsolete_spelling_target)."""
+    from .crossref import archaic_inflection_target, obsolete_spelling_target
+    from .validity_score import early_modern_uv_target
     return _sweep_respellings(
         conn, schema, "archaic", apply=apply,
         prefilter=("(lemma_lc ~ '(eth|est|th|st)$' OR lemma_lc ~ '[aeioulr]u[aeiou]'"

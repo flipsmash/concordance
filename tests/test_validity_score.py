@@ -243,7 +243,7 @@ def test_validity_gate_drops_script_junk_before_local_dict():
 
 
 def test_dialect_respelling_target():
-    from concordance.validity_score import dialect_respelling_target as t
+    from concordance.crossref import dialect_respelling_target as t
     assert t("Pronunciation spelling of better.") == "better"
     assert t("Eye dialect spelling of talk, representing New York City English.") == "talk"
     assert t("An obsolete or dialectal form of bayonet.") == "bayonet"
@@ -258,7 +258,7 @@ def test_dialect_respelling_target():
 
 
 def test_archaic_inflection_target():
-    from concordance.validity_score import archaic_inflection_target as a
+    from concordance.crossref import archaic_inflection_target as a
     assert a("thinketh", "third-person singular simple present indicative of think") == "think"
     assert a("risest", "second-person singular simple present indicative of rise") == "rise"
     assert a("brakest", "second-person singular simple past indicative of break") == "break"
@@ -278,7 +278,7 @@ def test_early_modern_uv_target():
 
 
 def test_obsolete_spelling_target():
-    from concordance.validity_score import obsolete_spelling_target as o
+    from concordance.crossref import obsolete_spelling_target as o
     assert o("Obsolete spelling of bread.") == "bread"
     assert o("An obsolete form of spill.") == "spill"
     assert o("Archaic spelling of boulder.") == "boulder"
@@ -320,7 +320,7 @@ def test_english_evidence_strict_mode_for_misspellings():
 
 
 def test_classification_gloss_never_passes_the_pointed_to_spelling():
-    from concordance.validity_score import classification_gloss as g
+    from concordance.crossref import classification_gloss as g
     assert g("Variant spelling of faggot — A bundle of sticks for fuel.") == "A bundle of sticks for fuel."
     assert g("Alternative form of colour: the property of reflecting light.") == "the property of reflecting light."
     for pointer in ("Obsolete spelling of bread.", "An obsolete or dialectal form of bayonet.",

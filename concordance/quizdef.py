@@ -23,6 +23,7 @@ from difflib import SequenceMatcher
 from nltk.stem import SnowballStemmer
 
 from .config import Config
+from .crossref import mentions_pointer
 from .validity_score import _PREFIXES
 
 _st = SnowballStemmer("english")
@@ -264,11 +265,6 @@ def _parse(text: str):
 
 # --- quiz suitability -----------------------------------------------------
 
-# Definitions that just point at another word (the "answer" isn't real vocabulary).
-_VARIANT_RE = re.compile(
-    r"\b(form|spelling|inflection|tense|participle|plural|abbreviation|initialism) of\b"
-    r"|\b(first|second|third)-person (singular|plural)\b", re.IGNORECASE)
-
 # A morphological derivative whose root is at least this common is trivially
 # inferable from the root (reveller<-revel); a rare root (abacination<-abacinate)
 # is not, so the word stays quizzable. wordfreq Zipf is corpus-independent.
@@ -279,7 +275,7 @@ _COMMON_ROOT_ZIPF = 3.0
 # blanking every leaking token can gut a short, templated definition down to
 # its scaffolding: "silkman" -> "A male dealer in silk." becomes "A male
 # dealer in —." -- grammatically intact, but no longer distinguishes silkman
-# from any other "male dealer in X" trade word. Not caught by _VARIANT_RE
+# from any other "male dealer in X" trade word. Not caught by crossref.mentions_pointer
 # (this isn't a "form of X" cross-reference) or the common-root check (silk
 # isn't silkman's morphological root) -- quizzable() never looked at what
 # redaction actually did to the definition at all.
@@ -366,7 +362,7 @@ def quizzable(definition: str, morph_root: str | None = None,
     model calls) and, with this check, sufficient -- found live: "codpieced"
     stayed quizzable with an unmodified "clean" quiz_definition literally
     reading "Wearing, or fitted with, a codpiece" until this existed."""
-    if _VARIANT_RE.search(definition or ""):
+    if mentions_pointer(definition):
         return False, "grammatical/variant form"
     if morph_root and root_zipf is not None and root_zipf >= _COMMON_ROOT_ZIPF:
         return False, f"transparent derivative of common root '{morph_root}'"
