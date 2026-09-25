@@ -248,3 +248,34 @@ def test_compute_concordance_match_all_four_states_and_recheck_policy():
         cur.execute(f"DROP SCHEMA {main_schema} CASCADE")
     conn.commit()
     conn.close()
+
+
+@pytest.mark.skipif(not os.environ.get("CONCORDANCE_TEST_DB_URL"), reason="needs CONCORDANCE_TEST_DB_URL")
+def test_prune_out_of_order_survives_appended_second_pass():
+    """Regression (2026-09-24): --add-missing appends a second A->Z run of rows
+    after a volume's first; an id-ordered check deleted 14k real entries."""
+    from concordance import db as cdb
+    from concordance.oed import db as oed_db
+    from concordance.oed.config import OedConfig
+    from concordance.oed.pipeline import _prune_out_of_order
+    schema = "cc_test_oed_prune_order"
+    conn = cdb.connect(os.environ["CONCORDANCE_TEST_DB_URL"])
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    oed_db.apply_schema(conn, schema)
+    vid = oed_db.upsert_volume(conn, file_name="t.pdf", file_hash_="h", volume_label="t",
+                               page_count=4, schema=schema)
+    def add(hw, page, det):
+        oed_db.insert_entry(conn, volume_id=vid, headword=hw, homograph_number=None, part_of_speech=None,
+                            etymology=None, entry_type="main", parent_entry_id=None, page_number=page,
+                            raw_text=hw, schema=schema, detector=det)
+    for hw, page in [("apple", 0), ("axe", 1), ("bear", 2), ("cat", 3)]:          # first pass, v1
+        add(hw, page, "v1")
+    for hw, page in [("acorn", 0), ("azure", 1), ("bison", 2), ("cow", 3)]:        # appended second pass
+        add(hw, page, "v2")
+    conn.commit()
+    assert _prune_out_of_order(conn, vid, OedConfig(schema=schema)) == 0
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()

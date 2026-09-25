@@ -234,10 +234,18 @@ def _flush_pronunciation(conn: psycopg.Connection, batch: list[tuple[int, fitz.P
 
 def _prune_out_of_order(conn: psycopg.Connection, volume_id: int, cfg: OedConfig) -> int:
     """sequence.py's whole-volume alphabetical-order cleanup (see
-    ingest_volume) -- deletes entries out of first-letter order."""
+    ingest_volume) -- deletes entries out of first-letter order.
+
+    Ordered by (page_number, id), NOT id alone: a first ingest writes in page
+    order so the two agree, but `--add-missing` APPENDS a second A->Z run of
+    rows after the first, and an id-ordered check read that as massively out
+    of order -- on 2026-09-24 it deleted 14,244 original entries (and ~6k new
+    ones) across the multi-letter volumes before this was caught; restored
+    from the 04:00 backup. Within one page the relative order of old and new
+    rows doesn't matter at first-letter granularity."""
     with conn.cursor() as cur:
-        cur.execute(f"select id, headword from {cfg.schema}.entry where volume_id = %s order by id",
-                    (volume_id,))
+        cur.execute(f"select id, headword from {cfg.schema}.entry where volume_id = %s "
+                    f"order by page_number, id", (volume_id,))
         out_of_order = sequence.find_out_of_order_ids(cur.fetchall())
         if out_of_order:
             cur.execute(f"delete from {cfg.schema}.entry where id = any(%s)", (list(out_of_order),))
