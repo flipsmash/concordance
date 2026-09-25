@@ -1555,6 +1555,26 @@ def wiktionary_langs(
                   f"{stats['historic_terms']:,} Middle/Old-English-only terms")
 
 
+@app.command("wiktextract-sounds")
+def wiktextract_sounds(
+    dump: Optional[Path] = typer.Option(None, "--dump", help="wiktextract JSONL.gz (default: data/wiktextract-en.jsonl.gz)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Load every English entry's IPA and recording URLs from the Wiktionary
+    dump into wikt.sound, so `ipa`, `audio` and `commons-direct` read the table
+    instead of re-scanning the 2.7 GB dump each run. Rerun after downloading a
+    newer dump. ~10-15 minutes."""
+    from . import wiktextract
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    with console.status("[bold]Loading Wiktionary pronunciations…"):
+        stats = wiktextract.load_sounds(conn, str(dump) if dump else None)
+    conn.close()
+    console.print(f"[green]✓[/green] wiktextract-sounds: {stats['entries']:,} entries with sound data, "
+                  f"[bold]{stats['terms']:,}[/bold] terms in wikt.sound")
+
 @app.command("clean-foreign-words")
 def clean_foreign_words(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
@@ -1893,8 +1913,9 @@ def embed(
 @app.command()
 def commons_search(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
-    dump_path: str = typer.Option(None, "--dump-path", help="Path to the kaikki Wiktextract dump "
-                                   "(default: data/wiktextract-en.jsonl.gz)."),
+    dump_path: str = typer.Option(None, "--dump-path", help="Scan this kaikki Wiktextract dump instead of "
+                                   "wikt.sound (default: the table, or data/wiktextract-en.jsonl.gz "
+                                   "if `wiktextract-sounds` hasn't been run)."),
     refetch: bool = typer.Option(False, "--refetch", help="Re-check every word (default: only unchecked)."),
     limit: int = typer.Option(0, "--limit", "-l", help="Cap number of words searched."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
@@ -1943,8 +1964,9 @@ def wordnik_pron(
 @app.command()
 def ipa(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
-    dump_path: str = typer.Option(None, "--dump-path", help="Path to the kaikki Wiktextract dump "
-                                   "(default: data/wiktextract-en.jsonl.gz)."),
+    dump_path: str = typer.Option(None, "--dump-path", help="Scan this kaikki Wiktextract dump instead of "
+                                   "wikt.sound (default: the table, or data/wiktextract-en.jsonl.gz "
+                                   "if `wiktextract-sounds` hasn't been run)."),
     oed_schema: str = typer.Option("oed", "--oed-schema", help="Postgres schema for the oed tables."),
     refetch: bool = typer.Option(False, "--refetch", help="Re-check every word (default: only empty/invalid ipa)."),
     limit: int = typer.Option(0, "--limit", "-l", help="Cap number of words checked."),
@@ -2144,8 +2166,9 @@ def maintain(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
     model: Optional[Path] = typer.Option(None, "--model", "-m",
                                           help="Model for classify/quizdef/deepen --web (defaults to the 14B)."),
-    dump_path: str = typer.Option(None, "--dump-path", help="Path to the kaikki Wiktextract dump "
-                                   "(default: data/wiktextract-en.jsonl.gz)."),
+    dump_path: str = typer.Option(None, "--dump-path", help="Scan this kaikki Wiktextract dump instead of "
+                                   "wikt.sound (default: the table, or data/wiktextract-en.jsonl.gz "
+                                   "if `wiktextract-sounds` hasn't been run)."),
     fasttext_model: Path = typer.Option(_FASTTEXT_MODEL_PATH, "--fasttext-model",
                                          help="Trained model from train-fasttext, for the embed step."),
     deepen_web: bool = typer.Option(True, "--deepen-web/--no-deepen-web",
@@ -2515,8 +2538,9 @@ def commons_download(
 @app.command()
 def audio(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
-    dump_path: str = typer.Option(None, "--dump-path", help="Path to the kaikki Wiktextract dump "
-                                   "(default: data/wiktextract-en.jsonl.gz)."),
+    dump_path: str = typer.Option(None, "--dump-path", help="Scan this kaikki Wiktextract dump instead of "
+                                   "wikt.sound (default: the table, or data/wiktextract-en.jsonl.gz "
+                                   "if `wiktextract-sounds` hasn't been run)."),
     refetch: bool = typer.Option(False, "--refetch", help="Re-attempt all words (default: only ones with no word_audio row)."),
     upgrade_guesses: bool = typer.Option(
         False, "--upgrade-guesses",

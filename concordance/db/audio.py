@@ -82,9 +82,8 @@ def search_commons_direct(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | N
 
     # skip words kaikki already solved — only worth the slow search for real gaps
     lemmas = {lemma.strip().lower() for _, lemma in rows}
-    dump_path = dump_path or wiktextract.DEFAULT_DUMP_PATH
-    lexicon = wiktextract.build_lexicon(
-        dump_path, lemmas, progress_cb=lambda n: print(f"  ...{n} lines scanned"))
+    lexicon = wiktextract.sound_lexicon(
+        conn, lemmas, dump_path, progress_cb=lambda n: print(f"  ...{n} lines scanned"))
     candidates = [(wid, lemma) for wid, lemma in rows
                   if not lexicon.get(lemma.strip().lower(), {}).get("audio")]
 
@@ -178,9 +177,8 @@ def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None
         return dict(dist)
 
     lemmas = {lemma.strip().lower() for _, lemma, _, _, _, _ in candidates}
-    dump_path = dump_path or wiktextract.DEFAULT_DUMP_PATH
-    kaikki_lexicon = wiktextract.build_lexicon(
-        dump_path, lemmas, progress_cb=lambda n: print(f"  ...{n} lines scanned"))
+    kaikki_lexicon = wiktextract.sound_lexicon(
+        conn, lemmas, dump_path, progress_cb=lambda n: print(f"  ...{n} lines scanned"))
     local_lexicon = localdict.build_lexicon(conn, lemmas)
     oed_lexicon = oed_db.pronunciation_lexicon(conn, lemmas, schema=oed_schema)
 
@@ -411,9 +409,8 @@ def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = No
         return {"candidates": 0, **dist}
 
     lemmas = {lemma.strip().lower() for _, lemma, _, _, _, _ in rows}
-    dump_path = dump_path or wiktextract.DEFAULT_DUMP_PATH
-    lexicon = wiktextract.build_lexicon(
-        dump_path, lemmas, progress_cb=lambda n: print(f"  ...{n} lines scanned"))
+    lexicon = wiktextract.sound_lexicon(
+        conn, lemmas, dump_path, progress_cb=lambda n: print(f"  ...{n} lines scanned"))
 
     key, region = audio.azure_credentials()
     if not (key and region):

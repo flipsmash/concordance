@@ -358,7 +358,7 @@ def test_compute_ipa_limit_applies_after_the_only_missing_filter(monkeypatch):
     from concordance import wiktextract
     from concordance.model import Candidate
 
-    monkeypatch.setattr(wiktextract, "build_lexicon", lambda *a, **k: {})
+    monkeypatch.setattr(wiktextract, "sound_lexicon", lambda *a, **k: {})
 
     schema = "cc_test_ipa"
     conn = db.connect(_URL)
@@ -424,7 +424,7 @@ def test_compute_ipa_sets_ipa_source_on_backfill_and_correction_and_clears_it(mo
         "badword": {"ipa": [{"ipa": "ˈbædwɜːd", "tags": ["US"]}], "audio": []},
         # deadword: no kaikki entry at all -- nothing to fix it with
     }
-    monkeypatch.setattr(wiktextract, "build_lexicon", lambda *a, **k: lexicon)
+    monkeypatch.setattr(wiktextract, "sound_lexicon", lambda *a, **k: lexicon)
 
     db.compute_ipa(conn, schema)
 
@@ -469,7 +469,7 @@ def test_compute_ipa_skips_already_checked_empty_words_unless_refetch(monkeypatc
     conn.commit()
 
     lexicon = {}  # nothing findable anywhere, for either word
-    monkeypatch.setattr(wiktextract, "build_lexicon", lambda *a, **k: lexicon)
+    monkeypatch.setattr(wiktextract, "sound_lexicon", lambda *a, **k: lexicon)
 
     stats = db.compute_ipa(conn, schema)
     assert stats["total"] == 2
@@ -495,7 +495,7 @@ def test_compute_audio_mw_tier_downloads_when_commons_misses(monkeypatch):
     from concordance import audio, mw, wiktextract
     from concordance.model import Candidate
 
-    monkeypatch.setattr(wiktextract, "build_lexicon", lambda *a, **k: {})
+    monkeypatch.setattr(wiktextract, "sound_lexicon", lambda *a, **k: {})
     monkeypatch.setattr(audio, "azure_credentials", lambda: (None, None))
     monkeypatch.setattr(mw, "mw_api_key", lambda: "fake-key")
     monkeypatch.setattr(mw, "quota_exhausted", lambda: False)
@@ -554,7 +554,7 @@ def test_compute_audio_uses_cached_mw_hit_even_when_quota_exhausted(monkeypatch)
     from concordance import audio, mw, wiktextract
     from concordance.model import Candidate
 
-    monkeypatch.setattr(wiktextract, "build_lexicon", lambda *a, **k: {})
+    monkeypatch.setattr(wiktextract, "sound_lexicon", lambda *a, **k: {})
     monkeypatch.setattr(audio, "azure_credentials", lambda: (None, None))
     monkeypatch.setattr(mw, "mw_api_key", lambda: "fake-key")
     monkeypatch.setattr(mw, "quota_exhausted", lambda: True)
@@ -599,7 +599,7 @@ def test_compute_audio_mw_miss_falls_through_when_quota_exhausted(monkeypatch):
     from concordance import audio, mw, wiktextract
     from concordance.model import Candidate
 
-    monkeypatch.setattr(wiktextract, "build_lexicon", lambda *a, **k: {})
+    monkeypatch.setattr(wiktextract, "sound_lexicon", lambda *a, **k: {})
     monkeypatch.setattr(audio, "azure_credentials", lambda: (None, None))
     monkeypatch.setattr(mw, "mw_api_key", lambda: "fake-key")
     monkeypatch.setattr(mw, "quota_exhausted", lambda: True)
@@ -635,7 +635,7 @@ def test_compute_audio_piper_tier_when_everything_else_misses(monkeypatch):
     from concordance import audio, mw, wiktextract
     from concordance.model import Candidate
 
-    monkeypatch.setattr(wiktextract, "build_lexicon", lambda *a, **k: {})
+    monkeypatch.setattr(wiktextract, "sound_lexicon", lambda *a, **k: {})
     monkeypatch.setattr(audio, "azure_credentials", lambda: (None, None))
     monkeypatch.setattr(mw, "mw_api_key", lambda: "")
     monkeypatch.setattr(audio, "synthesize_piper", lambda lemma: b"fake-piper-mp3")
@@ -672,7 +672,7 @@ def test_compute_audio_piper_unavailable_still_falls_through_to_none(monkeypatch
     from concordance import audio, mw, wiktextract
     from concordance.model import Candidate
 
-    monkeypatch.setattr(wiktextract, "build_lexicon", lambda *a, **k: {})
+    monkeypatch.setattr(wiktextract, "sound_lexicon", lambda *a, **k: {})
     monkeypatch.setattr(audio, "azure_credentials", lambda: (None, None))
     monkeypatch.setattr(mw, "mw_api_key", lambda: "")
     monkeypatch.setattr(audio, "synthesize_piper", lambda lemma: None)  # model files absent
@@ -703,7 +703,7 @@ def test_synthesize_unverified_guesses_uses_piper(monkeypatch):
     from concordance import audio, wiktextract
     from concordance.model import Candidate
 
-    monkeypatch.setattr(wiktextract, "build_lexicon", lambda *a, **k: {})
+    monkeypatch.setattr(wiktextract, "sound_lexicon", lambda *a, **k: {})
     monkeypatch.setattr(audio, "azure_credentials", lambda: (None, None))
     monkeypatch.setattr(audio, "synthesize_piper", lambda lemma: b"fake-piper-mp3")
 
