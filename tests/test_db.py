@@ -2991,3 +2991,52 @@ def test_clear_stale_misspelling_flags():
                                         "zzfashinable": "misspelling", "zztypo": "misspelling"}
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
+
+
+@pg
+def test_apply_schema_stamps_versions_and_runs_each_migration_once(monkeypatch):
+    schema = "cc_test_migrate"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    try:
+        db.apply_schema(conn, schema)
+        assert db._schema_version(conn, schema) == db.MIGRATIONS[-1][0]
+
+        # A new migration appended later runs exactly once, then is stamped.
+        calls = []
+
+        def _migration_test(c, s):
+            calls.append(s)
+            with c.cursor() as cur:
+                cur.execute(f"CREATE TABLE {s}.migration_probe (x int)")
+
+        latest = db.MIGRATIONS[-1][0]
+        monkeypatch.setattr(db, "MIGRATIONS", [*db.MIGRATIONS, (latest + 1, _migration_test)])
+        db.apply_schema(conn, schema)
+        db.apply_schema(conn, schema)          # current -> fast path, no re-run
+        assert calls == [schema]
+        assert db._schema_version(conn, schema) == latest + 1
+
+        # A failing migration leaves the version unstamped, the lock released,
+        # and the connection usable.
+        def _migration_boom(c, s):
+            with c.cursor() as cur:
+                cur.execute("SELECT 1/0")
+
+        monkeypatch.setattr(db, "MIGRATIONS", [*db.MIGRATIONS, (latest + 2, _migration_boom)])
+        with pytest.raises(Exception):
+            db.apply_schema(conn, schema)
+        assert db._schema_version(conn, schema) == latest + 1
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(hashtext(%s))", (f"concordance-schema:{schema}",))
+            assert cur.fetchone()[0] is True
+            cur.execute("SELECT pg_advisory_unlock(hashtext(%s))", (f"concordance-schema:{schema}",))
+        conn.commit()
+    finally:
+        conn.rollback()
+        with conn.cursor() as cur:
+            cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        conn.commit()
+        conn.close()

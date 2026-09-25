@@ -850,14 +850,80 @@ def connect(url: str | None = None) -> psycopg.Connection:
     return psycopg.connect(resolved)
 
 
+# --- versioned migrations -----------------------------------------------------
+#
+# apply_schema used to re-run ~55 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
+# statements on EVERY call -- every CLI command and every web-server start.
+# Even a no-op ALTER takes an ACCESS EXCLUSIVE lock, so a web restart during
+# `maintain` waited on the job's locks (85 s on 2026-09-25; minutes before).
+# Now a per-schema schema_version table records what has been applied: when
+# current, apply_schema is one plain SELECT (no locks); otherwise pending
+# migrations run once, in order, under an advisory lock so two processes
+# never migrate the same schema concurrently. Future schema changes are new
+# numbered functions appended to MIGRATIONS -- never edits to an old one.
+
+_SCHEMA_VERSION_DDL = """CREATE TABLE IF NOT EXISTS {s}.schema_version (
+    version    integer PRIMARY KEY,
+    applied_at timestamptz NOT NULL DEFAULT now())"""
+
+
+def _schema_version(conn: psycopg.Connection, s: str) -> int:
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass(%s)", (f"{s}.schema_version",))
+        if cur.fetchone()[0] is None:
+            return 0
+        cur.execute(f"SELECT coalesce(max(version), 0) FROM {s}.schema_version")
+        return cur.fetchone()[0]
+
+
+def _trgm_present(conn: psycopg.Connection, s: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass(%s)", (f"{s}.word_lemma_trgm",))
+        return cur.fetchone()[0] is not None
+
+
 def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool:
-    """Create schema/tables if absent. Returns True if the pg_trgm index was
-    created (False if privileges didn't allow it — the rest still works)."""
+    """Bring `schema` up to the latest migration. Returns True if the pg_trgm
+    lemma index exists (False if privileges didn't allow it -- the rest still
+    works). Lock-free when already current (see the section comment)."""
+    s = _safe_schema(schema)
+    latest = MIGRATIONS[-1][0]
+    if _schema_version(conn, s) >= latest:
+        present = _trgm_present(conn, s)
+        conn.commit()               # end the read-only transaction; don't sit idle-in-transaction
+        return present
+    lock_key = f"concordance-schema:{s}"
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_lock(hashtext(%s))", (lock_key,))
+    try:
+        current = _schema_version(conn, s)       # another process may have migrated meanwhile
+        for version, migrate in MIGRATIONS:
+            if version <= current:
+                continue
+            migrate(conn, s)
+            with conn.cursor() as cur:
+                cur.execute(_SCHEMA_VERSION_DDL.format(s=s))
+                cur.execute(f"INSERT INTO {s}.schema_version (version) VALUES (%s) "
+                            "ON CONFLICT (version) DO NOTHING", (version,))
+            conn.commit()
+        return _trgm_present(conn, s)
+    except BaseException:
+        conn.rollback()             # an aborted transaction would refuse the unlock below
+        raise
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_unlock(hashtext(%s))", (lock_key,))
+        conn.commit()
+
+
+def _migration_0001_baseline(conn: psycopg.Connection, s: str) -> None:
+    """Everything apply_schema did before versioning, unchanged: every
+    statement is idempotent (IF NOT EXISTS / ON CONFLICT DO NOTHING), so on an
+    existing database this is a no-op and simply stamps version 1."""
     from psycopg.types.json import Json
 
     from . import calibration
 
-    s = _safe_schema(schema)
     with conn.cursor() as cur:
         cur.execute(_SCHEMA_DDL.format(s=s))
         # rejected_word_reason_lemma_key_idx (created above) supersedes this --
@@ -1030,20 +1096,27 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> bool
         # Only valid once word.active exists (added a few lines up in this
         # same block) -- see _REJECTED_LEMMA_INDEX_DDL's own comment.
         cur.execute(_REJECTED_LEMMA_INDEX_DDL.format(s=s))
-    trgm = True
+    # Commit the core schema BEFORE the privilege-sensitive extension steps:
+    # their failure path rolls back, which used to discard every table and
+    # column created above in the same still-open transaction.
+    conn.commit()
     try:
         with conn.cursor() as cur:
             cur.execute(_TRGM_DDL.format(s=s))
+        conn.commit()
     except psycopg.Error:
         conn.rollback()
-        trgm = False
     try:
         with conn.cursor() as cur:
             cur.execute(_VECTOR_DDL.format(s=s))
+        conn.commit()
     except psycopg.Error:
         conn.rollback()
-    conn.commit()
-    return trgm
+
+
+MIGRATIONS: list[tuple[int, object]] = [
+    (1, _migration_0001_baseline),
+]
 
 
 def refresh_rejected_lemma_index(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> None:
