@@ -55,7 +55,19 @@ def _setup(schema: str):
 
     old_schema = main.SCHEMA
     main.SCHEMA = schema
-    client = TestClient(main.app, base_url="https://testserver")
+    class _StatsRefreshingClient(TestClient):
+        """The books/authors listings read the precomputed book_stats/
+        author_stats tables (refreshed by `maintain`), so refresh them right
+        before any request to those endpoints -- what a real deployment
+        would have done after the test's inserts."""
+
+        def get(self, url, *args, **kwargs):
+            if str(url).startswith(("/api/browse/books", "/api/browse/authors")):
+                db.compute_book_stats(conn, schema)
+                db.compute_author_stats(conn, schema)
+            return super().get(url, *args, **kwargs)
+
+    client = _StatsRefreshingClient(main.app, base_url="https://testserver")
     _login(client)
 
     def restore():
