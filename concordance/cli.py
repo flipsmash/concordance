@@ -237,6 +237,12 @@ def oed_ingest(
     paths: Optional[list[Path]] = typer.Argument(None, help="OED volume PDF(s). Omit to process every .pdf in dictionaries/."),
     force: bool = typer.Option(False, "--force", help="Re-ingest a volume already marked done (e.g. after a file replacement)."),
     page_limit: Optional[int] = typer.Option(None, "--page-limit", help="Stop after this many pages (per volume) — useful for a smoke test."),
+    add_missing: bool = typer.Option(
+        False, "--add-missing",
+        help="Re-scan already-ingested volumes with the v2 headword detector and add only the entries "
+             "missed the first time (records OED's dagger as is_obsolete). No pronunciation work -- "
+             "run `oed-pronounce` afterwards (GPU)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="With --add-missing: count only, write nothing."),
     schema: str = typer.Option("oed", "--schema", help="Postgres schema to write into (separate from the concordance schema)."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
@@ -262,6 +268,8 @@ def oed_ingest(
             console.print(f"[red]✗[/red] no such directory: {dictionaries_dir}/")
             raise typer.Exit(code=1)
         volumes = sorted(dictionaries_dir.glob("*.pdf"))
+        if add_missing:     # finished volumes get moved to dictionaries/done/
+            volumes += sorted((dictionaries_dir / "done").glob("*.pdf"))
         if not volumes:
             console.print(f"[yellow]![/yellow] no .pdf files found in {dictionaries_dir}/")
             raise typer.Exit(code=0)
@@ -275,6 +283,28 @@ def oed_ingest(
 
     cfg = OedConfig(schema=schema)
     oed_db.apply_schema(conn, schema)
+
+    if add_missing:
+        from .oed.pipeline import add_missing_entries
+        totals = {"candidates": 0, "matched": 0, "added": 0, "obsolete_added": 0, "obsolete_marked": 0, "pruned": 0}
+        for i, vol_path in enumerate(volumes, 1):
+            console.rule(f"[bold]{i}/{len(volumes)} · {vol_path.name}")
+            try:
+                s = add_missing_entries(vol_path, conn, cfg, console, page_limit=page_limit, dry_run=dry_run)
+            except Exception as exc:  # noqa: BLE001
+                console.print(f"[red]✗[/red] {exc}")
+                continue
+            for k in totals:
+                totals[k] += s[k]
+            console.print(f"{s['pages']} pages: {s['candidates']} entries found, {s['matched']} already stored, "
+                          f"[bold]{s['added']}[/bold] {'would be ' if dry_run else ''}added "
+                          f"({s['obsolete_added']} obsolete), {s['obsolete_marked']} stored entries marked obsolete"
+                          + (f", {s['pruned']} pruned out of order" if s["pruned"] else ""))
+        conn.close()
+        console.print(f"[green]✓[/green] oed-ingest --add-missing{' (dry run)' if dry_run else ''}: "
+                      f"[bold]{totals['added']}[/bold] entries {'would be ' if dry_run else ''}added across "
+                      f"{len(volumes)} volume(s); run `concordance oed-pronounce` for their pronunciations")
+        return
 
     from .oed import pronunciation as _pron
     with console.status("[bold]Loading pronunciation transcriber…"):
@@ -1938,6 +1968,49 @@ def ipa(
                   f"{corrected} corrected, "
                   f"{stats.get('cleared_no_replacement',0)} cleared (no valid source found), "
                   f"{stats.get('unresolved',0)} still unresolved")
+
+
+@app.command("oed-pronounce")
+def oed_pronounce(
+    paths: Optional[list[Path]] = typer.Argument(None, help="Volume PDF(s). Omit for every .pdf in dictionaries/ and dictionaries/done/."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap entries per volume (0 = all)."),
+    schema: str = typer.Option("oed", "--schema", help="Postgres schema for the oed tables."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Transcribe pronunciations (double-pass vision model, GPU) for entries
+    that never had one attempted -- the entries `oed-ingest --add-missing`
+    wrote. Resumable per batch; safe to stop and re-run."""
+    from .oed import db as oed_db
+    from .oed import pronunciation as _pron
+    from .oed.config import OedConfig
+    from .oed.pipeline import pronounce_missing
+
+    dictionaries_dir = Path("dictionaries")
+    volumes = list(paths) if paths else (sorted(dictionaries_dir.glob("*.pdf"))
+                                         + sorted((dictionaries_dir / "done").glob("*.pdf")))
+    try:
+        conn = db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    cfg = OedConfig(schema=schema)
+    oed_db.apply_schema(conn, schema)
+    with console.status("[bold]Loading pronunciation transcriber…"):
+        transcriber = _pron.get_transcriber(cfg)
+    if isinstance(transcriber, _pron.StubTranscriber):
+        console.print(f"[red]✗[/red] no local vision model configured ({cfg.vision_model_path})")
+        raise typer.Exit(code=1)
+    total = 0
+    for i, vol_path in enumerate(volumes, 1):
+        console.rule(f"[bold]{i}/{len(volumes)} · {vol_path.name}")
+        try:
+            s = pronounce_missing(vol_path, conn, cfg, console, transcriber, limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]✗[/red] {exc}")
+            continue
+        total += s["pronounced"]
+        console.print(f"{s['pronounced']} pronounced")
+    conn.close()
+    console.print(f"[green]✓[/green] oed-pronounce: [bold]{total}[/bold] entries transcribed")
 
 
 @app.command("oed-ipa")

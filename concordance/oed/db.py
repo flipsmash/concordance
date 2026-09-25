@@ -121,6 +121,17 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> None
         cur.execute(f"ALTER TABLE {schema}.entry ADD COLUMN IF NOT EXISTS lemma boolean NOT NULL DEFAULT false")
         cur.execute(f"ALTER TABLE {schema}.entry ADD COLUMN IF NOT EXISTS lemma_computed_at timestamptz")
         cur.execute(f"CREATE INDEX IF NOT EXISTS entry_lemma_idx ON {schema}.entry (lemma) WHERE lemma")
+        # OED's own obsolete marker: a dagger before the headword. Read by the
+        # v2 detector (`oed-ingest --add-missing`); NULL = not determined
+        # (v1-only entries the v2 pass didn't re-find).
+        cur.execute(f"ALTER TABLE {schema}.entry ADD COLUMN IF NOT EXISTS is_obsolete boolean")
+        # Which detector wrote the entry ('v1' = the original size+pattern
+        # pass, 'v2' = add-missing) -- lets a bad v2 run be undone precisely.
+        cur.execute(f"ALTER TABLE {schema}.entry ADD COLUMN IF NOT EXISTS detector text NOT NULL DEFAULT 'v1'")
+        # Headword span position on its page (x0, y0, x1, y1) -- the anchor
+        # pronunciation.crop_rect needs, kept so `oed-pronounce` can
+        # transcribe an entry later without re-running detection.
+        cur.execute(f"ALTER TABLE {schema}.entry ADD COLUMN IF NOT EXISTS headword_bbox double precision[]")
         cur.execute(f"CREATE INDEX IF NOT EXISTS entry_lemma_uncomputed_idx ON {schema}.entry (id) "
                     f"WHERE lemma_computed_at IS NULL")
 
@@ -257,18 +268,20 @@ def set_volume_status(conn: psycopg.Connection, volume_id: int, status: str, *,
 def insert_entry(conn: psycopg.Connection, *, volume_id: int, headword: str,
                   homograph_number: int | None, part_of_speech: str | None,
                   etymology: str | None, entry_type: str, parent_entry_id: int | None,
-                  page_number: int, raw_text: str, schema: str = DEFAULT_SCHEMA) -> int:
+                  page_number: int, raw_text: str, schema: str = DEFAULT_SCHEMA,
+                  is_obsolete: bool | None = None, detector: str = "v1",
+                  headword_bbox: list[float] | None = None) -> int:
     with conn.cursor() as cur:
         cur.execute(
             f"""
             INSERT INTO {schema}.entry
                 (volume_id, headword, homograph_number, part_of_speech, etymology,
-                 entry_type, parent_entry_id, page_number, raw_text)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 entry_type, parent_entry_id, page_number, raw_text, is_obsolete, detector, headword_bbox)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (volume_id, headword, homograph_number, part_of_speech, etymology,
-             entry_type, parent_entry_id, page_number, raw_text),
+             entry_type, parent_entry_id, page_number, raw_text, is_obsolete, detector, headword_bbox),
         )
         return cur.fetchone()[0]
 

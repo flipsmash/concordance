@@ -147,21 +147,9 @@ def ingest_volume(path: Path, conn: psycopg.Connection, cfg: OedConfig,
             # bracket/POS matches on body-text noise, and OCR-garbled
             # headwords with a stray leading letter) -- confirmed with
             # Brian to prune both classes, not just flag them.
-            cur = conn.cursor()
-            cur.execute(
-                f"select id, headword from {cfg.schema}.entry "
-                f"where volume_id = %s order by id",
-                (volume_id,),
-            )
-            rows = cur.fetchall()
-            out_of_order = sequence.find_out_of_order_ids(rows)
-            if out_of_order:
-                cur.execute(
-                    f"delete from {cfg.schema}.entry where id = any(%s)",
-                    (list(out_of_order),),
-                )
-                console.print(f"[dim]{path.name}: pruned {len(out_of_order)} "
-                               f"out-of-order entries[/dim]")
+            pruned = _prune_out_of_order(conn, volume_id, cfg)
+            if pruned:
+                console.print(f"[dim]{path.name}: pruned {pruned} out-of-order entries[/dim]")
         oed_db.set_volume_status(conn, volume_id, final_status,
                                   last_page_committed=end_page, schema=cfg.schema)
     except Exception as exc:  # noqa: BLE001 — record and re-raise so the caller sees it
@@ -242,3 +230,127 @@ def _flush_pronunciation(conn: psycopg.Connection, batch: list[tuple[int, fitz.P
             conn, entry_id, pronunciation_raw=raw_ocr.get(entry_id), pass1=p1, pass2=p2,
             ipa=ipa, source="vision_llm" if ipa else None, needs_review=needs_review, schema=cfg.schema,
         )
+
+
+def _prune_out_of_order(conn: psycopg.Connection, volume_id: int, cfg: OedConfig) -> int:
+    """sequence.py's whole-volume alphabetical-order cleanup (see
+    ingest_volume) -- deletes entries out of first-letter order."""
+    with conn.cursor() as cur:
+        cur.execute(f"select id, headword from {cfg.schema}.entry where volume_id = %s order by id",
+                    (volume_id,))
+        out_of_order = sequence.find_out_of_order_ids(cur.fetchall())
+        if out_of_order:
+            cur.execute(f"delete from {cfg.schema}.entry where id = any(%s)", (list(out_of_order),))
+    return len(out_of_order)
+
+
+def add_missing_entries(path: Path, conn: psycopg.Connection, cfg: OedConfig, console: Console, *,
+                        page_limit: int | None = None, dry_run: bool = False) -> dict:
+    """`oed-ingest --add-missing`: re-scan an already-ingested volume with the
+    v2 detector (segment.find_headwords_v2) and insert only the entries v1
+    missed. Hits are matched to stored entries per page by headword_key, as a
+    multiset (a page can hold several same-spelled homographs: "slent" x4),
+    so re-running never duplicates. Every v2 hit that matches a stored entry
+    also records OED's dagger as is_obsolete. No pronunciation work here --
+    new entries are left for `oed-pronounce` (the GPU pass). Entries are
+    ordered by id within a volume for sequence.py, so this appends then
+    re-runs the out-of-order cleanup over the whole volume."""
+    from collections import Counter
+    existing = oed_db.get_volume(conn, oed_db.file_hash(path), cfg.schema)
+    if not existing:
+        raise RuntimeError(f"{path.name}: not ingested yet -- run plain `oed-ingest` first")
+    volume_id = existing["id"]
+    doc = fitz.open(path)
+    end_page = min(len(doc), page_limit) if page_limit else len(doc)
+    stats = {"volume_id": volume_id, "pages": end_page, "candidates": 0, "matched": 0,
+             "added": 0, "obsolete_added": 0, "obsolete_marked": 0, "pruned": 0}
+
+    with conn.cursor() as cur:
+        cur.execute(f"select id, page_number, headword from {cfg.schema}.entry where volume_id = %s",
+                    (volume_id,))
+        stored: dict[int, dict[str, list[int]]] = {}
+        for eid, page_num, headword in cur.fetchall():
+            stored.setdefault(page_num, {}).setdefault(segment.headword_key(headword), []).append(eid)
+
+    for page_num in range(end_page):
+        page = doc[page_num]
+        spans = extract.flatten_spans(page)
+        if not spans:
+            continue
+        col_rows, margins = extract.page_columns(spans, page.rect.width)
+        ordered = [row for rows in col_rows for row in rows]
+        hits = segment.find_headwords_v2(col_rows, margins, page_num, cfg, page.rect.height)
+        resolved = sorted(((h, i) for h, i in zip(hits, _match_rows_to_hits(ordered, hits)) if i is not None),
+                          key=lambda pair: pair[1])
+        on_page = {k: list(v) for k, v in stored.get(page_num, {}).items()}
+        for i, (hit, start_idx) in enumerate(resolved):
+            end_idx = resolved[i + 1][1] if i + 1 < len(resolved) else len(ordered)
+            raw_text = " ".join(extract.row_text(r) for r in ordered[start_idx:end_idx])
+            if not (parse.looks_like_definition_entry(hit["text"], raw_text) or hit["loose_ok"]):
+                continue
+            stats["candidates"] += 1
+            key = segment.headword_key(hit["headword"])
+            if on_page.get(key):
+                entry_id = on_page[key].pop(0)            # already stored by v1
+                stats["matched"] += 1
+                if hit["obsolete"] and not dry_run:
+                    with conn.cursor() as cur:
+                        cur.execute(f"update {cfg.schema}.entry set is_obsolete = true where id = %s", (entry_id,))
+                stats["obsolete_marked"] += hit["obsolete"]
+                continue
+            stats["added"] += 1
+            stats["obsolete_added"] += hit["obsolete"]
+            if dry_run:
+                continue
+            parsed = parse.parse_entry(hit["text"], raw_text)
+            entry_id = oed_db.insert_entry(
+                conn, volume_id=volume_id, headword=hit["headword"], homograph_number=None,
+                part_of_speech=parsed["part_of_speech"], etymology=parsed["etymology"],
+                entry_type="main", parent_entry_id=None, page_number=page_num, raw_text=raw_text,
+                schema=cfg.schema, is_obsolete=hit["obsolete"], detector="v2", headword_bbox=hit["bbox"],
+            )
+            if parsed["senses"]:
+                oed_db.insert_definitions(conn, entry_id, parsed["senses"], schema=cfg.schema)
+        if not dry_run and page_num % 50 == 0:
+            conn.commit()
+    if not dry_run:
+        stats["pruned"] = _prune_out_of_order(conn, volume_id, cfg)
+        conn.commit()
+    return stats
+
+
+def pronounce_missing(path: Path, conn: psycopg.Connection, cfg: OedConfig, console: Console,
+                      transcriber: pronunciation.Transcriber, *, limit: int = 0) -> dict:
+    """`oed-pronounce`: the GPU half of --add-missing -- run the usual
+    double-pass pronunciation (_flush_pronunciation) for this volume's
+    entries that were never attempted and carry a stored headword_bbox (every
+    v2-added entry). Resumable: each written batch stops being "never
+    attempted", so an interrupted run picks up where it left off."""
+    existing = oed_db.get_volume(conn, oed_db.file_hash(path), cfg.schema)
+    if not existing:
+        raise RuntimeError(f"{path.name}: not ingested")
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""select id, headword, page_number, headword_bbox from {cfg.schema}.entry
+                where volume_id = %s and headword_bbox is not null
+                  and pronunciation_raw is null and pronunciation_pass1 is null and pronunciation_pass2 is null
+                order by page_number, id""" + (f" limit {int(limit)}" if limit else ""),
+            (existing["id"],))
+        rows = cur.fetchall()
+    doc = fitz.open(path)
+    batch: list = []
+    done = 0
+    for entry_id, headword, page_num, bbox in rows:
+        batch.append((entry_id, headword, doc[page_num], list(bbox)))
+        if len(batch) >= cfg.composite_batch_size:
+            _flush_pronunciation(conn, batch, cfg, transcriber)
+            conn.commit()
+            done += len(batch)
+            batch = []
+            if done % 200 == 0:
+                console.print(f"[dim]{path.name}: {done}/{len(rows)} pronounced[/dim]")
+    if batch:
+        _flush_pronunciation(conn, batch, cfg, transcriber)
+        conn.commit()
+        done += len(batch)
+    return {"pronounced": done, "pending": len(rows)}
