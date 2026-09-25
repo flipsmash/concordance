@@ -265,3 +265,51 @@ def test_pos_repair_is_a_noop_when_lexicon_has_no_entry(monkeypatch):
     result = resolve.resolve_definition(c, lexicon={}, session=object())
     assert result is resolve.Tier.LOCAL
     assert c.part_of_speech == ""  # nothing to borrow -- stays blank, not an error
+
+
+def test_oed_runs_before_the_free_dictionary_network_call(monkeypatch):
+    monkeypatch.setattr(resolve.localdict, "enrich", _miss)
+    monkeypatch.setattr(resolve.dictionary, "enrich",
+                        lambda *a, **k: pytest.fail("FREE (network) should not run when 0 Dict has it"))
+    c = _cand()
+    assert resolve.resolve_definition(c, session=object(),
+                                      oed_lexicon={"testword": [_oed_sense()]}) is resolve.Tier.OED
+
+
+def test_skip_wordnik(monkeypatch):
+    monkeypatch.setattr(resolve.localdict, "enrich", _miss)
+    monkeypatch.setattr(resolve.dictionary, "enrich", lambda cand, session: None)
+    monkeypatch.setattr(resolve, "_pace_wordnik", lambda: pytest.fail("Wordnik should be skipped"))
+    monkeypatch.setattr(resolve.deepdef, "_from_yourdictionary", lambda cand, session: False)
+    assert resolve.resolve_definition(_cand(), max_tier=resolve.Tier.YOURDICT, session=object(),
+                                      wordnik_key="k", mw_api_key="", skip_wordnik=True) is None
+
+
+def test_free_dictionary_breaker_trips_after_consecutive_unreachable(monkeypatch):
+    from concordance import dictionary as d
+    d.reset_freedict_breaker()
+    calls = []
+    monkeypatch.setattr(d, "_get", lambda *a, **k: calls.append(1) or None)
+    for _ in range(d._FREEDICT_TRIP):
+        assert d._from_freedict(_cand(), object()) is False
+    assert d.freedict_disabled() and len(calls) == d._FREEDICT_TRIP
+    assert d._from_freedict(_cand(), object()) is False
+    assert len(calls) == d._FREEDICT_TRIP                   # no further network attempts while cooling down
+    monkeypatch.setattr(d, "_freedict_disabled_until", 0.0)  # cooldown elapsed -> tries again
+    d._from_freedict(_cand(), object())
+    assert len(calls) == d._FREEDICT_TRIP + 1
+    d.reset_freedict_breaker()
+
+
+def test_free_dictionary_breaker_resets_on_any_response(monkeypatch):
+    from concordance import dictionary as d
+    d.reset_freedict_breaker()
+
+    class R:
+        status_code = 404
+    seq = [None, None, R(), None, None]
+    monkeypatch.setattr(d, "_get", lambda *a, **k: seq.pop(0))
+    for _ in range(5):
+        d._from_freedict(_cand(), object())
+    assert not d.freedict_disabled()                        # the 404 broke the run of failures
+    d.reset_freedict_breaker()

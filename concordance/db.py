@@ -1394,7 +1394,7 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
     s = _safe_schema(schema)
     with conn.cursor() as cur:
         cur.execute(
-            f"""SELECT id, lemma, part_of_speech, sentence, chapter, as_seen
+            f"""SELECT id, lemma, part_of_speech, sentence, chapter, as_seen, validity_label
                 FROM {s}.word
                 WHERE active AND coalesce(definition,'') = ''
                   AND (validity_checked_at IS NULL
@@ -1444,7 +1444,7 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
             llm = Llama(model_path=mp, n_gpu_layers=cfg.n_gpu_layers, n_ctx=cfg.n_ctx, verbose=False)
 
     with conn.cursor() as cur:
-        for i, (wid, lemma, pos, sentence, chapter, as_seen) in enumerate(rows, 1):
+        for i, (wid, lemma, pos, sentence, chapter, as_seen, prior_label) in enumerate(rows, 1):
             cand = Candidate(lemma=lemma, pos=_POS_TO_TAGGER.get((pos or "").lower(), ""))
             if sentence:
                 cand.occurrences.append(Occurrence(sentence=sentence, chapter=chapter or "",
@@ -1459,7 +1459,10 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
             est = None
             found = resolve.resolve_definition(
                 cand, max_tier=max_tier, lexicon=lexicon, oed_lexicon=oed_lexicon, session=session,
-                wordnik_key=key, mw_api_key=mw_key, llm=None) is not None
+                wordnik_key=key, mw_api_key=mw_key, llm=None,
+                # Wordnik's paced 12.5 s call almost never lands for a word an
+                # earlier pass already scored as probable OCR/scan noise.
+                skip_wordnik=prior_label == "likely-artifact") is not None
             if not found:
                 est = validity_score.estimate(lemma, session=session, sentence=sentence or "")
                 if llm is not None:

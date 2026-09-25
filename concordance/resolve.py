@@ -190,6 +190,7 @@ def resolve_definition(
     wordnik_key: str | None = None,
     mw_api_key: str | None = None,
     llm=None,
+    skip_wordnik: bool = False,
 ) -> Tier | None:
     """Try tiers in order up to max_tier, stopping at the first hit. Mutates
     `cand` in place (definition/definition_source/part_of_speech/ipa/
@@ -200,7 +201,15 @@ def resolve_definition(
     by the caller and passed in -- omitting `lexicon` simply skips Tier
     LOCAL (e.g. scripts/lookup_word.py, which has no database at all).
     `oed_lexicon` (from oed.definitions.definition_lexicon) works the same
-    way for Tier OED -- omitting it just skips that tier."""
+    way for Tier OED -- omitting it just skips that tier.
+
+    0 Dict (Tier OED, a local lookup) runs BEFORE the Free Dictionary API
+    (Tier FREE, a network call that can stall ~20s+ per word) whenever
+    max_tier reaches it: Free Dictionary is built from the same Wiktionary
+    data Tier LOCAL already checked, so it adds little, while making every
+    0 Dict-covered word wait on it first. max_tier=FREE (the cheap `refill`
+    pass) still stops before 0 Dict, as before. `skip_wordnik` skips that
+    tier's 12.5 s paced call -- for words already scored likely-artifact."""
     lexicon = lexicon or {}
     oed_lexicon = oed_lexicon or {}
     resolved: Tier | None = None
@@ -208,15 +217,15 @@ def resolve_definition(
     if localdict.enrich(cand, lexicon):
         resolved = Tier.LOCAL
 
+    if resolved is None and max_tier >= Tier.OED:
+        if _from_oed(cand, oed_lexicon):
+            resolved = Tier.OED
+
     if resolved is None and max_tier >= Tier.FREE:
         session = session or dictionary.make_session()
         dictionary.enrich(cand, session)
         if cand.definition:
             resolved = Tier.FREE
-
-    if resolved is None and max_tier >= Tier.OED:
-        if _from_oed(cand, oed_lexicon):
-            resolved = Tier.OED
 
     if resolved is None and max_tier >= Tier.MW:
         key = mw_api_key if mw_api_key is not None else mw.mw_api_key()
@@ -225,7 +234,7 @@ def resolve_definition(
             if _from_mw(cand, session, key):
                 resolved = Tier.MW
 
-    if resolved is None and max_tier >= Tier.WORDNIK:
+    if resolved is None and max_tier >= Tier.WORDNIK and not skip_wordnik:
         key = wordnik_key if wordnik_key is not None else deepdef.wordnik_key()
         if key:
             session = session or dictionary.make_session()

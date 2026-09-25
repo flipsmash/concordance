@@ -42,6 +42,28 @@ _RETRY_STATUS = {429, 500, 502, 503, 504}
 _MAX_TRIES = 4
 _BACKOFF_BASE = 0.5   # seconds; doubles each retry
 
+# Free Dictionary API circuit breaker. api.dictionaryapi.dev regularly stalls
+# (a single request measured 19.6 s on 2026-09-25, past the 8 s timeout), and
+# every word then pays up to _MAX_TRIES timeouts + backoff (~35 s) before
+# falling through. After this many CONSECUTIVE words where the host couldn't
+# be reached at all, skip it for _FREEDICT_COOLDOWN seconds -- a cooldown, not
+# "until the process exits", because the long-running web server shares this
+# module (admin suggest-word) and must recover on its own. Any response --
+# even a 404 "no such word" -- resets the count.
+_FREEDICT_TRIP = 3
+_FREEDICT_COOLDOWN = 1800.0
+_freedict_failures = 0
+_freedict_disabled_until = 0.0
+
+
+def freedict_disabled() -> bool:
+    return time.monotonic() < _freedict_disabled_until
+
+
+def reset_freedict_breaker() -> None:
+    global _freedict_failures, _freedict_disabled_until
+    _freedict_failures, _freedict_disabled_until = 0, 0.0
+
 
 def make_session() -> requests.Session:
     session = requests.Session()
@@ -102,8 +124,20 @@ def enrich(cand: Candidate, session: requests.Session | None = None) -> None:
 def _from_freedict(cand: Candidate, session: requests.Session) -> bool:
     from .audio import looks_like_english_ipa  # lazy: avoids dictionary<->deepdef<->audio import cycle
 
+    global _freedict_failures, _freedict_disabled_until
+    if freedict_disabled():
+        return False
     resp = _get(session, _FREEDICT.format(word=cand.lemma))
-    if resp is None or resp.status_code != 200:
+    if resp is None:
+        _freedict_failures += 1
+        if _freedict_failures >= _FREEDICT_TRIP:
+            _freedict_disabled_until = time.monotonic() + _FREEDICT_COOLDOWN
+            _freedict_failures = 0
+            print(f"  (Free Dictionary API unreachable {_FREEDICT_TRIP} words in a row -- "
+                  f"skipping it for {int(_FREEDICT_COOLDOWN // 60)} minutes)")
+        return False
+    _freedict_failures = 0
+    if resp.status_code != 200:
         return False
     try:
         entry = resp.json()[0]
