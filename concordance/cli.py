@@ -2504,6 +2504,10 @@ def audio(
     dump_path: str = typer.Option(None, "--dump-path", help="Path to the kaikki Wiktextract dump "
                                    "(default: data/wiktextract-en.jsonl.gz)."),
     refetch: bool = typer.Option(False, "--refetch", help="Re-attempt all words (default: only ones with no word_audio row)."),
+    upgrade_guesses: bool = typer.Option(
+        False, "--upgrade-guesses",
+        help="Only words whose audio is a spelling-only guess (Piper) but that now have a valid IPA: "
+             "retry recordings / Azure IPA synthesis, keeping the guess if nothing better comes back."),
     limit: int = typer.Option(0, "--limit", "-l", help="Cap number of words processed."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
@@ -2519,7 +2523,8 @@ def audio(
         console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
     db.apply_schema(conn, schema)
     try:
-        stats = db.compute_audio(conn, schema, dump_path=dump_path, only_missing=not refetch, limit=limit)
+        stats = db.compute_audio(conn, schema, dump_path=dump_path, only_missing=not refetch, limit=limit,
+                                 upgrade_guesses=upgrade_guesses)
     except FileNotFoundError as exc:
         console.print(f"[red]✗[/red] {exc}"); raise typer.Exit(code=1)
     conn.close()

@@ -5202,7 +5202,8 @@ def download_commons_direct_finds(conn, schema: str = DEFAULT_SCHEMA, limit: int
 
 
 def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None,
-                   only_missing: bool = True, limit: int = 0, delay: float = 0.3) -> dict:
+                   only_missing: bool = True, limit: int = 0, delay: float = 0.3,
+                   upgrade_guesses: bool = False) -> dict:
     """Fill in word_audio: real Commons recordings where kaikki/Wiktextract has
     one, else a real recording the direct Commons search found that kaikki
     missed, else a real Merriam-Webster recording (mw.py's Collegiate API --
@@ -5234,12 +5235,22 @@ def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = No
 
     where = (f" WHERE NOT EXISTS (SELECT 1 FROM {s}.word_audio a WHERE a.word_id=w.id)"
              if only_missing else "")
+    if upgrade_guesses:
+        # Words whose audio is only a spelling guess (Piper / legacy
+        # azure_guess) but that have gained a transcription since -- e.g. an
+        # 0 Dict IPA backfilled by `oed-ipa`, or a batch that fell back to
+        # Piper while Azure's quota was spent. Only-missing never revisits
+        # these (they HAVE audio), so they'd keep the guess forever.
+        where = (f" WHERE w.active AND coalesce(w.ipa, '') <> '' AND EXISTS (SELECT 1 FROM {s}.word_audio a "
+                 f"WHERE a.word_id = w.id AND a.source IN ('piper', 'azure_guess'))")
     with conn.cursor() as cur:
         cur.execute(f"""SELECT w.id, w.lemma, w.ipa, w.ipa_source, w.part_of_speech, cs.download_url
                         FROM {s}.word w
                         LEFT JOIN {s}.word_commons_search cs ON cs.word_id = w.id{where}""" +
                     (f" LIMIT {int(limit)}" if limit else ""))
         rows = cur.fetchall()
+    if upgrade_guesses:
+        rows = [r for r in rows if audio.looks_like_english_ipa(r[2] or "")]
 
     dist: Counter = Counter()
     if not rows:
@@ -5332,6 +5343,9 @@ def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = No
                     ipa_used = audio.normalize_ipa(existing_ipa, keep_optional=keep_optional)
                     row = ("azure", str(dest), ipa_used, voice, None)
                     dist["azure"] += 1
+            if row is None and upgrade_guesses:
+                dist["kept_guess"] += 1          # nothing better than the Piper clip it already has
+                continue
             if row is None:
                 # Piper: no curated IPA needed, so this is the tier that
                 # actually closes the gap the others structurally can't --

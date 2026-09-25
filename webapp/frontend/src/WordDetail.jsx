@@ -203,9 +203,13 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
         {isGuessedAudio && (
           <span
             className="audio-guess-badge"
-            title="Synthesized from spelling alone — no verified pronunciation was found for this word"
+            title={
+              word.ipa
+                ? 'This audio was synthesized from the spelling alone; it does not yet voice the transcription shown below'
+                : 'Synthesized from spelling alone — no verified pronunciation was found for this word'
+            }
           >
-            unverified
+            {word.ipa ? 'audio: spelling guess' : 'unverified'}
           </span>
         )}
         <a
