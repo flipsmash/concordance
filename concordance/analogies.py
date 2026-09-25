@@ -1,7 +1,7 @@
 """Analogy relation extraction + verification backfill (§ analogies).
 
 Populates word_relation_edge (and its supporting wn_relation_term /
-wn_relation_fanout / wn_relation_scan tables, see concordance/db.py's
+wn_relation_fanout / wn_relation_scan tables, see concordance/db's
 _SCHEMA_DDL) so webapp/backend/quiz.py's `analogy` question type can assemble
 MAT-style "A is to B as C is to ___" items entirely from precomputed data at
 quiz-start time -- unlike distractors.py's live generation for mc/true_false/

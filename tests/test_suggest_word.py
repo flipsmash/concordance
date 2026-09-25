@@ -177,7 +177,7 @@ def test_search_gathers_candidates_from_every_source_independently(monkeypatch):
 def test_search_flags_mw_foreign_loanword_pos_as_a_warning(monkeypatch):
     """mw.is_foreign_pos checks MW's RAW '<Language> noun' string -- a signal
     normalize_pos's lowercasing destroys (see mw.py's own comment on
-    is_foreign_pos, and db.py's mw_backfill, which applies the identical
+    is_foreign_pos, and db's mw_backfill, which applies the identical
     check the same way). Confirms this endpoint's MW branch does the same,
     not just a plain junk_pos_reason recheck against the already-normalized
     POS (which would never catch this case)."""

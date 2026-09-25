@@ -114,12 +114,12 @@ class QuizStartRequest(BaseModel):
     domains: list[str] | None = None  # usas_domains.DOMAIN_BUCKETS keys (the same 6
                                        # buckets /api/graph/legend uses), not raw USAS codes
     authors: list[str] | None = None  # book.author values (plain text, no author table --
-                                       # see db.py); a word qualifies if it's in ANY book by
+                                       # see db); a word qualifies if it's in ANY book by
                                        # ANY of these authors
     book_ids: list[int] | None = None  # word must appear in ANY of these specific books.
                                         # Combined with `authors` as OR, not AND -- "words from
                                         # these authors OR these specific books" is one pool,
-                                        # not a narrowing intersection (unlike browse.py's
+                                        # not a narrowing intersection (unlike browse's
                                         # author/book_id filters, which DO intersect).
     genres: list[str] | None = None  # concordance.genre.GENRE_LIST values (book_genre.genre);
                                       # word must appear in ANY book tagged with ANY of these --
@@ -329,7 +329,7 @@ def _add_book_author_filter(body: QuizStartRequest, filters: list[str], params: 
     time). `authors`/`book_ids` combine as OR within this one EXISTS, not
     AND against the rest of `filters`: a word qualifies if it's in ANY
     book by ANY of `authors`, OR in ANY of `book_ids` -- one combined pool,
-    not an intersection (unlike browse.py's author/book_id filters, which
+    not an intersection (unlike browse's author/book_id filters, which
     narrow each other)."""
     if not (body.authors or body.book_ids):
         return

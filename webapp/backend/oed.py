@@ -2,13 +2,13 @@
 entries/definitions/quotations/pronunciations extracted from scanned OED
 volume PDFs by concordance/oed/pipeline.py's CLI ingest, previously only
 inspectable via direct SQL. Every endpoint here is `require_admin`, not
-`require_viewer` -- unlike browse.py's end-user vocab surface, this is a
+`require_viewer` -- unlike browse's end-user vocab surface, this is a
 curation/QA tool over raw ingest output (needs-review flags, page numbers,
 etc.), not something a reader should see.
 
 Imports `main` as a module and always accesses `_main.get_conn()`/
 `_main.require_admin` via dotted attribute lookup, not a bare `from ...
-import`, matching browse.py/quiz.py/progress.py -- same reason: registered
+import`, matching browse/quiz.py/progress.py -- same reason: registered
 into `app` at the bottom of main.py, after those names are defined, so a
 bare import would freeze an unset value.
 

@@ -28,7 +28,7 @@ NULL); quiz_answer.question_type/.direction were added via a later ALTER
 TABLE with no backfill (NULL on old rows) -- always read question_type from
 quiz_question, never quiz_answer. A word can belong to 2+ USAS domain buckets
 or 2+ source books; an answer counts toward EVERY one it touches (matching
-browse.py's _bucket_counts() non-partitioning convention) -- bars/tables here
+browse's _bucket_counts() non-partitioning convention) -- bars/tables here
 deliberately don't sum to the grand total, and UI copy should say so rather
 than let it look like a bug. The daily-practice streak buckets by UTC day, a
 known MVP simplification (a per-user timezone preference is a natural, not
@@ -252,7 +252,7 @@ def _accuracy_by_question_type(cur, schema: str, user_id: int) -> list[AccuracyB
 def _accuracy_by_domain(cur, schema: str, user_id: int) -> list[AccuracyBucket]:
     """Grain = the answer row (unit is the word) -- a word can straddle
     multiple USAS domain buckets, so this is one EXISTS-gated query per
-    bucket (copying browse.py's _bucket_counts() convention exactly) rather
+    bucket (copying browse's _bucket_counts() convention exactly) rather
     than one GROUP BY: an answer counts toward every bucket its word
     touches, so bucket totals don't sum to the grand total."""
     results = []

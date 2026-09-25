@@ -27,7 +27,7 @@ def test_wordnet_pos_mapping():
 
 
 def test_relation_family_covers_every_relation_type_used_in_schema():
-    # concordance/db.py's word_relation_edge.relation_type comment enumerates
+    # concordance/db's word_relation_edge.relation_type comment enumerates
     # these exact values -- every one must have a family bucket, or an edge of
     # that type could never be paired with an anchor (see analogy_select.py).
     expected_types = {

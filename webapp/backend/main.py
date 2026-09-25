@@ -39,7 +39,7 @@ SORT_COLUMNS = {
     # per dictionary convention for a demonym-derived word) would otherwise
     # sort as the very first result in an A-Z listing, ahead of every
     # ordinary lowercase word -- confirmed live, this exact word is what
-    # surfaced the bug (see browse.py's matching fix/comment).
+    # surfaced the bug (see browse's matching fix/comment).
     "lemma": "w.lemma_lc",
     "part_of_speech": "w.part_of_speech",
     "definition": "w.definition",
@@ -283,7 +283,7 @@ def list_words(
         filters.append("w.lemma_lc LIKE %s")
         params.append(f"{letter.lower()}%")
     if q:
-        # Same trigram threshold as /api/words/search and browse.py's own
+        # Same trigram threshold as /api/words/search and browse's own
         # `q` filter -- one "what does typing X match" behavior everywhere
         # in the app, not a second, differently-tuned search.
         filters.append("similarity(w.lemma, %s) > 0.1")
@@ -295,7 +295,7 @@ def list_words(
         total = cur.fetchone()[0]
 
         # Best text match wins over the requested sort column while actively
-        # searching -- same reasoning and pattern as browse.py's own `elif
+        # searching -- same reasoning and pattern as browse's own `elif
         # q:` branch: "search within these filters" and "alphabetical/
         # difficulty order" aren't reconcilable in one ORDER BY, and search
         # intent dominates. Found live: a curator searching an exact lemma
@@ -470,7 +470,7 @@ def list_rejected(
     """One row per distinct rejected lemma (rejected_lemma_index), not per
     (book, lemma) instance -- curation review happens once per WORD, not
     once per book it was rejected in (see the view's own schema comment in
-    concordance/db.py, and refresh via `concordance refresh-rejected-index`
+    concordance/db, and refresh via `concordance refresh-rejected-index`
     to pick up recent ingests/accepts)."""
     order_col = REJECTED_SORT_COLUMNS[sort]
     order_dir = "ASC" if dir == "asc" else "DESC"
@@ -538,10 +538,10 @@ def rejected_reasons(_: dict = Depends(require_admin)) -> list[str]:
     # of rejected_word to rediscover the same ~8 values every page load was
     # pure waste, and at scale (106M+ rows) an expensive one: the exact
     # unfiltered-DISTINCT-over-the-whole-table shape that OOM-killed a live
-    # ingest run elsewhere in this codebase (db.py's fetch_known_verdicts,
+    # ingest run elsewhere in this codebase (db's fetch_known_verdicts,
     # 2026-08-16), just not yet triggered here since this page hadn't been
     # opened. FREQUENCY_FLOOR excluded: sync_book_results no longer persists
-    # it (db.py:1191 -- deterministic per-lemma, never book-specific, and
+    # it (db:1191 -- deterministic per-lemma, never book-specific, and
     # never surfaced as a reason to review/rescue a word), so it would always
     # return zero rows now -- same "don't offer an option that can't match
     # anything" reasoning as browse_genres.
@@ -901,7 +901,7 @@ def word_neighbors(
     _: dict = Depends(require_viewer),
 ) -> NeighborsResponse:
     """Nearest neighbors of a word by cosine distance on its embedding vector
-    (hnsw ANN index — see db.py's word_embedding table), not an all-pairs
+    (hnsw ANN index — see db's word_embedding table), not an all-pairs
     precompute. `signal` picks which vector: 'definition' (meaning, via a
     sentence embedding of the dictionary gloss) or 'fasttext' (word-form
     subwords, works even with no definition). `same_domain_only`/
@@ -1200,7 +1200,7 @@ class SPAStaticFiles(StaticFiles):
 from webapp.backend import quiz as _quiz  # noqa: E402
 app.include_router(_quiz.router)
 
-# Same ordering requirement as quiz.py, same reason -- browse.py's own
+# Same ordering requirement as quiz.py, same reason -- browse's own
 # `from webapp.backend import main as _main` resolves against this already-
 # populated module namespace at its own module-load time.
 from webapp.backend import browse as _browse  # noqa: E402

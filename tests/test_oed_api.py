@@ -5,7 +5,7 @@ convention as test_admin_word_sort.py, including its main.SCHEMA-monkeypatch
 pattern -- extended here to also monkeypatch webapp.backend.oed.OED_SCHEMA,
 since that module deliberately hardcodes the oed schema name at import time
 (see its own docstring) rather than reading a per-request schema like
-browse.py/quiz.py do. Patching the module attribute directly is still safe
+browse/quiz.py do. Patching the module attribute directly is still safe
 for a test: production code never overrides it, this only redirects where
 THIS test's requests land."""
 

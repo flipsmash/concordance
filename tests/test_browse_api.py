@@ -1691,7 +1691,7 @@ def test_author_related_returns_neighbors_sorted_by_score():
         # All 4 of Author A's words here have author-df=2 (shared with
         # exactly one other author each), so every word's idf is identical
         # and the cosine collapses to sqrt(3)/2 -- see
-        # compute_author_similarity's docstring in db.py for why author-df
+        # compute_author_similarity's docstring in db for why author-df
         # (not book-df) is the denominator that makes this number
         # meaningfully different from book_related's metric.
         assert edge["score"] == pytest.approx(0.8660254, abs=1e-4)

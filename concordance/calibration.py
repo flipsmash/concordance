@@ -4,7 +4,7 @@ A per-(user, word) adjustment to the ex-ante difficulty score
 (`concordance/difficulty.py`), from that user's own FIRST exposure to the
 word in a quiz. Deliberately NOT a population-level IRT calibration: with
 one dominant rater (see `compute_personal_difficulty`'s own docstring in
-db.py), response volume only ever tells you that person's own relative
+db), response volume only ever tells you that person's own relative
 gaps, never identifies "true" item difficulty the way a real multi-rater
 IRT fit would. This is closer to "ex-ante score plus one bit of first-hand
 evidence per word" than to a rigorous psychometric model, and is scoped
@@ -21,7 +21,7 @@ exposure (the same derivation Elo's own update rule comes from):
     b_new = b0 - eta * (y - P0)
 
 Since each (user, word) pair contributes at most one first-exposure
-response ever (see db.py), there is no accumulating sample size to shrink
+response ever (see db), there is no accumulating sample size to shrink
 over per item -- every personalized value is always exactly "ex-ante,
 nudged once" or "ex-ante, untouched." eta/scale are accordingly the only
 two tunable constants, and are meant to be hand-tuned (via app_settings),

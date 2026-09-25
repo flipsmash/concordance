@@ -1,7 +1,7 @@
 """Stage: semantic-distance vectors (§ post-ingestion).
 
 Two independent per-word signals, both stored in ``word_embedding`` (one row
-per word, two vector columns — see db.py's ``_VECTOR_DDL``) and queried on
+per word, two vector columns — see db's ``_VECTOR_DDL``) and queried on
 demand via a pgvector HNSW index for nearest-neighbor lookups. Deliberately
 **not** an all-pairs distance matrix: at 20k+ active words (and growing every
 batch ingest) that's already 200M+ pairs, and only gets worse — a fixed-size

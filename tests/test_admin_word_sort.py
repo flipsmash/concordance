@@ -85,7 +85,7 @@ def test_admin_word_search_ranks_by_relevance_not_the_active_sort_column():
     live: searching an exact lemma ("Hellenomania") returned hundreds of
     loosely-related trigram matches with the actual word 7 pages deep,
     indistinguishable from "not found." A search must surface the best match
-    first regardless of the active sort column (matching browse.py's public
+    first regardless of the active sort column (matching browse's public
     search, which already worked this way) -- and clearing the search
     resumes that sort column, proven here by the no-`q` request below."""
     from starlette.testclient import TestClient

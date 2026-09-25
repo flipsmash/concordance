@@ -5,7 +5,7 @@ Two things this deliberately does NOT need to build, because the rest of
 the codebase already provides them for free:
 
   - "Tracked as normal" for a future book that uses this word: sync_book_results
-    (concordance/db.py) upserts via ON CONFLICT (lemma_lc) DO UPDATE and
+    (concordance/db) upserts via ON CONFLICT (lemma_lc) DO UPDATE and
     already handles attaching a word_book row to a book-less word the first
     time any book uses it -- import_defined_words proves the same pattern.
   - "Proof positive for backend vetting": fetch_known_verdicts treats ANY
@@ -123,7 +123,7 @@ def _gather_candidates(conn, lemma: str) -> tuple[list[dict], bool]:
             resolved_pos = normalize_pos(e.part_of_speech)
             # is_foreign_pos checks the RAW (pre-normalize_pos) string -- MW's
             # "<Language> noun" foreign-loanword tag is a capitalized demonym,
-            # a signal normalize_pos's lowercasing destroys (see db.py's own
+            # a signal normalize_pos's lowercasing destroys (see db's own
             # mw_backfill, which applies this exact same check the same way).
             reason = junk_pos_reason(resolved_pos) or (
                 RejectReason.FOREIGN_LANGUAGE if mw.is_foreign_pos(e.part_of_speech) else None)

@@ -39,7 +39,7 @@ def main() -> None:
     args = parser.parse_args()
 
     conn = db.connect()
-    s = db._safe_schema(args.schema)  # noqa: SLF001 -- same helper db.py's own commands use
+    s = db._safe_schema(args.schema)  # noqa: SLF001 -- same helper db's own commands use
 
     with conn.cursor() as cur:
         cur.execute(

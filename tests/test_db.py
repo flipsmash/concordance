@@ -1473,7 +1473,7 @@ def test_author_fame_stops_early_on_evidence_degradation(monkeypatch):
     from concordance import db as dbmod
     from concordance import fame
 
-    monkeypatch.setattr(dbmod, "_FAME_EVIDENCE_FAILURE_MIN_SAMPLE", 3)
+    monkeypatch.setattr(dbmod.books, "_FAME_EVIDENCE_FAILURE_MIN_SAMPLE", 3)
     monkeypatch.setattr(fame, "gather_author_evidence",
                         lambda author, session: {"ngram": {"failed": True}, "wikidata": {"failed": True}, "snippets_failed": True})
     monkeypatch.setattr(fame, "score_author", lambda llm, author, factors: (1.0, "blind guess"))
@@ -3013,7 +3013,7 @@ def test_apply_schema_stamps_versions_and_runs_each_migration_once(monkeypatch):
                 cur.execute(f"CREATE TABLE {s}.migration_probe (x int)")
 
         latest = db.MIGRATIONS[-1][0]
-        monkeypatch.setattr(db, "MIGRATIONS", [*db.MIGRATIONS, (latest + 1, _migration_test)])
+        monkeypatch.setattr(db.schema, "MIGRATIONS", [*db.MIGRATIONS, (latest + 1, _migration_test)])
         db.apply_schema(conn, schema)
         db.apply_schema(conn, schema)          # current -> fast path, no re-run
         assert calls == [schema]
@@ -3025,7 +3025,7 @@ def test_apply_schema_stamps_versions_and_runs_each_migration_once(monkeypatch):
             with c.cursor() as cur:
                 cur.execute("SELECT 1/0")
 
-        monkeypatch.setattr(db, "MIGRATIONS", [*db.MIGRATIONS, (latest + 2, _migration_boom)])
+        monkeypatch.setattr(db.schema, "MIGRATIONS", [*db.schema.MIGRATIONS, (latest + 2, _migration_boom)])
         with pytest.raises(Exception):
             db.apply_schema(conn, schema)
         assert db._schema_version(conn, schema) == latest + 1

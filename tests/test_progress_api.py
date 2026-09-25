@@ -26,7 +26,7 @@ from webapp.backend import auth
 # `from webapp.backend.progress import ...` at this file's top would do)
 # starts the cycle from the wrong end and fails with "partially initialized
 # module ... has no attribute 'router'" -- see main.py's own comment on this
-# same ordering requirement for quiz.py/browse.py/word_sets.py.
+# same ordering requirement for quiz.py/browse/word_sets.py.
 from webapp.backend import main as _main  # noqa: F401
 from webapp.backend.progress import (
     _accuracy_by_domain,
@@ -196,7 +196,7 @@ def test_unfinished_session_excluded():
 def test_domain_bucket_overlap_not_partitioned():
     """A word in two USAS categories spanning two different buckets must
     increment BOTH buckets' totals -- confirms the deliberate non-partitioning
-    EXISTS semantics (copied from browse.py's _bucket_counts()), not a bug."""
+    EXISTS semantics (copied from browse's _bucket_counts()), not a bug."""
     schema = "cc_test_progress_domain"
     conn = db.connect(_URL)
     with conn.cursor() as cur:

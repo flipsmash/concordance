@@ -1,7 +1,7 @@
 """Unified definition-acquisition cascade (§ maintenance redesign).
 
 One place that defines "the cascade order," used consistently by ingest
-(pipeline.py), refill_definitions/deepen_definitions (db.py), and the
+(pipeline.py), refill_definitions/deepen_definitions (db), and the
 stand-alone scripts/lookup_word.py -- replacing four previously separate,
 drifting implementations of overlapping cascades that had no single source
 of truth for tier order, rate-limiting, or POS handling.

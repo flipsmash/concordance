@@ -1,12 +1,12 @@
 """Home/landing page summary (§ home page) -- a handful of corpus-scope
 numbers for the Home page's "colophon sentence" (total words/books/authors/
 categories) plus a few unscoped, app-wide "impressive" stats. Nothing here
-takes filter params; unlike browse.py this is a single fixed snapshot of the
+takes filter params; unlike browse this is a single fixed snapshot of the
 whole corpus, not a facet-combinable listing.
 
 Imports `main` as a module and always accesses `_main.SCHEMA`/
 `_main.get_conn()`/`_main.require_viewer` via dotted attribute lookup, not a
-bare `from ... import`, matching browse.py/quiz.py/progress.py -- same
+bare `from ... import`, matching browse/quiz.py/progress.py -- same
 reason: registered into `app` at the bottom of main.py, after those names
 are defined, so a bare import would freeze an unset value.
 """
@@ -54,8 +54,8 @@ def home_summary(_: dict = Depends(_main.require_viewer)) -> HomeSummary:
         total_words = cur.fetchone()[0]
 
         # Matches Books.jsx/Authors.jsx's own totals: a plain count(*) FROM
-        # book would include books with zero active words, which browse.py's
-        # own listing endpoints never count (see browse.py's dedup-rule
+        # book would include books with zero active words, which browse's
+        # own listing endpoints never count (see browse's dedup-rule
         # docstring -- JOIN+GROUP BY is correct here since book/author IS the
         # thing being counted, not filtered-through).
         cur.execute(
@@ -135,7 +135,7 @@ def home_summary(_: dict = Depends(_main.require_viewer)) -> HomeSummary:
                                         definition=row[3], difficulty=row[4]) if row else None)
 
     # Not a query -- usas.categories()'s level field marks the 21 top-level
-    # USAS discourse fields, the same fixed set browse.py's own _TOP_CODES
+    # USAS discourse fields, the same fixed set browse's own _TOP_CODES
     # derives at import time (its own comment: "21 static (code, name) pairs
     # derived from a module-level constant, not data that can change at
     # runtime").

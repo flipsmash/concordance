@@ -12,7 +12,7 @@ GET .../flashcards doesn't already give you fresh.
 
 Imports `main` as a module (not `from webapp.backend.main import ...`) and
 is registered at the bottom of main.py, same reason/ordering requirement
-as quiz.py and browse.py (see their own docstrings) -- this module's own
+as quiz.py and browse (see their own docstrings) -- this module's own
 `from webapp.backend import main as _main` resolves against main.py's
 already-populated namespace at word_sets.py's own module-load time.
 

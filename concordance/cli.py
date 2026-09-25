@@ -701,7 +701,7 @@ def refresh_rejected_index(
 ) -> None:
     """Refresh rejected_lemma_index, the precomputed distinct-lemma view
     behind the Rejected curation tab's search box / A-Z letter-jump (see
-    concordance/db.py's schema comment on rejected_lemma_index for why
+    concordance/db's schema comment on rejected_lemma_index for why
     rejected_word itself -- ~25M rows, ~468k distinct lemmas -- is too big
     to search directly). Meant to run on its own daily schedule (cron/
     systemd timer), independent of `maintain` -- this is cheap (~15-20s)
@@ -1170,10 +1170,10 @@ def author_stats_cmd(
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Refresh author_stats -- the precomputed mean_difficulty/density/
-    unique_word_count/overall_difficulty webapp/backend/browse.py's
+    unique_word_count/overall_difficulty webapp/backend/browse's
     browse_authors reads for the common unfiltered case instead of
     recomputing them live over the whole corpus on every request (see
-    concordance/db.py's compute_author_stats and author_stats' own CREATE
+    concordance/db's compute_author_stats and author_stats' own CREATE
     TABLE comment). Cheap and always a full recompute (a few seconds even
     at 29k books) -- safe to run after anything that changes word/word_book/
     word_difficulty/book (ingestion, difficulty scoring, archive-metadata),
@@ -1235,7 +1235,7 @@ def book_stats_cmd(
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Refresh book_stats -- one level down from `author-stats` (see that
-    command's help and concordance/db.py's compute_book_stats for the full
+    command's help and concordance/db's compute_book_stats for the full
     reasoning). Cheap and always a full recompute -- safe to run after
     anything that changes word/word_book/word_difficulty/book (ingestion,
     difficulty scoring, archive-metadata), and worth adding to the post-
