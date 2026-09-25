@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 
 from . import db, usas, wndomains
+from .validity_score import classification_gloss
 from .config import Config
 
 # assignable code -> label, and a compact reference block for the prompt
@@ -32,6 +33,8 @@ _SYSTEM = (
     "it captures a genuinely distinct, well-supported aspect (e.g. a word that is both a "
     "physical object AND a food). Do NOT pad with loosely-related codes; if unsure about an "
     "extra code, leave it out. A word may legitimately be both a domain and an expressive term. "
+    "Classify ONLY the sense described by 'def' and used in 'sentence'; other meanings the same "
+    "spelling may have elsewhere are irrelevant and must not influence the codes. "
     "A 'hint' lists domain codes suggested by a lexicon — keep the ones that fit the "
     "sentence, drop the rest, and ADD codes for meaning the hint misses (emotion, quality, "
     "manner, thought, social, etc.). "
@@ -43,11 +46,16 @@ _SYSTEM = (
 def _prompt_items(items: list[dict]) -> list[dict]:
     out = []
     for it in items:
-        hint = sorted(wndomains.usas_prior(it["word"]))
+        # Never the cross-referenced spelling: "Variant spelling of faggot —
+        # A bundle of sticks" must reach the model as just its gloss, and the
+        # hint must come from THAT sense (see validity_score.
+        # classification_gloss / wndomains.usas_prior_for_sense).
+        gloss = classification_gloss(it.get("definition"))
+        hint = sorted(wndomains.usas_prior_for_sense(it["word"], gloss))
         out.append({
             "word": it["word"],
             "pos": it.get("pos", ""),
-            "def": (it.get("definition") or "")[:200],
+            "def": gloss[:200],
             "sentence": (it.get("sentence") or "")[:200],
             "hint": hint,
         })
@@ -157,7 +165,7 @@ def _parse(text: str):
 
 def classify_and_store(conn, schema: str, cfg: Config | None = None, limit: int = 0,
                        only_missing: bool = False, batch: int | None = None,
-                       commit_every: int = 200) -> dict:
+                       commit_every: int = 200, word_ids: list[int] | None = None) -> dict:
     """Classify every word in {schema}.word and write tags to word_category.
     Idempotent for the LLM-sourced rows (cleared and rewritten each run).
 
@@ -192,8 +200,12 @@ def classify_and_store(conn, schema: str, cfg: Config | None = None, limit: int 
     with conn.cursor() as cur:
         where = (" WHERE NOT EXISTS (SELECT 1 FROM " + ssch + ".word_category wc WHERE wc.word_id=word.id)"
                  if only_missing else "")
+        params: tuple = ()
+        if word_ids is not None:
+            where = " WHERE word.id = ANY(%s)"     # a targeted re-classify: only these words
+            params = (list(word_ids),)
         cur.execute(f"SELECT id, lemma, part_of_speech, definition, sentence FROM {ssch}.word word"
-                    + where + (f" LIMIT {int(limit)}" if limit else ""))
+                    + where + (f" LIMIT {int(limit)}" if limit else ""), params)
         rows = cur.fetchall()
         cur.execute(f"SELECT code, id FROM {ssch}.category WHERE taxonomy='usas'")
         code_id = dict(cur.fetchall())
@@ -212,8 +224,8 @@ def classify_and_store(conn, schema: str, cfg: Config | None = None, limit: int 
     # ever needs to INSERT, never worry about stale rows from a prior run
     # over the same ids.
     with conn.cursor() as cur:
-        if only_missing:
-            pass
+        if only_missing or word_ids is not None:
+            pass      # targeted re-classify replaces per word below, only when new codes come back
         elif limit:
             cur.execute(f"DELETE FROM {ssch}.word_category WHERE source IN ('llm','wnd+llm') "
                         "AND word_id = ANY(%s)", ([r[0] for r in rows],))
@@ -243,9 +255,13 @@ def classify_and_store(conn, schema: str, cfg: Config | None = None, limit: int 
             for it in chunk:
                 codes = tags.get(it["word"].lower(), [])
                 if not codes:
-                    continue
+                    continue      # keep whatever the word already has rather than leave it untagged
+                if word_ids is not None:
+                    cur.execute(f"DELETE FROM {ssch}.word_category WHERE word_id = %s "
+                                "AND source IN ('llm','wnd+llm')", (it["_id"],))
                 stats["classified"] += 1
-                prior_fields = {c[0] for c in wndomains.usas_prior(it["word"])}
+                prior_fields = {c[0] for c in wndomains.usas_prior_for_sense(
+                    it["word"], classification_gloss(it["definition"]))}
                 for rank, code in enumerate(codes):
                     cid = code_id.get(code)
                     if cid is None:
@@ -269,3 +285,23 @@ def classify_and_store(conn, schema: str, cfg: Config | None = None, limit: int 
     # for the live crash this pattern is fixing.
     clf.close()
     return stats
+
+
+def sense_affected_word_ids(conn, schema: str) -> list[int]:
+    """Active words whose classifier input changes under the
+    classification_gloss / usas_prior_for_sense rules: a definition that
+    cross-references another spelling, or a WordNet-Domains hint whose
+    senses disagree (so the old merged hint may have pointed at the wrong
+    sense). The set a targeted re-classify should cover."""
+    ssch = db._safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT id, lemma, coalesce(definition, '') FROM {ssch}.word WHERE active")
+        rows = cur.fetchall()
+    senses = wndomains.load_senses()
+    out = []
+    for wid, lemma, definition in rows:
+        s = senses.get(lemma.strip().lower())
+        polysemous = bool(s) and len({doms for doms, _ in s}) > 1 and any(doms for doms, _ in s)
+        if polysemous or classification_gloss(definition) != definition.strip():
+            out.append(wid)
+    return out

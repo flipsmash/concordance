@@ -430,6 +430,47 @@ def foreign_cast_out_reason(word: str, foreign_langs: list[str] | None,
     return f"foreign ({shown} per Wiktionary); no English entry or usage"
 
 
+# --- the gloss a classifier / embedder may see ------------------------------
+#
+# A definition that points at another spelling ("Variant spelling of faggot —
+# A bundle of sticks...", "Obsolete form of intend.", "Plural of goblin.")
+# must never let the TARGET word into semantic judgments about THIS word: the
+# target can carry senses the pointer doesn't (faggot's slur sense got fagot
+# tagged S3.2 "Relationship: Intimate/sexual" despite a bundle-of-sticks gloss
+# and a sentence about fagots lit for Latimer and Ridley). Only the pointer's
+# own gloss (after its dash) survives; a bare pointer contributes nothing.
+
+_POINTER_QUALIFIER = (r"(?:alternative|variant|obsolete|archaic|dated|rare|non-?standard|informal|dialect(?:al)?"
+                      r"|eye[- ]dialect|pronunciation|mis-?spelling|standard|british|american|us|uk|scottish"
+                      r"|scots|older|early|later|contracted|clipped|irregular|poetic|historical|rare)")
+_POINTER_RE = re.compile(
+    r"^\s*(?:\([^)]*\)\s*)*(?:(?:an?|the)\s+)?(?:"
+    rf"(?:{_POINTER_QUALIFIER}\s+(?:(?:or|and|,)\s*)?)+(?:spelling|form|variant)s?\s+of\b"
+    r"|(?:variant|plural|misspelling|diminutive)\s+of\b"
+    r"|(?:first|second|third)-person\b[^.;\u2014]{0,80}?\bof\b"
+    r"|(?:simple\s+)?(?:past|present)\s+(?:tense|participle)\b[^.;\u2014]{0,40}?\bof\b"
+    r"|(?:comparative|superlative)\s+(?:form\s+)?of\b"
+    r")", re.IGNORECASE)
+_GLOSS_DASH_RE = re.compile(r"\s(?:\u2014|\u2013|--|-)\s|:\s")
+_CLAUSE_SPLIT_RE = re.compile(r"(?<=[.;])\s+")
+
+
+def classification_gloss(definition: str | None) -> str:
+    """`definition` with every cross-reference to another spelling removed --
+    the text semantic classification (and anything else judging THIS word's
+    meaning) should see. A pointer clause with its own gloss keeps only the
+    gloss; a bare pointer clause is dropped; other clauses pass through."""
+    kept = []
+    for clause in _CLAUSE_SPLIT_RE.split((definition or "").strip()):
+        if not _POINTER_RE.match(clause):
+            kept.append(clause)
+            continue
+        parts = _GLOSS_DASH_RE.split(clause, maxsplit=1)
+        if len(parts) == 2 and parts[1].strip():
+            kept.append(parts[1].strip())
+    return " ".join(kept).strip()
+
+
 def _morph_root(word: str) -> str | None:
     """The most common known root reachable by peeling a SINGLE prefix or a
     SINGLE suffix off `word` — e.g. unbuttoned -> buttoned, bemused -> mused.

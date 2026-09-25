@@ -317,3 +317,16 @@ def test_english_evidence_strict_mode_for_misspellings():
     # a dictionary that only glosses it as a misspelling doesn't vouch for it
     assert e("zzqx", "Wiktionary", False, use_wordfreq=False, definition="Misspelling of receive.") is None
     assert e("zzqx", "Wiktionary", False, use_wordfreq=False, definition="A small songbird.")
+
+
+def test_classification_gloss_never_passes_the_pointed_to_spelling():
+    from concordance.validity_score import classification_gloss as g
+    assert g("Variant spelling of faggot — A bundle of sticks for fuel.") == "A bundle of sticks for fuel."
+    assert g("Alternative form of colour: the property of reflecting light.") == "the property of reflecting light."
+    for pointer in ("Obsolete spelling of bread.", "An obsolete or dialectal form of bayonet.",
+                    "Plural of goblin.", "third-person singular simple present indicative of think",
+                    "Past participle of go."):
+        assert g(pointer) == "", pointer
+    # real glosses that merely contain "form of" are untouched
+    assert g("A form of verse in which each line rhymes.") == "A form of verse in which each line rhymes."
+    assert "intend" not in g("(obsolete) To attend to; to apply oneself to.; Obsolete form of intend.")

@@ -20,6 +20,13 @@ from collections import Counter
 from pathlib import Path
 
 LEXICON_PATH = Path("wordnet-domains-sentiwords/lemma_domains.tsv")  # git-ignored (derived from licensed data)
+# Per-SENSE variant of the above (lemma \t domains \t WN gloss, one row per
+# synset the lemma belongs to) -- see usas_prior_for_sense. Built from the WN1.6
+# dict files kept (git-ignored) at wordnet-domains-sentiwords/wordnet-1.6/dict
+# and the WN1.6-aligned wn-domains-2.0-20050210 file, by build_sense_lexicon().
+SENSE_LEXICON_PATH = Path("wordnet-domains-sentiwords/lemma_sense_domains.tsv")
+WN16_DICT_DIR = Path("wordnet-domains-sentiwords/wordnet-1.6/dict")
+WND20_FILE = Path("wordnet-domains-sentiwords/wn-domains/wn-domains-2.0-20050210")
 
 # WordNet-Domains label -> USAS code. Curated; None = no clean USAS home (skip).
 _WND_TO_USAS = {
@@ -155,3 +162,93 @@ def usas_prior(lemma: str) -> Counter:
         if code:
             codes[code] += 1
     return codes
+
+
+# --- sense-aware prior -------------------------------------------------------
+#
+# usas_prior merges the domains of EVERY WordNet sense of a spelling, so a
+# word used in one sense can be hinted toward another: "fagot" (a bundle of
+# sticks, in a sentence about fagots lit for Latimer and Ridley) got the hint
+# S3.2 because only WordNet's slur sense of the same spelling carries a
+# domain -- and the classifier followed the hint. When senses disagree, pick
+# the sense whose WordNet gloss matches OUR definition, or give no hint.
+
+_sense_lexicon: dict[str, list[tuple[frozenset, str]]] | None = None
+_MIN_SENSE_OVERLAP = 2
+
+
+def build_sense_lexicon(wn16_dict_dir: str | Path = WN16_DICT_DIR, wnd_file: str | Path = WND20_FILE,
+                        out_path: str | Path = SENSE_LEXICON_PATH) -> int:
+    """lemma -> one row per WN1.6 synset: its WND domains ('factotum' when it
+    has no subject domain) and its gloss. Returns rows written."""
+    dom: dict[tuple[str, str], list[str]] = {}
+    for line in open(wnd_file):
+        key, _, val = line.strip().partition("\t")
+        off, _, pos = key.partition("-")
+        dom[(off, pos)] = val.split() or ["factotum"]
+    rows = 0
+    out_path = Path(out_path)
+    with out_path.open("w", encoding="utf-8") as out:
+        for fn, pos in _POS_FILE.items():
+            for line in open(Path(wn16_dict_dir) / f"data.{fn}", encoding="latin-1"):
+                if not line[:8].isdigit():
+                    continue
+                head, _, gloss = line.partition(" | ")
+                pre = head.split()
+                wcnt = int(pre[3], 16)
+                domains = " ".join(sorted(dom.get((pre[0], pos), ["factotum"])))
+                gloss = gloss.strip().split(";")[0].strip()       # definition part, not the examples
+                for i in range(wcnt):
+                    lem = re.sub(r"\(.*?\)", "", pre[4 + 2 * i].lower()).replace("_", " ").strip()
+                    out.write(f"{lem}\t{domains}\t{gloss}\n")
+                    rows += 1
+    return rows
+
+
+def load_senses(path: str | Path = SENSE_LEXICON_PATH) -> dict[str, list[tuple[frozenset, str]]]:
+    global _sense_lexicon
+    if _sense_lexicon is None:
+        _sense_lexicon = {}
+        p = Path(path)
+        if p.exists():
+            for line in p.open(encoding="utf-8"):
+                lem, doms, gloss = (line.rstrip("\n").split("\t") + ["", ""])[:3]
+                _sense_lexicon.setdefault(lem, []).append(
+                    (frozenset(d for d in doms.split() if d != "factotum"), gloss))
+    return _sense_lexicon
+
+
+def _stems(text: str) -> set[str]:
+    from nltk.stem import PorterStemmer
+    from .archive_metadata import _stopwords
+    stem = PorterStemmer().stem
+    stops = _stopwords()
+    return {stem(w) for w in re.findall(r"[a-z]{3,}", text.lower()) if w not in stops}
+
+
+def _codes_for(domains) -> Counter:
+    codes: Counter = Counter()
+    for d in domains:
+        code = _WND_TO_USAS.get(d)
+        if code:
+            codes[code] += 1
+    return codes
+
+
+def usas_prior_for_sense(lemma: str, gloss: str) -> Counter:
+    """usas_prior restricted to the sense `gloss` describes. Senses that agree
+    (or a single sense, or no WordNet entry) -> the plain usas_prior. Senses
+    that disagree -> the domains of the sense whose WordNet gloss shares at
+    least _MIN_SENSE_OVERLAP stemmed content words with `gloss` and strictly
+    more than any other sense; no clear winner (or no gloss) -> no hint."""
+    senses = load_senses().get(lemma.strip().lower())
+    if not senses or len({doms for doms, _ in senses}) <= 1:
+        return usas_prior(lemma)
+    ours = _stems(gloss or "")
+    if not ours:
+        return Counter()
+    scored = sorted(((len(ours & _stems(g)), doms) for doms, g in senses), key=lambda x: -x[0])
+    best, runner = scored[0][0], (scored[1][0] if len(scored) > 1 else 0)
+    if best < _MIN_SENSE_OVERLAP or best == runner:
+        return Counter()
+    return _codes_for(scored[0][1])

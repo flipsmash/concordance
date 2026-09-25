@@ -482,10 +482,16 @@ def classify(
     commit_every: int = typer.Option(200, "--commit-every",
                                       help="Commit to the DB after every N words, not just once at the end -- "
                                            "so a crash mid-run loses at most one partial chunk, not everything."),
+    sense_affected: bool = typer.Option(
+        False, "--sense-affected",
+        help="Re-classify only words whose input changed under the sense rules: a definition that "
+             "cross-references another spelling, or a WordNet hint whose senses disagree."),
+    ids: str = typer.Option("", "--ids", help="Comma-separated word ids to re-classify (only these)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="With --sense-affected/--ids: count only."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Tag every word in the DB with USAS categories (LLM + WordNet-Domains prior)."""
-    from .classify import classify_and_store
+    from .classify import classify_and_store, sense_affected_word_ids
     try:
         conn = db.connect(database_url)
     except Exception as exc:  # noqa: BLE001
@@ -493,8 +499,16 @@ def classify(
     cfg = Config()
     if model:
         cfg.model_path = str(model)
+    word_ids = None
+    if ids:
+        word_ids = [int(x) for x in ids.split(",") if x.strip()]
+    elif sense_affected:
+        word_ids = sense_affected_word_ids(conn, schema)
+    if word_ids is not None and dry_run:
+        console.print(f"[green]✓[/green] classify (dry run): {len(word_ids)} words would be re-classified")
+        return
     stats = classify_and_store(conn, schema, cfg, limit, only_missing=only_missing, batch=batch or None,
-                               commit_every=commit_every)
+                               commit_every=commit_every, word_ids=word_ids)
     conn.close()
     console.print(f"[green]✓[/green] classified [bold]{stats['classified']}[/bold]/{stats['words']} words "
                   f"-> {stats['assignments']} category assignments"
