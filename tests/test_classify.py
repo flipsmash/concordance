@@ -242,3 +242,28 @@ def test_classify_and_store_skips_a_word_deleted_mid_run(monkeypatch):
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
     conn.close()
+
+
+def test_bare_pointer_gets_the_targets_first_sense_never_the_target_word():
+    from concordance import classify
+
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def execute(self, sql, params): self.terms = params[0]
+        def fetchall(self):
+            return [("faggot", "A bundle of sticks for fuel.; (offensive slang) a slur"),
+                    ("vampirism", "Archaic form of vampyrism.")]   # a chain: yields nothing
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    items = [{"_id": 1, "word": "fagot", "definition": "Alternative form of faggot."},
+             {"_id": 2, "word": "vampyrisme", "definition": "Archaic form of vampirism."},
+             {"_id": 3, "word": "real", "definition": "A proper gloss."}]
+    classify.bare_pointer_senses(_Conn(), items)
+    assert items[0]["pointer_sense"] == "A bundle of sticks for fuel."
+    assert "pointer_sense" not in items[1] and "pointer_sense" not in items[2]
+    prompt = classify._prompt_items(items)
+    assert prompt[0]["def"] == "A bundle of sticks for fuel."
+    assert all("faggot" not in p["def"] for p in prompt)

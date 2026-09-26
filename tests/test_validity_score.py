@@ -351,3 +351,13 @@ def test_plural_prefilter_covers_every_parsed_plural():
               "Obsolete plural form of child."):
         assert plural_target(d), d
         assert re.search(PLURAL_PREFILTER_SQL, d, re.IGNORECASE), d
+
+
+def test_bare_pointer_target_only_for_gloss_less_pointers():
+    from concordance.crossref import bare_pointer_target as t
+    assert t("Archaic form of vampirism.") == "vampirism"
+    assert t("present participle and gerund of maudle") == "maudle"
+    assert t("Alternative spelling of sea hog.") == "sea hog"
+    assert t("Variant spelling of faggot — A bundle of sticks.") is None   # has its own gloss
+    assert t("Alternative form of pirogue (“type of boat”).") is None
+    assert t("A real definition.") is None

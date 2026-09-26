@@ -181,6 +181,25 @@ def _pointer_gloss(clause: str, after: int) -> str:
     return best[1].strip() if best else ""
 
 
+_TARGET_RE = re.compile(r"\s*([^,.;:(\[\u2014\u2013]+)")
+
+
+def bare_pointer_target(definition: str | None) -> str | None:
+    """The word a gloss-less pointer points at ("Archaic form of vampirism."
+    -> "vampirism"), or None when `definition` has any gloss of its own
+    (classification_gloss non-empty) or isn't a pointer at all."""
+    text = (definition or "").strip()
+    if not text or classification_gloss(text):
+        return None
+    for clause in _clauses(text):
+        m = _POINTER_RE.match(clause)
+        if m:
+            t = _TARGET_RE.match(clause, m.end())
+            target = t.group(1).strip().strip("'\"\u201c\u201d").lower() if t else ""
+            return target or None
+    return None
+
+
 def classification_gloss(definition: str | None) -> str:
     """`definition` with every cross-reference to another spelling removed --
     the text semantic classification (and anything else judging THIS word's

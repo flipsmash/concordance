@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 
 from . import db, usas, wndomains
-from .crossref import classification_gloss
+from .crossref import bare_pointer_target, classification_gloss
 from .config import Config
 
 # assignable code -> label, and a compact reference block for the prompt
@@ -50,7 +50,10 @@ def _prompt_items(items: list[dict]) -> list[dict]:
         # A bundle of sticks" must reach the model as just its gloss, and the
         # hint must come from THAT sense (see validity_score.
         # classification_gloss / wndomains.usas_prior_for_sense).
-        gloss = classification_gloss(it.get("definition"))
+        # A bare pointer ("Archaic form of vampirism.") has no gloss of its
+        # own: use the target's FIRST dictionary sense (never the target word,
+        # never its other senses) -- see bare_pointer_senses.
+        gloss = classification_gloss(it.get("definition")) or it.get("pointer_sense", "")
         hint = sorted(wndomains.usas_prior_for_sense(it["word"], gloss))
         out.append({
             "word": it["word"],
@@ -191,6 +194,7 @@ def classify_and_store(conn, schema: str, cfg: Config | None = None, limit: int 
 
     items = [{"word": r[1], "pos": r[2] or "", "definition": r[3] or "",
               "sentence": r[4] or "", "_id": r[0]} for r in rows]
+    bare_pointer_senses(conn, items)
     clf = Classifier(cfg)  # loaded once, reused for every chunk below
     if batch:
         clf.batch = batch
@@ -264,6 +268,29 @@ def classify_and_store(conn, schema: str, cfg: Config | None = None, limit: int 
     # for the live crash this pattern is fixing.
     clf.close()
     return stats
+
+
+def bare_pointer_senses(conn, items: list[dict], wikt_schema: str = "vocab") -> None:
+    """For each item whose definition is a gloss-less pointer, set
+    item["pointer_sense"] to the first sense of the pointed-to word in the
+    local Wiktionary (first entry in dump order, first ';'-separated sense).
+    Wiktionary lists a word's primary sense first, so a bare "form of faggot"
+    gets "a bundle of sticks", not the slur. That sense is itself run through
+    classification_gloss, so a chain of pointers yields nothing rather than
+    another spelling. Mutates `items`."""
+    targets = {it["_id"]: t for it in items if (t := bare_pointer_target(it.get("definition")))}
+    if not targets:
+        return
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT DISTINCT ON (lower(term)) lower(term), definition
+                        FROM {db._safe_schema(wikt_schema)}.wiktionary
+                        WHERE lower(term) = ANY(%s) ORDER BY lower(term), id""",
+                    (sorted(set(targets.values())),))
+        first = {term: classification_gloss((d or "").split(";")[0]) for term, d in cur.fetchall()}
+    for it in items:
+        sense = first.get(targets.get(it["_id"], ""), "")
+        if sense:
+            it["pointer_sense"] = sense
 
 
 def sense_affected_word_ids(conn, schema: str) -> list[int]:
