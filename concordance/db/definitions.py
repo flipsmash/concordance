@@ -638,6 +638,7 @@ def dedupe_plural_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int 
     from ..config import Config
     from ..dictionary import make_session
     from ..model import Candidate, Occurrence, junk_pos_reason
+    from ..validity_score import effective_zipf
 
     s = _safe_schema(schema)
     # Broad SQL prefilter (crossref.PLURAL_PREFILTER_SQL, a superset) +
@@ -656,7 +657,7 @@ def dedupe_plural_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int 
         rows = cur.fetchall()
 
     stats = {"attempted": len(rows), "linked": 0, "left_inactive": 0, "created": 0,
-             "cast_out": 0, "still_undefined": 0, "unparsed": 0}
+             "cast_out": 0, "still_undefined": 0, "unparsed": 0, "common_singular": 0}
     if not rows:
         return stats
 
@@ -694,6 +695,12 @@ def dedupe_plural_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int 
 
             elif existing:
                 stats["left_inactive"] += 1
+
+            elif effective_zipf(singular) >= Config().min_zipf:
+                # The ingest frequency floor would reject the singular as too
+                # common to be vocabulary (tooken -> "took"): don't create it.
+                # The plural still goes -- it isn't vocabulary either.
+                stats["common_singular"] += 1
 
             else:
                 cand = Candidate(lemma=singular, pos=_POS_TO_TAGGER.get((plural_pos or "").lower(), ""))

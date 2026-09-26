@@ -1374,7 +1374,8 @@ def dedupe_plurals(
                   f"[bold]{stats['linked']}[/bold] linked to an existing singular, "
                   f"[bold]{stats['created']}[/bold] singulars created "
                   f"({stats['still_undefined']} still undefined, {stats['cast_out']} cast out), "
-                  f"{stats['left_inactive']} left inactive (deliberate prior decision)")
+                  f"{stats['left_inactive']} left inactive (deliberate prior decision), "
+                  f"{stats['common_singular']} whose singular is too common to add")
 
 
 @app.command("clean-script-variants")

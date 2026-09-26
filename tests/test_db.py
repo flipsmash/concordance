@@ -3085,3 +3085,35 @@ def test_redefine_imported_fixes_only_another_words_definition():
             cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
         conn.commit()
         conn.close()
+
+
+@pg
+def test_dedupe_plurals_never_creates_a_too_common_singular(monkeypatch):
+    from concordance import resolve
+    from concordance.model import Candidate
+
+    called = []
+    monkeypatch.setattr(resolve, "resolve_definition", lambda *a, **k: called.append(1))
+    schema = "cc_test_dedupe_common"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    try:
+        db.apply_schema(conn, schema)
+        tooken = Candidate(lemma="tooken", pos="NOUN")
+        tooken.definition = "plural form of took."
+        db.sync_book_results(conn, "Book One", kept=[tooken], rejected=[], schema=schema)
+
+        stats = db.dedupe_plural_definitions(conn, schema, use_web=False)
+        assert stats["attempted"] == 1 and stats["common_singular"] == 1 and stats["created"] == 0
+        assert not called                                   # never even looked "took" up
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT lemma, active FROM {schema}.word ORDER BY lemma")
+            assert cur.fetchall() == [("tooken", False)]   # plural retired, no "took" added
+    finally:
+        conn.rollback()
+        with conn.cursor() as cur:
+            cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        conn.commit()
+        conn.close()
