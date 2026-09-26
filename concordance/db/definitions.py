@@ -21,10 +21,8 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
     """The single definition-acquisition pass for words whose definition is
     still blank: one candidate SELECT, one lexicon build, one per-row trip
     through resolve.resolve_definition at whatever depth `use_web` allows
-    (YOURDICT without it, WEB with it) -- replaces what used to be two
-    separate passes (refill_definitions then deepen_definitions) each
-    re-entering the cascade at Tier LOCAL, the second one's local/free
-    attempts always redundant with the first's on the same lemma.
+    (YOURDICT without it, WEB with it). History (it replaced two passes; MW
+    and the dropped WEB pre-gate): docs/decisions/0003-fill-definitions-single-pass.md
 
     Tier.OED (oed_schema, default "oed") is included automatically too --
     local/free like Tier LOCAL, so there's no reason to gate it behind
@@ -32,11 +30,8 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
     table doesn't exist yet.
 
     Tier.MW (mw_api_key auto-discovered from MW_DICTIONARY_API_KEY, same as
-    Wordnik) is included automatically -- this is the first `maintain` step
-    to try it; previously only ingest-time enrichment and the standalone
-    `mw-backfill` command ever reached MW, so a word needing MW specifically
-    (not LOCAL/FREE) sat undefined through every `maintain` run until someone
-    remembered to run `mw-backfill` by hand. A foreign-language loanword MW
+    Wordnik) is included automatically, so a word only MW can define doesn't
+    wait for a manual `mw-backfill`. A foreign-language loanword MW
     catches (its own "<Language> noun/verb/..." fl convention) is cast out
     below exactly like a symbol/proper-noun-only resolution -- see the
     cand.reject_reason check a few lines down.
@@ -54,14 +49,8 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
     version of deepen.py's <book>.undefined.csv report, so a word that's
     both flagged_undefined AND scored likely-artifact is an obvious prune
     candidate, not silent noise in the accepted list. WEB (when use_web) is
-    tried for EVERY word nothing else defined, regardless of that estimate
-    -- there used to be a pre-gate skipping WEB for anything already scored
-    likely-artifact, on the theory that a web search for OCR noise was
-    wasted effort; dropped because that same "probably not a real word"
-    signal is exactly the rare/archaic vocabulary this project's judge
-    rubric exists to prize, and a word simply not matching any of the
-    dictionaries checked earlier is not strong enough evidence to skip the
-    one source most likely to catch what they all missed.
+    tried for EVERY word nothing else defined, regardless of that estimate:
+    "matches no dictionary" is exactly the rare vocabulary this project prizes.
 
     `recheck_after_days`: a word already scored by validity_score recently
     is skipped entirely rather than re-run through the full cascade (Wordnik

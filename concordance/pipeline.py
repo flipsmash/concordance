@@ -220,35 +220,16 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
         # every enrichment call site checks. Catch it before the kept/rejected
         # split so it never reaches word.csv / the word table.
         #
-        # Applies to cache-sourced candidates too (already `known` — an
-        # established KEEP from an earlier book): enrichment re-runs on them
-        # since it isn't cached, and a junk-POS resolution is a structural
-        # signal, not enrichment's own non-determinism — every other place in
-        # this codebase treats it as authoritative wherever it's seen, and a
-        # word's first-ever lookup happening to land on a different sense
-        # before the junk one ever surfaced is exactly why this needs to keep
-        # checking on every re-encounter, not just the first. (Confirmed in
-        # the wild: taxonomic Latin genus names — linnaea, olor, hircus —
-        # sat active and defined for weeks because this check used to skip
-        # them once cached, even as later books' lookups kept correctly
-        # resolving "proper noun" and being ignored.) sync_book_results casts
-        # the word out (active=false) if it already exists, same as
-        # refill/deepen do for their own junk-POS resolutions.
+        # Applies to cache-sourced candidates too (already `known`): a
+        # junk-POS resolution is authoritative whenever it's seen, and a later
+        # book's lookup can surface it after an earlier one didn't.
+        # sync_book_results casts the word out (active=false) if it exists.
+        # History: docs/decisions/0004-junk-pos-recheck-on-cached-words.md
         #
-        # validity_score.variant_reject_reason (foreign-word / archaic-
-        # spelling-variant detection) is NOT wired in as a hard cast-out
-        # here: real-scale testing (a 31k-word dry-run sweep) found it flags
-        # ~21% of the live vocabulary, and a sample of the flagged words was
-        # mostly genuine rare vocabulary (haft, glaive, thurible, discomfit,
-        # kickshaw, outlawry) rather than the foreign/misspelling junk it
-        # was built to catch — edit-distance similarity doesn't imply a real
-        # spelling-variant relationship, and cross-language zipf can't
-        # separate a foreign word from an English word that's ALSO a word
-        # in that language (haft, argent, rood are all real English).
-        # Instead it's a human-review flag: the word is kept/defined
-        # normally, and Candidate.variant_flag_reason/_note (picked up by
-        # sync_book_results) mark it for a person to glance at and manually
-        # prune via the review webapp if it really is junk.
+        # validity_score.variant_reject_reason is only a human-review flag
+        # here, never a hard cast-out: on real data it flagged ~21% of the
+        # vocabulary, mostly genuine rare words (haft, glaive, thurible).
+        # Evidence: docs/decisions/0005-variant-detector-flags-only.md
         cast_out = 0
         flagged = 0
         # Foreign-only per Wiktionary and absent from the English references
