@@ -63,6 +63,7 @@ from .definitions import (  # noqa: F401
     _CSS_JUNK_RE,
     expand_synonym_definitions,
     compute_definition_links,
+    redefine_imported,
 )
 from .reference import (  # noqa: F401
     load_taxonomy,

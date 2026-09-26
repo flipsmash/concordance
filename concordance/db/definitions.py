@@ -981,3 +981,116 @@ def compute_definition_links(conn, schema: str = DEFAULT_SCHEMA, *, limit: int =
         conn.commit()
 
     return stats
+
+
+# The legacy vocab.defined bootstrap (import_defined_words) kept that
+# project's own per-row definitions. Its "datamuse"/"dm" rows came from a
+# spelling-similarity lookup, which often returned a DIFFERENT, similar-
+# looking word's entry: serpenticide got serpentinize's "To convert (another
+# magnesium silicate mineral) into serpentine", pavidly got avidly's.
+# Refills never overwrite an existing definition, so these stuck.
+_IMPORTED_FUZZY_SOURCES = ("datamuse", "dm")
+
+
+def _def_norm(text: str | None) -> str:
+    text = re.sub(r"^\s*(?:\([^)]*\)\s*)+", "", (text or "").lower())
+    return re.sub(r"[^a-z ]", "", text).strip()
+
+
+def _spelling_kin(word: str, other: str) -> bool:
+    """`other` is `word`'s singular or the same word under another spelling
+    convention -- borrowing its definition is right, not a mix-up."""
+    w, o = word.lower(), other.lower()
+    if w in (o + "s", o + "es") or (w.endswith("ies") and w[:-3] + "y" == o):
+        return True
+    swaps = (("ise", "ize"), ("isation", "ization"), ("our", "or"), ("tre", "ter"), ("ae", "e"), ("oe", "e"))
+    return any(w.replace(a, b) == o.replace(a, b) for a, b in swaps)
+
+
+def redefine_imported(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool = False,
+                      oed_schema: str = "oed", samples: int = 12) -> dict:
+    """`concordance redefine-imported`: fix definitions the legacy import took
+    from a fuzzy lookup (see _IMPORTED_FUZZY_SOURCES) when the imported text
+    is verbatim ANOTHER headword's definition (not the word's own, its
+    singular, or a spelling variant's):
+      - replaced: the local Wiktionary / 0 Dict entry for THIS word, when it
+        is a real gloss;
+      - cleared: otherwise, so fill-definitions retries the full cascade on
+        the next maintain.
+    Everything else is left alone.
+    The replaced text goes to previous_definition. Dry run unless `apply`."""
+    from collections import defaultdict
+
+    from .. import crossref, localdict, resolve
+    from ..model import Candidate
+    from ..oed import definitions as oed_definitions
+
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT id, lemma, part_of_speech, definition FROM {s}.word
+                        WHERE active AND definition_source = ANY(%s) ORDER BY id""",
+                    (list(_IMPORTED_FUZZY_SOURCES),))
+        rows = cur.fetchall()
+        cur.execute("SELECT lower(term), definition FROM vocab.wiktionary")
+        owners: dict[str, set[str]] = defaultdict(set)
+        for term, d in cur:
+            for part in (d or "").split(";"):
+                n = _def_norm(part)
+                if len(n) > 15:
+                    owners[n].add(term)
+    lemmas = {lemma.lower() for _, lemma, _, _ in rows}
+    lexicon = localdict.build_lexicon(conn, lemmas)
+    oed_lexicon = oed_definitions.definition_lexicon(conn, lemmas, schema=oed_schema)
+
+    stats = {"imported": len(rows), "replaced": 0, "cleared": 0, "kept": 0}
+    shown: dict[str, list] = {"replaced": [], "cleared": []}
+    with conn.cursor() as cur:
+        for wid, lemma, pos, old in rows:
+            # The mix-up signal: the imported text is verbatim some OTHER
+            # headword's definition (and not this word's own, its singular,
+            # or a spelling variant's). Text that merely words this word's
+            # meaning differently from the local copy is left alone.
+            parts = [_def_norm(p) for p in old.split(";") if len(_def_norm(p)) > 15]
+            others = set().union(*(owners.get(p, set()) for p in parts)) if parts else set()
+            if (not others or lemma.lower() in others or any(_spelling_kin(lemma, o) for o in others)
+                    # "Alternative form of dulocracy [...]": the source itself
+                    # vouched for the link to the other word
+                    or (crossref.mentions_pointer(old)
+                        and any(re.search(rf"\b{re.escape(o)}\b", old, re.I) for o in others))):
+                stats["kept"] += 1
+                continue
+            cand = Candidate(lemma=lemma, pos=_POS_TO_TAGGER.get((pos or "").lower(), ""))
+            if localdict.enrich(cand, lexicon) or resolve._from_oed(cand, oed_lexicon):
+                resolve.apply_pos_repair(cand, lexicon)
+            # only a real gloss replaces it -- not a bare "abbreviation of X"
+            # stub or a 0 Dict "= X" cross-reference
+            if cand.definition and crossref.classification_gloss(cand.definition) \
+                    and not crossref.is_abbreviation_stub(cand.definition) \
+                    and not re.match(r"^[\w. ]{0,12}=\s", cand.definition):
+                stats["replaced"] += 1
+                if len(shown["replaced"]) < samples:
+                    shown["replaced"].append((lemma, sorted(others)[:2], old[:60], cand.definition[:70]))
+                if apply:
+                    cur.execute(
+                        f"""UPDATE {s}.word SET previous_definition=definition, definition=%s,
+                                definition_source=%s,
+                                part_of_speech=COALESCE(NULLIF(%s,''), part_of_speech), updated_at=now()
+                            WHERE id=%s""",
+                        (cand.definition, cand.definition_source, normalize_pos(cand.part_of_speech), wid))
+                    _invalidate_definition_dependents(cur, s, wid)
+                continue
+            stats["cleared"] += 1
+            if len(shown["cleared"]) < samples:
+                shown["cleared"].append((lemma, sorted(others)[:2], old[:70]))
+            if apply:
+                cur.execute(
+                    f"""UPDATE {s}.word SET previous_definition=definition, definition='',
+                            definition_source='', updated_at=now()
+                        WHERE id=%s""", (wid,))
+                _invalidate_definition_dependents(cur, s, wid)
+    if apply:
+        conn.commit()
+    else:
+        conn.rollback()
+    stats["samples"] = shown
+    return stats

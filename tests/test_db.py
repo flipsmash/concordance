@@ -3040,3 +3040,48 @@ def test_apply_schema_stamps_versions_and_runs_each_migration_once(monkeypatch):
             cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
         conn.commit()
         conn.close()
+
+
+@pg
+def test_redefine_imported_fixes_only_another_words_definition():
+    """Reads the live vocab.wiktionary (read-only): serpentinize's and
+    serpenticide's real entries are what make this a mix-up."""
+    schema = "cc_test_redefine_imported"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    try:
+        db.apply_schema(conn, schema)
+        with conn.cursor() as cur:
+            cur.execute("SELECT definition FROM vocab.wiktionary WHERE term = 'serpentinize' LIMIT 1")
+            other = cur.fetchone()
+            if not other:
+                pytest.skip("local Wiktionary lacks serpentinize")
+            rows = [("serpenticide", "(geology, mineralogy) " + other[0], "datamuse"),   # another word's
+                    ("serpentinize", other[0], "datamuse"),                               # its own
+                    ("wibblefrotz", "(geology) " + other[0], "datamuse"),                 # no local entry
+                    ("zzcopied", "(geology) " + other[0], "Local Wiktionary (DB)")]       # trusted source
+            for lemma, d, src in rows:
+                cur.execute(f"INSERT INTO {schema}.word (lemma, definition, definition_source) VALUES (%s,%s,%s)",
+                            (lemma, d, src))
+        conn.commit()
+        dry = db.redefine_imported(conn, schema)
+        assert (dry["replaced"], dry["cleared"], dry["kept"]) == (1, 1, 1)
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT count(*) FROM {schema}.word WHERE previous_definition IS NOT NULL")
+            assert cur.fetchone()[0] == 0          # dry run wrote nothing
+        db.redefine_imported(conn, schema, apply=True)
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT lemma, definition, previous_definition FROM {schema}.word ORDER BY lemma")
+            got = {l: (d, p) for l, d, p in cur.fetchall()}
+        assert "snake" in got["serpenticide"][0].lower()
+        assert "serpentine" in got["serpenticide"][1]
+        assert got["wibblefrotz"][0] == "" and got["wibblefrotz"][1]
+        assert got["serpentinize"][1] is None and got["zzcopied"][1] is None
+    finally:
+        conn.rollback()
+        with conn.cursor() as cur:
+            cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        conn.commit()
+        conn.close()
