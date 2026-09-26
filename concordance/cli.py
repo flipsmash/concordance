@@ -1476,6 +1476,47 @@ def wiktextract_sounds(
     console.print(f"[green]✓[/green] wiktextract-sounds: {stats['entries']:,} entries with sound data, "
                   f"[bold]{stats['terms']:,}[/bold] terms in wikt.sound")
 
+@app.command("wiktextract-morphology")
+def wiktextract_morphology(
+    dump: Optional[Path] = typer.Option(None, "--dump", help="wiktextract JSONL.gz (default: data/wiktextract-en.jsonl.gz)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Load wikt.affix_root from the Wiktionary dump: the single English root
+    of every word whose etymology is root + affixes ("serpent + -i- + -cide").
+    `difficulty` eases such words toward their root, like a suffixed
+    derivative. Rerun after downloading a newer dump. ~10-15 minutes."""
+    from . import wiktextract
+    conn = _connect(database_url)
+    with console.status("[bold]Reading Wiktionary etymologies…"):
+        stats = wiktextract.load_affix_roots(conn, str(dump) if dump else None)
+    conn.close()
+    console.print(f"[green]✓[/green] wiktextract-morphology: [bold]{stats['terms']:,}[/bold] terms "
+                  f"with a single-root affix etymology")
+
+
+@app.command("redefine-imported")
+def redefine_imported_cmd(
+    apply: bool = typer.Option(False, "--apply", help="Write the changes (default: dry run)."),
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Fix definitions the legacy vocab import took from a fuzzy lookup
+    (source "datamuse"/"dm") that are really ANOTHER word's definition
+    (serpenticide had serpentinize's). Replaces them with the word's own local
+    Wiktionary / 0 Dict entry, or clears them for fill-definitions to retry.
+    The old text is kept in previous_definition. Dry run unless --apply."""
+    conn = _connect(database_url)
+    stats = db.redefine_imported(conn, schema, apply=apply)
+    conn.close()
+    for lemma, others, old, new in stats["samples"]["replaced"]:
+        console.print(f"  [green]replace[/green] {lemma}: [dim]{old}[/dim] -> {new}")
+    for lemma, others, old in stats["samples"]["cleared"]:
+        console.print(f"  [yellow]clear[/yellow]   {lemma}: [dim]{old} (= {', '.join(others)})[/dim]")
+    verb = "" if apply else "[dim](dry run)[/dim] would have "
+    console.print(f"[green]✓[/green] redefine-imported: {verb}replaced [bold]{stats['replaced']}[/bold], "
+                  f"cleared [bold]{stats['cleared']}[/bold] of {stats['imported']:,} imported definitions "
+                  f"({stats['kept']:,} left alone)")
+
 @app.command("clean-foreign-words")
 def clean_foreign_words(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),

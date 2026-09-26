@@ -63,10 +63,18 @@ def compute_difficulty(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> di
                        GROUP BY wc.word_id) dom ON dom.word_id = w.id
             ORDER BY w.id""" + (f" LIMIT {int(limit)}" if limit else ""))
         rows = cur.fetchall()
+        # Wiktionary's own "serpent + -i- + -cide" etymologies (wiktextract-
+        # morphology), for words the single-affix peel can't split.
+        affix_roots: dict[str, str] = {}
+        cur.execute("SELECT to_regclass('wikt.affix_root')")
+        if cur.fetchone()[0] is not None:
+            cur.execute("SELECT term, root FROM wikt.affix_root WHERE term = ANY(%s)",
+                        ([lemma.strip().lower() for _, lemma, *_ in rows],))
+            affix_roots = dict(cur.fetchall())
         scores = []
         for wid, lemma, peak, recent, archaic, aconf, fields in rows:
             key = lemma.strip().lower()
-            root = _morph_root(key)
+            root = _morph_root(key) or affix_roots.get(key)
             has_domain = any(f in _diff.DOMAIN_FIELDS for f in fields)
             sc, factors = _diff.score(
                 zipf_frequency(key, "en"), recent, peak, archaic or "current", aconf,

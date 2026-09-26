@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import re
 from pathlib import Path
 
 DEFAULT_DUMP_PATH = "data/wiktextract-en.jsonl.gz"
@@ -182,3 +183,94 @@ def sound_lexicon(conn, lemmas: set[str], dump_path: str | Path | None = None,
                             (sorted(lemmas),))
                 return {t: {"ipa": ipa, "audio": audio} for t, ipa, audio in cur.fetchall()}
     return build_lexicon(dump_path or DEFAULT_DUMP_PATH, lemmas, progress_cb=progress_cb)
+
+
+# --- morphology: the English root a word is built on --------------------------
+#
+# Wiktionary records "From serpent + -i- + -cide." as structured affix
+# templates. When those name exactly ONE free English word plus affixes, that
+# word is the root a reader would recognise (serpenticide -> serpent,
+# weedicide -> weed) -- a curated split, unlike guessing at letter
+# boundaries (parricide is not parr + -icide). Compounds of two free words
+# (downland = down + land) are deliberately left out: whether those are
+# transparent is a judgment call, not a lookup.
+
+_AFFIX_TEMPLATES = {"affix", "af", "suffix", "suf", "prefix", "pre", "confix", "con"}
+
+
+def affix_root(obj: dict) -> str | None:
+    """The single free English component of an entry's affix etymology, or
+    None (no affix templates, a compound, or not English)."""
+    free, affixes = set(), 0
+    for t in obj.get("etymology_templates") or []:
+        if t.get("name") not in _AFFIX_TEMPLATES:
+            continue
+        args = t.get("args") or {}
+        if args.get("1") != "en":
+            continue
+        for k, v in args.items():
+            if not k.isdigit() or k == "1":
+                continue
+            part = (v or "").split("<")[0].split("#")[0].strip()   # drop <t:gloss> / #Noun
+            if not part:
+                continue
+            if part.startswith("-") or part.endswith("-"):
+                affixes += 1
+            else:
+                free.add(part.lower())      # "la:colon" etc. kept, so it fails the check below
+    word = (obj.get("word") or "").strip().lower()
+    if affixes and len(free) == 1:
+        root = next(iter(free))
+        # a plain English word -- not a "la:"/"grc:"-tagged foreign stem
+        if root != word and re.fullmatch(r"[a-z][a-z'-]*", root):
+            return root
+    return None
+
+
+def load_affix_roots(conn, dump_path: str | Path | None = None, wikt_schema: str = "wikt",
+                     progress_cb=None) -> dict:
+    """`concordance wiktextract-morphology`: rebuild <wikt_schema>.affix_root
+    (term -> the root of its first English entry with a single-root affix
+    etymology). Built under a new name and swapped in."""
+    from .db import _safe_schema
+    g = _safe_schema(wikt_schema)
+    path = Path(dump_path or DEFAULT_DUMP_PATH)
+    if not path.exists():
+        raise FileNotFoundError(f"Wiktextract dump not found at {path}")
+    n = 0
+    with conn.cursor() as cur:
+        cur.execute(f"CREATE SCHEMA IF NOT EXISTS {g}")
+        cur.execute(f"DROP TABLE IF EXISTS {g}.affix_root_raw")
+        cur.execute(f"""CREATE UNLOGGED TABLE {g}.affix_root_raw (
+                            seq bigint NOT NULL, term text NOT NULL, root text NOT NULL, etymology text)""")
+        with cur.copy(f"COPY {g}.affix_root_raw (seq, term, root, etymology) FROM STDIN") as copy, \
+                gzip.open(path, "rt", encoding="utf-8") as f:
+            for i, line in enumerate(f, 1):
+                if progress_cb and i % 2_000_000 == 0:
+                    progress_cb(i)
+                if '"etymology_templates"' not in line:      # cheap superset filter
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("lang_code") != "en":
+                    continue
+                root = affix_root(obj)
+                if root:
+                    n += 1
+                    copy.write_row((i, (obj.get("word") or "").strip().lower(), root,
+                                    (obj.get("etymology_text") or "")[:300]))
+        cur.execute(f"DROP TABLE IF EXISTS {g}.affix_root_new")
+        cur.execute(f"""CREATE TABLE {g}.affix_root_new AS
+                        SELECT DISTINCT ON (term) term, root, etymology
+                        FROM {g}.affix_root_raw ORDER BY term, seq""")
+        cur.execute(f"ALTER TABLE {g}.affix_root_new ADD PRIMARY KEY (term)")
+        cur.execute(f"DROP TABLE IF EXISTS {g}.affix_root")
+        cur.execute(f"ALTER TABLE {g}.affix_root_new RENAME TO affix_root")
+        cur.execute(f"ALTER INDEX {g}.affix_root_new_pkey RENAME TO affix_root_pkey")
+        cur.execute(f"DROP TABLE {g}.affix_root_raw")
+        cur.execute(f"SELECT count(*) FROM {g}.affix_root")
+        terms = cur.fetchone()[0]
+    conn.commit()
+    return {"entries": n, "terms": terms}

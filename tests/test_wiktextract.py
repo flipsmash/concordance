@@ -63,3 +63,24 @@ def test_sound_table_matches_a_dump_scan(tmp_path):
             cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
         conn.commit()
         conn.close()
+
+
+def test_affix_root_takes_the_single_free_component_only():
+    ser = {"word": "serpenticide", "etymology_templates": [
+        {"name": "affix", "args": {"1": "en", "2": "serpent", "3": "-i-"}},
+        {"name": "suffix", "args": {"1": "en", "2": "", "3": "-cide", "nocat": "1"}}]}
+    assert wiktextract.affix_root(ser) == "serpent"
+    # a compound of two free words is left to a transparency judgment
+    assert wiktextract.affix_root({"word": "downland", "etymology_templates": [
+        {"name": "compound", "args": {"1": "en", "2": "down", "3": "land"}}]}) is None
+    assert wiktextract.affix_root({"word": "x", "etymology_templates": [
+        {"name": "affix", "args": {"1": "en", "2": "down", "3": "land"}}]}) is None
+    # another language's affixes, or an inline gloss modifier
+    assert wiktextract.affix_root({"word": "y", "etymology_templates": [
+        {"name": "affix", "args": {"1": "la", "2": "serpens", "3": "-cida"}}]}) is None
+    assert wiktextract.affix_root({"word": "weedicide", "etymology_templates": [
+        {"name": "suffix", "args": {"1": "en", "2": "weed<t:plant>", "3": "-icide"}}]}) == "weed"
+    assert wiktextract.affix_root({"word": "coliform", "etymology_templates": [
+        {"name": "affix", "args": {"1": "en", "2": "la:colon", "3": "-iform"}}]}) is None
+    assert wiktextract.affix_root({"word": "cardinalate", "etymology_templates": [
+        {"name": "suffix", "args": {"1": "en", "2": "cardinal#Noun", "3": "-ate"}}]}) == "cardinal"
