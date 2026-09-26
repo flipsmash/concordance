@@ -38,6 +38,17 @@ from .pipeline import run as run_pipeline
 app = typer.Typer(add_completion=False, help="Extract interesting vocabulary from a book.")
 console = Console()
 
+
+def _connect(database_url: Optional[str], *, hint: bool = False) -> psycopg.Connection:
+    """db.connect(), or print why not and exit 1 -- every DB command's opening move."""
+    try:
+        return db.connect(database_url)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]✗[/red] cannot connect: {exc}")
+        if hint:
+            console.print("[dim]set DATABASE_URL in the environment or a .env file[/dim]")
+        raise typer.Exit(code=1)
+
 INCOMING_DIR = Path("incoming")
 ARCHIVE_DIR = Path("archive")
 _INGEST_SUFFIXES = {".epub", ".pdf", ".txt"}
@@ -151,12 +162,7 @@ def ingest(
             raise typer.Exit(code=0)
         console.print(f"Found [bold]{len(books)}[/bold] file(s) in {INCOMING_DIR}/.")
 
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}")
-        console.print("[dim]set DATABASE_URL in the environment or a .env file[/dim]")
-        raise typer.Exit(code=1)
+    conn = _connect(database_url, hint=True)
     db.apply_schema(conn, schema)
 
     # Build the heavy, book-independent resources ONCE and reuse them across
@@ -274,12 +280,7 @@ def oed_ingest(
             console.print(f"[yellow]![/yellow] no .pdf files found in {dictionaries_dir}/")
             raise typer.Exit(code=0)
 
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}")
-        console.print("[dim]set DATABASE_URL in the environment or a .env file[/dim]")
-        raise typer.Exit(code=1)
+    conn = _connect(database_url, hint=True)
 
     cfg = OedConfig(schema=schema)
     oed_db.apply_schema(conn, schema)
@@ -377,12 +378,7 @@ def sync_db(
     if not master_csv.exists():
         console.print(f"[red]✗[/red] no such file: {master_csv}")
         raise typer.Exit(code=1)
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}")
-        console.print("[dim]set DATABASE_URL in the environment or a .env file[/dim]")
-        raise typer.Exit(code=1)
+    conn = _connect(database_url, hint=True)
     trgm = db.apply_schema(conn, schema)
     stats = db.sync_master(master_csv, conn, schema)
     conn.close()
@@ -402,11 +398,7 @@ def load_taxonomy(
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Create the category tables and load the USAS taxonomy into PostgreSQL."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}")
-        raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     stats = db.load_taxonomy(conn, schema)
     conn.close()
@@ -429,11 +421,7 @@ def load_gazetteer_cmd(
     files this needs downloaded first, and DESIGN.md for why this exists.
     Not part of `maintain` -- same one-time/occasional shape as
     `load-taxonomy`; re-run whenever you refresh the source files."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}")
-        raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     try:
         stats = db.load_gazetteer(conn, schema, census_path=census_path, geonames_path=geonames_path)
@@ -457,10 +445,7 @@ def import_defined_cmd(
     book-less words. Skips phrases, bad=1 rows, terms already in word, and
     terms ever rejected in any book for any reason. Not part of `maintain` --
     run this, then run `maintain` normally to classify/score the new words."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     stats = db.import_defined_words(conn, schema, limit=limit)
     conn.close()
@@ -492,10 +477,7 @@ def classify(
 ) -> None:
     """Tag every word in the DB with USAS categories (LLM + WordNet-Domains prior)."""
     from .classify import classify_and_store, sense_affected_word_ids
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     cfg = Config()
     if model:
         cfg.model_path = str(model)
@@ -525,10 +507,7 @@ def normalize_pos_cmd(
     """Clean up word.part_of_speech: fold abbreviations/case variants (adj,
     adv, pron, propn, x, Noun, ...) down to one consistent, spelled-out
     vocabulary. Idempotent — safe to re-run any time."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     stats = db.normalize_word_pos(conn, schema, limit=limit)
     conn.close()
@@ -542,10 +521,7 @@ def archaic(
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Set the archaic-currency flag (current/dated/archaic/obsolete) on word_difficulty."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     dist = db.compute_archaic(conn, schema, limit=limit)
     conn.close()
@@ -564,10 +540,7 @@ def ngram(
 ) -> None:
     """Fill word_ngram (rarity + recency): from the local bulk table
     (`ngram-bulk-load`) where it has the word, live API otherwise."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     stats = db.fetch_ngrams(conn, schema, only_missing=not refetch, limit=limit)
     conn.close()
@@ -596,10 +569,7 @@ def ngram_bulk_load(
         ngram_bulk.download()
     console.print("[bold]Scanning shards…[/bold]")
     parts = ngram_bulk.build_tsv(workers=workers)
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     console.print("[bold]Loading ngram.unigram…[/bold]")
     stats = db.load_ngram_bulk(conn, parts, ngram_bulk.open_totals())
     conn.close()
@@ -613,10 +583,7 @@ def difficulty(
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Compute the ex-ante difficulty scalar (+ factor breakdown) on word_difficulty."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     stats = db.compute_difficulty(conn, schema, limit=limit)
     conn.close()
@@ -634,10 +601,7 @@ def quizdef(
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Build quiz-safe definitions: clean defs pass through, leaking ones are LLM-rewritten."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     cfg = Config()
     if model:
@@ -656,10 +620,7 @@ def quizzable(
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Flag words as quizzable (exclude grammatical/variant forms and trivially-inferable derivatives)."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     dist = db.compute_quizzable(conn, schema, limit=limit)
     conn.close()
@@ -681,10 +642,7 @@ def calibrate_difficulty(
     identify "true" item difficulty, no matter how much of it accumulates.
     eta/scale are hand-tuned via app_settings ('calibration_eta'/
     'calibration_scale'), not auto-fit, for the same reason."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     stats = db.compute_personal_difficulty(conn, schema, limit=limit)
     conn.close()
@@ -707,10 +665,7 @@ def refresh_rejected_index(
     systemd timer), independent of `maintain` -- this is cheap (~15-20s)
     and curation search tolerates a bit of staleness, unlike maintain's
     enrichment steps."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     db.refresh_rejected_lemma_index(conn, schema)
     conn.close()
@@ -770,10 +725,7 @@ def archive_metadata_cmd(
     known era, and never overwrites an existing value. No network."""
     from . import archive_metadata as am
 
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
 
     if fill_years:
@@ -868,10 +820,7 @@ def book_genres_cmd(
     a fresh backlog; --only-missing makes a re-run after that cheap."""
     from .genre import classify_and_store_genres
 
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     cfg = Config()
     if model:
@@ -920,10 +869,7 @@ def book_merge_cmd(
     writing the combined files, before touching any DB record."""
     from . import book_merge
 
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
 
     groups = book_merge.detect_merge_groups(conn, schema)
@@ -1122,10 +1068,7 @@ def book_similarity(
     not semantic similarity; a different axis from the word-embedding
     graph). Always recomputes every book in scope -- IDF weights are
     corpus-wide and shift whenever any book's vocabulary changes."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     with console.status("[bold]Computing book vocabulary overlap…"):
         stats = db.compute_book_similarity(conn, schema, limit=limit, top_k=top_k,
@@ -1151,10 +1094,7 @@ def author_similarity(
     corpus scale (~3,500 authors) made the on-demand query take ~39s.
     Always recomputes every author in scope, same reasoning as
     book-similarity."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     with console.status("[bold]Computing author vocabulary overlap…"):
         stats = db.compute_author_similarity(conn, schema, limit=limit, top_k=top_k,
@@ -1178,10 +1118,7 @@ def author_stats_cmd(
     at 29k books) -- safe to run after anything that changes word/word_book/
     word_difficulty/book (ingestion, difficulty scoring, archive-metadata),
     and worth adding to the post-maintenance chain."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     with console.status("[bold]Computing author stats…"):
         stats = db.compute_author_stats(conn, schema)
@@ -1210,10 +1147,7 @@ def author_fame_cmd(
     so a full ~4,000-author corpus is on the order of a day) --
     deliberately NOT part of `maintain`; run author-fame before book-fame
     so book scoring has the author's context available."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     with console.status("[bold]Scoring author fame…"):
         stats = db.compute_author_fame(conn, schema, limit=limit, stale_days=stale_days, dry_run=stub)
@@ -1240,10 +1174,7 @@ def book_stats_cmd(
     anything that changes word/word_book/word_difficulty/book (ingestion,
     difficulty scoring, archive-metadata), and worth adding to the post-
     maintenance chain alongside author-stats."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     with console.status("[bold]Computing book stats…"):
         stats = db.compute_book_stats(conn, schema)
@@ -1266,10 +1197,7 @@ def book_fame_cmd(
     weak context only, never a floor or cap -- a famous author's forgotten
     minor book still scores low on its own. Run author-fame first for the
     best results; this tolerates a book whose author has no fame row yet."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     with console.status("[bold]Scoring book fame…"):
         stats = db.compute_book_fame(conn, schema, limit=limit, stale_days=stale_days, dry_run=stub)
@@ -1306,10 +1234,7 @@ def author_clustering(
     Always recomputes the whole top-N set in one pass -- see
     compute_author_clustering's docstring for why a partial write here
     would be worse than in book-similarity/author-similarity."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     with console.status("[bold]Clustering authors by vocabulary overlap…"):
         stats = db.compute_author_clustering(conn, schema, top_n=top_n, n_clusters=n_clusters, min_fame=min_fame)
@@ -1340,10 +1265,7 @@ def book_clustering(
     top-N set in one pass -- see compute_book_clustering's docstring for
     why a partial write here would be worse than in book-similarity/
     author-similarity."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     with console.status("[bold]Clustering books by vocabulary overlap…"):
         stats = db.compute_book_clustering(conn, schema, top_n=top_n, n_clusters=n_clusters, min_fame=min_fame)
@@ -1382,10 +1304,7 @@ def relate(
     its own tuning options like --top-k/--top-n/--n-clusters/--min-fame,
     none of which this wrapper exposes -- use the standalone command
     directly if you need those)."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
 
     if not skip_book_similarity:
@@ -1444,10 +1363,7 @@ def dedupe_plurals(
     A singular that already exists but is currently inactive is always left
     untouched -- that's very likely a deliberate prior decision (human or
     automated), not something a plural merely existing should override."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     with console.status("[bold]Consolidating plural-form definitions…"):
         stats = db.dedupe_plural_definitions(conn, schema, limit=limit, use_web=web,
@@ -1472,10 +1388,7 @@ def clean_script_variants(
     word (book links copied to the survivor); flag the rest `script_review`
     for the review list. Soft/reversible; each cast-out records a script_*
     reason in variant_flag_reason."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     stats = db.clean_script_variants(conn, schema, apply=apply)
     conn.close()
@@ -1497,10 +1410,7 @@ def clean_dialect_spellings(
     common words and of words already in the list (book links move to it);
     flag the rest `dialect_review`. Soft/reversible, recorded in
     variant_flag_reason."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     stats = db.clean_dialect_spellings(conn, schema, apply=apply)
     conn.close()
@@ -1521,10 +1431,7 @@ def clean_archaic_spellings(
     early-printing u-for-v spellings (reuelation): cast out those of common
     words or of words already in the list (book links move to it); flag the
     rest `archaic_review`. Soft/reversible, recorded in variant_flag_reason."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     stats = db.clean_archaic_spellings(conn, schema, apply=apply)
     conn.close()
@@ -1543,10 +1450,7 @@ def wiktionary_langs(
     """Build wikt.foreign_term from the English Wiktionary dump: every term
     whose entries are ONLY in non-English, non-Latin/Greek languages. Used by
     clean-foreign-words and ingest's foreign-word cast-out. ~2-3 minutes."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     with console.status("[bold]Indexing Wiktionary entry languages…"):
         stats = db.load_wiktionary_langs(conn, str(dump) if dump else None)
     conn.close()
@@ -1565,10 +1469,7 @@ def wiktextract_sounds(
     instead of re-scanning the 2.7 GB dump each run. Rerun after downloading a
     newer dump. ~10-15 minutes."""
     from . import wiktextract
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     with console.status("[bold]Loading Wiktionary pronunciations…"):
         stats = wiktextract.load_sounds(conn, str(dump) if dump else None)
     conn.close()
@@ -1587,10 +1488,7 @@ def clean_foreign_words(
     in the local English Wiktionary or 0 Dict). Sets likely-artifact +
     variant_flag_reason='foreign_word'; soft/reversible. Needs
     `wiktionary-langs` first."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     stats = db.clean_foreign_words(conn, schema, apply=apply)
     conn.close()
@@ -1610,10 +1508,7 @@ def clear_foreign_flags(
     """Clear the old heuristic 'foreign_language' review flag from active
     words that show any English use (English Wiktionary/0 Dict entry, English
     dictionary definition, wordfreq, Webster list, WordNet)."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     stats = db.clear_stale_foreign_flags(conn, schema, apply=apply)
     conn.close()
@@ -1635,10 +1530,7 @@ def clean_context_language(
     source books; cast out those whose every classifiable sentence is Old
     English, Middle English or a foreign language (fastText language ID +
     Wiktionary Middle English markers). Needs `wiktionary-langs` first."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     with console.status("[bold]Reading source books…"):
         stats = db.clean_non_english_context(conn, schema, apply=apply, workers=workers)
@@ -1661,10 +1553,7 @@ def clear_misspelling_flags(
     curated source vouches for (English Wiktionary entry that isn't a
     "misspelling of" gloss, 0 Dict, English dictionary definition, Webster
     list, WordNet). wordfreq doesn't count -- typos have web footprints."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     stats = db.clear_stale_misspelling_flags(conn, schema, apply=apply)
     conn.close()
@@ -1701,10 +1590,7 @@ def expand_synonyms(
     and never used as a source to "upgrade" another word's definition --
     likely a deliberate earlier decision a synonym pointer isn't good reason
     to override."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     with console.status("[bold]Expanding synonym-only definitions…"):
         stats = db.expand_synonym_definitions(conn, schema, limit=limit, use_web=web,
@@ -1730,10 +1616,7 @@ def link_definitions(
     inert prose. Safe to re-run any time a definition changes (refill/
     deepen/mw-backfill/expand-synonyms all rewrite word.definition) — this
     always does a full recompute, not an incremental one."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     with console.status("[bold]Cross-linking definitions…"):
         stats = db.compute_definition_links(conn, schema, limit=limit)
@@ -1753,10 +1636,7 @@ def refill(
     then Free Dictionary API / online Wiktionary — same cheap sources `ingest`
     tries). Words that stay undefined keep their permanent `flagged_undefined`
     marker regardless; this only ever fills the definition, it never clears it."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     with console.status("[bold]Backfilling definitions…"):
         stats = db.refill_definitions(conn, schema, limit=limit)
@@ -1788,10 +1668,7 @@ def deepen(
     validity_label='likely-artifact' is the review queue. Needs
     WORDNIK_API_KEY in .env for the Wordnik source; falls back to
     yourdictionary+web without it."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     with console.status("[bold]Resolving the undefined tail…"):
         stats = db.deepen_definitions(conn, schema, use_web=web,
@@ -1824,10 +1701,7 @@ def mw_backfill_cmd(
     value) -- never word.ipa, since MW's pronunciation isn't true IPA.
     Stops the whole run (not just the API tier) once the free API's
     1000 query/day cap is hit, leaving the rest for tomorrow."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     with console.status("[bold]Checking Merriam-Webster for undefined words…"):
         stats = db.mw_backfill(conn, schema, limit=limit, use_scrape=not no_scrape, headless=headless,
@@ -1887,10 +1761,7 @@ def embed(
     the corpus grows instead of recomputing everything each time."""
     if signal not in ("definition", "fasttext", "both"):
         console.print("[red]✗[/red] --signal must be 'definition', 'fasttext', or 'both'"); raise typer.Exit(code=1)
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
 
     if signal in ("definition", "both"):
@@ -1923,10 +1794,7 @@ def commons_search(
     """Second-pass direct Commons search for real recordings kaikki's dump missed
     (confirmed to happen). Slow — Commons rate-limits hard; meant to run for hours.
     Stores only the search result; `audio` does the actual download."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     try:
         stats = db.search_commons_direct(conn, schema, dump_path=dump_path, only_missing=not refetch, limit=limit)
@@ -1948,10 +1816,7 @@ def wordnik_pron(
     """Fetch RAW Wordnik pronunciations (ahd-5/arpabet/gcide-diacritical) into
     word.wordnik_pron_raw. No IPA conversion here — that's a separate `ipa` pass,
     so a converter bug never costs re-running this slow, rate-limited fetch."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     stats = db.fetch_wordnik_pronunciations(conn, schema, only_missing=not refetch, limit=limit)
     conn.close()
@@ -1978,10 +1843,7 @@ def ipa(
     exists as of this run). NULLs out+replaces transcriptions that fail an
     English-language sanity check. Run this before `audio` — synthesis is
     only as good as the IPA it's given."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     try:
         stats = db.compute_ipa(conn, schema, dump_path=dump_path, only_missing=not refetch,
@@ -2024,10 +1886,7 @@ def oed_pronounce(
     dictionaries_dir = Path("dictionaries")
     volumes = list(paths) if paths else (sorted(dictionaries_dir.glob("*.pdf"))
                                          + sorted((dictionaries_dir / "done").glob("*.pdf")))
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     cfg = OedConfig(schema=schema)
     oed_db.apply_schema(conn, schema)
     with console.status("[bold]Loading pronunciation transcriber…"):
@@ -2073,10 +1932,7 @@ def oed_ipa_cmd(
     never overrides an existing valid IPA from another source. Run `audio`
     (or `compute_audio`) afterward — it picks the matching UK voice
     automatically for anything backfilled from here."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     stats = db.backfill_ipa_from_oed(conn, schema, oed_schema, only_missing=not refetch, limit=limit)
     conn.close()
@@ -2104,10 +1960,7 @@ def oed_lemma_cmd(
     Standalone like `oed-ipa`/`oed-ingest` -- not part of `maintain`, re-run
     periodically as new volumes land. Feeds `oed-concordance-match`, which
     limits its cross-reference to lemma entries only, for manageability."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     from .oed import db as oed_db
     oed_db.apply_schema(conn, schema)
     with console.status("[bold]Computing oed lemma flags…"):
@@ -2147,10 +2000,7 @@ def oed_concordance_match_cmd(
     Standalone like `oed-lemma`/`oed-ipa` -- not part of `maintain`, re-run
     periodically as new volumes land via `oed-ingest` and new books land
     via `ingest`."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     from .oed import db as oed_db
     oed_db.apply_schema(conn, schema)
     with console.status("[bold]Cross-referencing oed lemmas against concordance…"):
@@ -2256,10 +2106,7 @@ def maintain(
     is the dominant cost, likely hours. That cost is paid once; every later
     run only touches the new batch's words. Use the --skip-* flags to defer
     the slow steps to run separately/overnight instead."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     cfg = Config()
     if model:
@@ -2439,10 +2286,7 @@ def backfill_analogies_cmd(
     GPU)."""
     from . import analogies
 
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     cfg = Config()
     if model:
@@ -2475,10 +2319,7 @@ def maintain_status_cmd(
 
     from rich.table import Table
 
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
 
     def render() -> Table:
         steps = db.maintain_status(conn, schema)
@@ -2522,10 +2363,7 @@ def commons_download(
     any word currently on Azure-synthesized or no-data to the real recording.
     Slow and deliberate — run separately from `audio`, which exhausted Commons'
     rate limit when interleaved with fast Azure calls."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     stats = db.download_commons_direct_finds(conn, schema, limit=limit)
     conn.close()
@@ -2555,10 +2393,7 @@ def audio(
     where a transcription is known, else local Piper grapheme-only synthesis
     (needs models/piper/, see audio.PIPER_MODEL_PATH). Only a word Piper
     itself can't produce anything for is left at 'none'."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     try:
         stats = db.compute_audio(conn, schema, dump_path=dump_path, only_missing=not refetch, limit=limit,
@@ -2586,10 +2421,7 @@ def audio_guess(
     inline for new words -- this is only needed for words a run before Piper
     existed left at 'none'). Recorded as source='piper' — distinct from
     IPA-guided 'azure' — so the app can flag these unverified."""
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     stats = db.synthesize_unverified_guesses(conn, schema, limit=limit)
     conn.close()
@@ -2628,10 +2460,7 @@ def create_admin(
     if password != getpass.getpass("Confirm password: "):
         console.print("[red]✗[/red] passwords didn't match"); raise typer.Exit(code=1)
 
-    try:
-        conn = db.connect(database_url)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]✗[/red] cannot connect: {exc}"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
     db.apply_schema(conn, schema)
     s = db._safe_schema(schema)
     try:
