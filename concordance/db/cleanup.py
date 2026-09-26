@@ -43,7 +43,7 @@ def clean_script_variants(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool = F
         for tbl in ("quiz_answer", "word_review_schedule", "word_set_item"))
     with conn.cursor() as cur:
         cur.execute(f"""SELECT w.id, w.lemma, coalesce(w.definition,'') <> '', {history_sql}
-                        FROM {s}.word w WHERE w.active AND NOT w.lemma ~ '^[\\x01-\\x7f]*$'
+                        FROM {s}.word w WHERE w.active AND NOT w.admin_suggested AND NOT w.lemma ~ '^[\\x01-\\x7f]*$'
                           -- already swept: an active script_* word is either
                           -- awaiting review or was reactivated by a human --
                           -- never re-cast-out behind their back
@@ -171,7 +171,7 @@ def _sweep_respellings(conn, schema: str, prefix: str, *, apply: bool, prefilter
     min_zipf = Config().min_zipf
     with conn.cursor() as cur:
         cur.execute(f"""SELECT id, lemma, definition, coalesce(definition_source, '') FROM {s}.word
-                        WHERE active AND {prefilter}
+                        WHERE active AND NOT admin_suggested AND {prefilter}
                           AND coalesce(variant_flag_reason, '') NOT LIKE %s
                         ORDER BY id""", (f"{prefix}%",))
         found = []
@@ -273,7 +273,8 @@ def clean_foreign_words(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool = Fal
         # foreign_review = a human (or a reviewed exception) decided to keep
         # it despite the evidence -- never re-cast-out behind their back
         cur.execute(f"""SELECT id, lemma_lc, coalesce(definition_source,'') FROM {s}.word
-                        WHERE active AND coalesce(variant_flag_reason, '') <> 'foreign_review'""")
+                        WHERE active AND NOT admin_suggested
+                          AND coalesce(variant_flag_reason, '') <> 'foreign_review'""")
         rows = cur.fetchall()
     langs = foreign_only_langs(conn, [l for _, l, _ in rows], wikt_schema)
     actions = [(wid, lemma, note) for wid, lemma, src in rows
@@ -336,7 +337,7 @@ def clean_non_english_context(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool
                         FROM {s}.word w
                         JOIN {s}.word_book wb ON wb.word_id = w.id
                         JOIN {s}.book b ON b.id = wb.book_id
-                        WHERE w.active AND w.validity_label = ANY(%s) AND b.archive_path IS NOT NULL""",
+                        WHERE w.active AND NOT w.admin_suggested AND w.validity_label = ANY(%s) AND b.archive_path IS NOT NULL""",
                     (list(labels),))
         by_book: dict[str, dict[int, set[str]]] = defaultdict(dict)
         lemmas: dict[int, str] = {}

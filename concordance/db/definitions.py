@@ -188,7 +188,7 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
                             definition=%s,
                             definition_source=COALESCE(NULLIF(%s,''), definition_source),
                             part_of_speech=%s, active=false, updated_at=now()
-                        WHERE id=%s""",
+                        WHERE id=%s AND NOT admin_suggested""",
                     (cand.definition, cand.definition_source,
                      normalize_pos(cand.part_of_speech), wid))
                 stats["cast_out"] += 1
@@ -287,7 +287,7 @@ def refill_definitions(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> di
                             definition=%s,
                             definition_source=COALESCE(NULLIF(%s,''), definition_source),
                             part_of_speech=%s, active=false, updated_at=now()
-                        WHERE id=%s""",
+                        WHERE id=%s AND NOT admin_suggested""",
                     (cand.definition, cand.definition_source,
                      normalize_pos(cand.part_of_speech), wid))
                 stats["cast_out"] += 1
@@ -462,7 +462,7 @@ def mw_backfill(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
                     f"""UPDATE {s}.word SET
                             definition=%s, definition_source=%s, part_of_speech=%s,
                             active=false, mw_checked_at=now(), updated_at=now()
-                        WHERE id=%s""",
+                        WHERE id=%s AND NOT admin_suggested""",
                     (definition, entry.source, resolved_pos, wid))
                 stats["cast_out"] += 1
             else:
@@ -650,7 +650,7 @@ def dedupe_plural_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int 
         cur.execute(
             f"""SELECT id, lemma, definition, part_of_speech, sentence, chapter, as_seen
                 FROM {s}.word
-                WHERE active AND definition ~* %s
+                WHERE active AND NOT admin_suggested AND definition ~* %s
                 ORDER BY id""" + (f" LIMIT {int(limit)}" if limit else ""),
             (crossref.PLURAL_PREFILTER_SQL,))
         rows = cur.fetchall()

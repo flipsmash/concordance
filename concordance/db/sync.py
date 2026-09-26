@@ -256,7 +256,7 @@ def sync_book_results(conn, book_title: str, kept: list, rejected: list,
             if c.reject_reason in (RejectReason.PROPER_NOUN, RejectReason.NUMERIC_OR_SYMBOL):
                 cur.execute(
                     f"""UPDATE {s}.word SET active=false, updated_at=now()
-                        WHERE lemma_lc = lower(%s) AND active""",
+                        WHERE lemma_lc = lower(%s) AND active AND NOT admin_suggested""",
                     (c.lemma,))
                 stats["cast_out"] += cur.rowcount
 

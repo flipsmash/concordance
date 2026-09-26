@@ -35,6 +35,26 @@
   gap: 8px;
 }
 
+.suggest-word-rejected {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.suggest-word-rejected p,
+.suggest-word-rejected ul {
+  margin: 0;
+}
+
+.suggest-word-rejected ul {
+  padding-left: 20px;
+  font-size: 14px;
+}
+
 .suggest-word-candidates {
   display: flex;
   flex-direction: column;

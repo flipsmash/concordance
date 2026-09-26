@@ -956,12 +956,11 @@ def _migration_0001_baseline(conn: psycopg.Connection, s: str) -> None:
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS rescued_from_reject boolean NOT NULL DEFAULT false")
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS rescued_at timestamptz")
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS rescued_reason text")
-        # tracks a word an admin added directly via the "suggest a new word"
-        # flow (webapp/backend/suggest_word.py) rather than one the ingest
-        # pipeline discovered in a book — purely provenance/audit (a badge on
-        # WordDetail, a future filter), NOT load-bearing for judge-skip
-        # behavior: fetch_known_verdicts already treats ANY active=true word
-        # as a cached "keep" for future books, admin-suggested or not.
+        # tracks a word an admin added (or reinstated) via the "suggest a new
+        # word" flow (webapp/backend/suggest_word.py). Provenance (a badge on
+        # WordDetail), and a promise: no automated sweep or re-encounter
+        # deactivates it -- only an admin's own Prune does. Not needed for
+        # judge-skip: fetch_known_verdicts treats ANY active word as a keep.
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS admin_suggested boolean NOT NULL DEFAULT false")
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS admin_suggested_by text")
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS admin_suggested_at timestamptz")

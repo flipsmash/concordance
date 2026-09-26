@@ -4,6 +4,21 @@ import './SuggestWord.css'
 
 const API_BASE = ''
 
+// Ingest's reject reasons / cast-out reasons, in words.
+const REASON_LABELS = {
+  frequency_floor: 'too common',
+  proper_noun: 'a proper noun',
+  misspelling: 'a misspelling',
+  not_a_word: 'not a word',
+  not_interesting: 'not interesting enough',
+  numeric_or_symbol: 'a number or symbol',
+  foreign_language: 'a foreign word',
+  foreign_word: 'a foreign word',
+  non_english_context: 'used only in non-English passages',
+  pruned: 'pruned by an admin',
+}
+const reasonLabel = (r) => REASON_LABELS[r] || (r || 'unknown').replaceAll('_', ' ')
+
 // Admin-only "add a word directly" flow: search every dictionary source
 // independently for a lemma, show each one's own answer side by side, let
 // the admin pick one (or write from scratch) and edit it, then record it.
@@ -22,6 +37,7 @@ function SuggestWord() {
   const [form, setForm] = useState(null)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState('')
+  const [reactivating, setReactivating] = useState(false)
 
   useEffect(() => {
     fetch(`${API_BASE}/api/pos-values`)
@@ -54,8 +70,24 @@ function SuggestWord() {
       ipa: candidate.ipa,
       etymology: candidate.etymology,
       synonyms: candidate.synonyms.join(', '),
-      definition_source: candidate.source,
+      definition_source: candidate.definition_source || candidate.source,
     })
+  }
+
+  function handleReactivate() {
+    setReactivating(true)
+    setSaveError('')
+    fetch(`${API_BASE}/api/admin/suggest-word/reactivate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ word_id: result.word_id }),
+    })
+      .then((res) => (res.ok ? res.json() : res.json().then((body) => Promise.reject(new Error(body.detail || 'reactivate failed')))))
+      .then((word) => navigate(`/app/words/${word.id}`))
+      .catch((err) => {
+        setSaveError(err.message)
+        setReactivating(false)
+      })
   }
 
   function writeFromScratch() {
@@ -113,7 +145,7 @@ function SuggestWord() {
             type="text"
             value={lemma}
             onChange={(e) => setLemma(e.target.value)}
-            placeholder="e.g. perendinate"
+            placeholder="e.g. perendinate, or ad hominem"
             disabled={searching}
           />
         </label>
@@ -133,9 +165,46 @@ function SuggestWord() {
         <div className="suggest-word-exists">
           <p>
             <strong>{result.lemma}</strong> is already in the collection
-            {result.active ? '' : ' (currently pruned/inactive)'}.
+            {result.active ? '.' : ', but inactive: '}
+            {!result.active && <>{reasonLabel(result.inactive_reason)}.</>}
           </p>
-          <Link to={`/app/words/${result.word_id}`}>View it</Link>
+          {!result.active && result.inactive_note && <p className="suggest-word-hint">{result.inactive_note}</p>}
+          {result.definition && <p className="suggest-word-card-definition">{result.definition}</p>}
+          {saveError && <div className="error-banner">{saveError}</div>}
+          <div className="suggest-word-edit-actions">
+            <Link to={`/app/words/${result.word_id}`}>View it</Link>
+            {!result.active && (
+              <button type="button" className="accept-btn" onClick={handleReactivate} disabled={reactivating}>
+                {reactivating ? 'Reactivating…' : 'Reactivate'}
+              </button>
+            )}
+          </div>
+          {!result.active && (
+            <p className="suggest-word-hint">
+              Reactivating keeps it for good: automated clean-ups won't cast it out again.
+            </p>
+          )}
+        </div>
+      )}
+
+      {result && !result.exists && result.rejected_book_count > 0 && (
+        <div className="suggest-word-rejected">
+          <p>
+            Ingest rejected <strong>{result.lemma}</strong> in {result.rejected_book_count}{' '}
+            {result.rejected_book_count === 1 ? 'book' : 'books'}:
+          </p>
+          <ul>
+            {result.rejected_in.map((r, i) => (
+              <li key={i}>
+                <em>{r.book_title}</em>: {reasonLabel(r.reason)}
+                {r.detail ? ` (${r.detail})` : ''}
+              </li>
+            ))}
+            {result.rejected_book_count > result.rejected_in.length && (
+              <li>…and {result.rejected_book_count - result.rejected_in.length} more</li>
+            )}
+          </ul>
+          <p className="suggest-word-hint">Adding it anyway links it to those books.</p>
         </div>
       )}
 

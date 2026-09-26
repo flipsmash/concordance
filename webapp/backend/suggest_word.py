@@ -25,10 +25,13 @@ into one candidate).
 
 from __future__ import annotations
 
+import re
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from concordance import deepdef, dictionary, localdict, mw
+from concordance.oed import definitions as oed_definitions
 from concordance.model import Candidate, RejectReason, junk_pos_reason, normalize_pos
 from concordance.resolve import _pace_wordnik
 from webapp.backend import main as _main
@@ -38,13 +41,30 @@ router = APIRouter()
 
 # --- request/response models -------------------------------------------------
 
+class RejectedIn(BaseModel):
+    book_title: str
+    reason: str | None
+    detail: str | None
+
+
 class SuggestSearchResult(BaseModel):
     lemma: str
     exists: bool
     word_id: int | None = None
     active: bool | None = None
+    # for an existing word: what it says now and, if inactive, why it was cast out
+    definition: str | None = None
+    inactive_reason: str | None = None
+    inactive_note: str | None = None
+    # books whose ingest rejected this lemma, and why (a new word only)
+    rejected_in: list[RejectedIn] = []
+    rejected_book_count: int = 0
     candidates: list[dict] = []
     web_search_unavailable: bool = False
+
+
+class SuggestReactivateRequest(BaseModel):
+    word_id: int
 
 
 class SuggestFinalizeRequest(BaseModel):
@@ -61,6 +81,31 @@ class SuggestFinalizeResult(BaseModel):
     id: int
     lemma: str
     definition: str | None
+    linked_books: int = 0
+
+
+# A word or a short phrase: letters (any script's), spaces, hyphens,
+# apostrophes; at most 4 words. Phrases are real vocabulary too (in
+# medias res, ad hominem), and every source takes them.
+_MAX_WORDS = 4
+
+
+def _clean_lemma(raw: str) -> str:
+    lemma = re.sub(r"\s+", " ", (raw or "").replace("\u2019", "'")).strip()
+    if (not lemma or len(lemma) > 60 or len(lemma.split(" ")) > _MAX_WORDS
+            or not all(ch.isalpha() or ch in " -'" for ch in lemma) or not lemma[0].isalpha()):
+        raise HTTPException(status_code=422,
+                            detail=f"enter a word or a short phrase (up to {_MAX_WORDS} words; "
+                                   "letters, spaces, hyphens and apostrophes only)")
+    return lemma
+
+
+def _rejections(cur, lemma: str, limit: int = 8) -> tuple[list[RejectedIn], int]:
+    cur.execute(f"""SELECT b.title, r.reason, r.detail, count(*) OVER ()
+                    FROM {_main.SCHEMA}.rejected_word r JOIN {_main.SCHEMA}.book b ON b.id = r.book_id
+                    WHERE r.lemma_lc = lower(%s) ORDER BY b.title LIMIT %s""", (lemma, limit))
+    rows = cur.fetchall()
+    return [RejectedIn(book_title=t, reason=r, detail=d) for t, r, d, _ in rows], (rows[0][3] if rows else 0)
 
 
 def _candidate_dict(cand: Candidate, source: str) -> dict:
@@ -96,28 +141,47 @@ def _gather_candidates(conn, lemma: str) -> tuple[list[dict], bool]:
             "synonyms": [],
         })
 
-    cand = Candidate(lemma=lemma, pos="")
-    if dictionary._from_freedict(cand, session):
-        candidates.append(_candidate_dict(cand, "Free Dictionary API"))
+    # 0 Dict (stored as definition_source "OED", same as the ingest cascade):
+    # one card per homograph entry, like the local Wiktionary senses above.
+    for i, sense in enumerate(oed_definitions.definition_lexicon(conn, {lemma.lower()}).get(lemma.lower(), [])):
+        candidates.append({
+            "source": "0 Dict" if i == 0 else f"0 Dict (entry {i + 1})",
+            "definition_source": "OED",
+            "definition": sense.definition,
+            "part_of_speech": normalize_pos(sense.part_of_speech),
+            "ipa": "",
+            "etymology": sense.etymology,
+            "synonyms": [],
+        })
 
-    cand = Candidate(lemma=lemma, pos="")
-    if dictionary._from_wiktionary(cand, session):
-        candidates.append(_candidate_dict(cand, "Wiktionary"))
+    # One source failing (a timeout, a page that doesn't take a phrase)
+    # never costs the admin the others' answers.
+    def _try(fetch, source):
+        cand = Candidate(lemma=lemma, pos="")
+        try:
+            if fetch(cand):
+                candidates.append(_candidate_dict(cand, source(cand)))
+        except Exception:  # noqa: BLE001
+            pass
+
+    _try(lambda c: dictionary._from_freedict(c, session), lambda c: "Free Dictionary API")
+    _try(lambda c: dictionary._from_wiktionary(c, session), lambda c: "Wiktionary")
 
     key = deepdef.wordnik_key()
     if key:
-        cand = Candidate(lemma=lemma, pos="")
-        _pace_wordnik()
-        if deepdef._from_wordnik(cand, session, key):
-            candidates.append(_candidate_dict(cand, cand.definition_source or "Wordnik"))
+        def _wordnik(c):
+            _pace_wordnik()
+            return deepdef._from_wordnik(c, session, key)
+        _try(_wordnik, lambda c: c.definition_source or "Wordnik")
 
-    cand = Candidate(lemma=lemma, pos="")
-    if deepdef._from_yourdictionary(cand, session):
-        candidates.append(_candidate_dict(cand, "yourdictionary.com"))
+    _try(lambda c: deepdef._from_yourdictionary(c, session), lambda c: "yourdictionary.com")
 
     mw_key = mw.mw_api_key()
     if mw_key and not mw.quota_exhausted():
-        entries = mw.exact_matches(mw.lookup_api(lemma, mw_key, session), lemma)
+        try:
+            entries = mw.exact_matches(mw.lookup_api(lemma, mw_key, session), lemma)
+        except Exception:  # noqa: BLE001
+            entries = []
         for i, e in enumerate(entries):
             label = "Merriam-Webster" if i == 0 else f"Merriam-Webster ({e.part_of_speech})"
             resolved_pos = normalize_pos(e.part_of_speech)
@@ -194,31 +258,54 @@ def _gather_candidates(conn, lemma: str) -> tuple[list[dict], bool]:
 
 @router.get("/api/admin/suggest-word/search", response_model=SuggestSearchResult)
 def search_suggest_word(lemma: str, _: dict = Depends(_main.require_admin)) -> SuggestSearchResult:
-    lemma = lemma.strip()
-    if not lemma or " " in lemma:
-        raise HTTPException(status_code=422, detail="enter a single word, not a phrase")
+    lemma = _clean_lemma(lemma)
 
     with _main.get_conn() as conn, conn.cursor() as cur:
-        cur.execute(f"SELECT id, active FROM {_main.SCHEMA}.word WHERE lemma_lc = lower(%s)", (lemma,))
+        cur.execute(f"""SELECT id, active, definition, variant_flag_reason,
+                               coalesce(variant_flag_note, validity_notes)
+                        FROM {_main.SCHEMA}.word WHERE lemma_lc = lower(%s)""", (lemma,))
         row = cur.fetchone()
         if row is not None:
-            return SuggestSearchResult(lemma=lemma, exists=True, word_id=row[0], active=row[1])
+            wid, active, definition, reason, note = row
+            return SuggestSearchResult(
+                lemma=lemma, exists=True, word_id=wid, active=active, definition=definition,
+                inactive_reason=None if active else (reason or "pruned"),
+                inactive_note=None if active else note)
 
+        rejected_in, rejected_count = _rejections(cur, lemma)
         candidates, web_search_unavailable = _gather_candidates(conn, lemma)
 
     return SuggestSearchResult(
-        lemma=lemma, exists=False, candidates=candidates,
-        web_search_unavailable=web_search_unavailable,
+        lemma=lemma, exists=False, rejected_in=rejected_in, rejected_book_count=rejected_count,
+        candidates=candidates, web_search_unavailable=web_search_unavailable,
     )
+
+
+@router.post("/api/admin/suggest-word/reactivate", response_model=SuggestFinalizeResult)
+def reactivate_suggest_word(
+    body: SuggestReactivateRequest, user: dict = Depends(_main.require_admin),
+) -> SuggestFinalizeResult:
+    """Bring a pruned / cast-out word back. It's marked admin_suggested, which
+    the automated sweeps respect, so it isn't cast out again; the old
+    cast-out reason stays in variant_flag_* as history."""
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""UPDATE {_main.SCHEMA}.word SET active=true, admin_suggested=true,
+                    admin_suggested_by=%s, admin_suggested_at=now(), updated_at=now()
+                WHERE id=%s RETURNING id, lemma, definition""",
+            (user.get("username") or "admin", body.word_id))
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="word not found")
+        conn.commit()
+    return SuggestFinalizeResult(id=row[0], lemma=row[1], definition=row[2] or None)
 
 
 @router.post("/api/admin/suggest-word/finalize", response_model=SuggestFinalizeResult)
 def finalize_suggest_word(
     body: SuggestFinalizeRequest, user: dict = Depends(_main.require_admin),
 ) -> SuggestFinalizeResult:
-    lemma = body.lemma.strip()
-    if not lemma or " " in lemma:
-        raise HTTPException(status_code=422, detail="enter a single word, not a phrase")
+    lemma = _clean_lemma(body.lemma)
 
     with _main.get_conn() as conn, conn.cursor() as cur:
         cur.execute(f"SELECT id FROM {_main.SCHEMA}.word WHERE lemma_lc = lower(%s)", (lemma,))
@@ -237,6 +324,17 @@ def finalize_suggest_word(
              list(body.synonyms), body.etymology, body.definition_source, username),
         )
         word_id = cur.fetchone()[0]
+        # The word really occurs in any book whose ingest rejected it: link
+        # those books and drop the rejections, as accepting a rejected word
+        # from the Rejected tab does.
+        cur.execute(
+            f"""WITH gone AS (DELETE FROM {_main.SCHEMA}.rejected_word
+                              WHERE lemma_lc = lower(%s) RETURNING book_id)
+                INSERT INTO {_main.SCHEMA}.word_book (word_id, book_id)
+                SELECT DISTINCT %s, book_id FROM gone ON CONFLICT DO NOTHING""",
+            (lemma, word_id))
+        linked = cur.rowcount
         conn.commit()
 
-    return SuggestFinalizeResult(id=word_id, lemma=lemma, definition=body.definition or None)
+    return SuggestFinalizeResult(id=word_id, lemma=lemma, definition=body.definition or None,
+                                 linked_books=linked)

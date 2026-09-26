@@ -76,24 +76,16 @@ def test_search_existing_word_short_circuits():
         main.SCHEMA = old_schema
 
 
-@pg
-def test_search_rejects_phrases():
-    from starlette.testclient import TestClient
+def test_clean_lemma_takes_short_phrases_and_refuses_junk():
+    from fastapi import HTTPException
 
-    from webapp.backend import main
-
-    schema = "cc_test_suggest_word_phrase"
-    _fresh_schema(schema)
-
-    old_schema = main.SCHEMA
-    main.SCHEMA = schema
-    try:
-        client = TestClient(main.app, base_url="https://testserver")
-        client.post("/api/auth/login", json={"username": "adminuser", "password": "password123"})
-        res = client.get("/api/admin/suggest-word/search", params={"lemma": "not a word"})
-        assert res.status_code == 422
-    finally:
-        main.SCHEMA = old_schema
+    from webapp.backend.suggest_word import _clean_lemma
+    assert _clean_lemma("  ad   hominem ") == "ad hominem"
+    assert _clean_lemma("will-o\u2019-the-wisp") == "will-o'-the-wisp"
+    assert _clean_lemma("café") == "café"
+    for bad in ("", "5pm", "a b c d e", "hello!", "-dash", "x" * 61):
+        with pytest.raises(HTTPException):
+            _clean_lemma(bad)
 
 
 @pg
@@ -148,6 +140,11 @@ def test_search_gathers_candidates_from_every_source_independently(monkeypatch):
 
     monkeypatch.setattr(mw, "mw_api_key", lambda: "")  # no key -- tier skipped, not an error
 
+    from concordance.oed import definitions as oed_definitions
+    monkeypatch.setattr(oed_definitions, "definition_lexicon", lambda conn, heads, schema="oed": {
+        "zorbling": [oed_definitions.OedSense(entry_id=1, part_of_speech="sb", etymology="",
+                                              definition="0 dict definition")]})
+
     old_schema = main.SCHEMA
     main.SCHEMA = schema
     try:
@@ -167,6 +164,9 @@ def test_search_gathers_candidates_from_every_source_independently(monkeypatch):
         assert sources["Wiktionary"]["definition"] == "wiktionary definition"
         assert sources["Wordnik (century)"]["definition"] == "wordnik definition"
         assert sources["yourdictionary.com"]["definition"] == "yourdictionary definition"
+        # 0 Dict shows under its display name but saves as the pipeline's "OED"
+        assert sources["0 Dict"]["definition"] == "0 dict definition"
+        assert sources["0 Dict"]["definition_source"] == "OED"
         # MW was skipped (no key) -- omitted, not an empty entry.
         assert not any("Merriam" in s for s in sources)
     finally:
@@ -412,3 +412,110 @@ def test_finalize_requires_admin():
         assert res.status_code == 403
     finally:
         main.SCHEMA = old_schema
+
+
+def _admin_client(schema):
+    from starlette.testclient import TestClient
+
+    from webapp.backend import main
+    main.SCHEMA = schema
+    client = TestClient(main.app, base_url="https://testserver")
+    client.post("/api/auth/login", json={"username": "adminuser", "password": "password123"})
+    return client
+
+
+def _no_sources(monkeypatch):
+    from concordance import deepdef, dictionary, localdict, mw
+    from concordance.oed import definitions as oed_definitions
+    monkeypatch.setattr(localdict, "lookup_one", lambda conn, lemma, schema="vocab": [])
+    monkeypatch.setattr(oed_definitions, "definition_lexicon", lambda conn, heads, schema="oed": {})
+    monkeypatch.setattr(dictionary, "_from_wiktionary", lambda c, s: False)
+    monkeypatch.setattr(deepdef, "wordnik_key", lambda: "")
+    monkeypatch.setattr(deepdef, "_from_yourdictionary", lambda c, s: False)
+    monkeypatch.setattr(mw, "mw_api_key", lambda: "")
+
+    def boom(c, s):
+        raise TimeoutError("source down")
+    monkeypatch.setattr(dictionary, "_from_freedict", boom)       # a failing source is skipped, not a 500
+
+
+@pg
+def test_search_shows_why_an_inactive_word_is_out_and_reactivate_keeps_it(monkeypatch):
+    from webapp.backend import main
+
+    schema = "cc_test_suggest_word_reactivate"
+    _fresh_schema(schema)
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"""INSERT INTO {schema}.word (lemma, definition, active, variant_flag_reason, variant_flag_note)
+                        VALUES ('seldseen', 'rarely seen', false, 'misspelling', 'looks like X') RETURNING id""")
+        wid = cur.fetchone()[0]
+    conn.commit()
+    old_schema = main.SCHEMA
+    try:
+        client = _admin_client(schema)
+        body = client.get("/api/admin/suggest-word/search", params={"lemma": "Seldseen"}).json()
+        assert body["exists"] and body["active"] is False
+        assert body["inactive_reason"] == "misspelling" and body["inactive_note"] == "looks like X"
+        assert body["definition"] == "rarely seen"
+
+        res = client.post("/api/admin/suggest-word/reactivate", json={"word_id": wid})
+        assert res.status_code == 200, res.text
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT active, admin_suggested, admin_suggested_by FROM {schema}.word WHERE id=%s", (wid,))
+            assert cur.fetchone() == (True, True, "adminuser")
+        conn.commit()
+        assert client.post("/api/admin/suggest-word/reactivate", json={"word_id": 999999}).status_code == 404
+
+        # a book re-encountering it as a proper noun no longer casts it out
+        from concordance.model import Candidate, RejectReason
+        with conn.cursor() as cur:
+            cur.execute(f"INSERT INTO {schema}.book (title) VALUES ('Some Book')")
+        conn.commit()
+        rej = Candidate(lemma="seldseen", pos="PROPN")
+        rej.reject_reason = RejectReason.PROPER_NOUN
+        db.sync_book_results(conn, "Some Book", kept=[], rejected=[rej], schema=schema)
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT active FROM {schema}.word WHERE id=%s", (wid,))
+            assert cur.fetchone()[0] is True
+    finally:
+        main.SCHEMA = old_schema
+        conn.close()
+
+
+@pg
+def test_search_reports_rejections_and_finalize_links_those_books(monkeypatch):
+    from webapp.backend import main
+
+    schema = "cc_test_suggest_word_rejected"
+    _fresh_schema(schema)
+    _no_sources(monkeypatch)
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        for title in ("Book A", "Book B"):
+            cur.execute(f"INSERT INTO {schema}.book (title) VALUES (%s) RETURNING id", (title,))
+            bid = cur.fetchone()[0]
+            cur.execute(f"""INSERT INTO {schema}.rejected_word (book_id, lemma, reason, detail)
+                            VALUES (%s, 'ad hominem', 'not_interesting', 'judge said so')""", (bid,))
+    conn.commit()
+    old_schema = main.SCHEMA
+    try:
+        client = _admin_client(schema)
+        body = client.get("/api/admin/suggest-word/search", params={"lemma": "ad hominem"}).json()
+        assert body["exists"] is False
+        assert body["rejected_book_count"] == 2
+        assert {r["book_title"] for r in body["rejected_in"]} == {"Book A", "Book B"}
+        assert body["rejected_in"][0]["reason"] == "not_interesting"
+
+        res = client.post("/api/admin/suggest-word/finalize",
+                          json={"lemma": "ad hominem", "definition": "attacking the person", "definition_source": "admin"})
+        assert res.status_code == 200, res.text
+        assert res.json()["linked_books"] == 2
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT count(*) FROM {schema}.rejected_word")
+            assert cur.fetchone()[0] == 0
+            cur.execute(f"SELECT count(*) FROM {schema}.word_book")
+            assert cur.fetchone()[0] == 2
+    finally:
+        main.SCHEMA = old_schema
+        conn.close()
