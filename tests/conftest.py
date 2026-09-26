@@ -2,9 +2,9 @@
 
 DB tests are gated on CONCORDANCE_TEST_DB_URL. When it isn't set, fall back
 to the project's own DATABASE_URL (env or .env): every DB test works in its
-own throwaway cc_test_* / oed_test_* schema and drops it afterwards, so the
-real schemas are never written. Skipping silently let tests go stale unseen
-(the browse listing tests broke that way). Set CONCORDANCE_SKIP_DB_TESTS=1
+own throwaway cc_test_* / oed_test_* schema, never the real ones, and
+pytest_sessionfinish below drops any of those a test left behind. Skipping
+silently let tests go stale unseen (the browse listing tests broke that way). Set CONCORDANCE_SKIP_DB_TESTS=1
 to skip them anyway.
 """
 
@@ -40,3 +40,19 @@ elif not os.environ.get("CONCORDANCE_TEST_DB_URL"):
 
 def pytest_report_header(config):
     return f"database tests: {_status}"
+
+
+def pytest_sessionfinish(session, exitstatus):
+    url = os.environ.get("CONCORDANCE_TEST_DB_URL")
+    if not url:
+        return
+    try:
+        import psycopg
+        with psycopg.connect(url, connect_timeout=3) as conn, conn.cursor() as cur:
+            cur.execute(r"""SELECT nspname FROM pg_namespace
+                            WHERE nspname LIKE 'cc\_test\_%' OR nspname LIKE 'oed\_test\_%'""")
+            for (name,) in cur.fetchall():
+                cur.execute(f'DROP SCHEMA "{name}" CASCADE')
+                conn.commit()           # one per transaction: a batch exhausts max_locks_per_transaction
+    except Exception:  # noqa: BLE001 -- cleanup is best-effort
+        pass

@@ -21,7 +21,7 @@ trying the compound both closed and open), and render an honest
 replacement -- "Abbreviation of X -- <X's real definition>" when the
 headword really does look like a truncation of a longer X, "Variant
 spelling of X -- <X's real definition>" otherwise. Both phrasings still
-trip quizdef._VARIANT_RE, so quiz-suitability is unaffected. Words where X
+trip crossref.mentions_pointer, so quiz-suitability is unaffected. Words where X
 isn't resolvable in the local dump at all (~5% in the real-data sample --
 corrupted source markup, technical acronym expansions with no headword of
 their own, or a target simply missing from the dump) are left as-is and
@@ -119,7 +119,7 @@ def main() -> None:
             # one) was a rewrite of the now-replaced bogus stub text, so it's
             # stale regardless -- leaving the old source label would lie
             # about provenance once quiz_definition holds this resolved text
-            # verbatim instead. Both phrasings still trip quizdef._VARIANT_RE
+            # verbatim instead. Both phrasings still trip crossref.mentions_pointer
             # so this doesn't change quiz-eligibility either way.
             cur.execute(
                 f"""UPDATE {s}.word
