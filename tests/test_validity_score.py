@@ -330,3 +330,24 @@ def test_classification_gloss_never_passes_the_pointed_to_spelling():
     # real glosses that merely contain "form of" are untouched
     assert g("A form of verse in which each line rhymes.") == "A form of verse in which each line rhymes."
     assert "intend" not in g("(obsolete) To attend to; to apply oneself to.; Obsolete form of intend.")
+    # the pointer's own gloss in brackets or quoted parens is kept, never the target
+    assert g("Alternative form of pirogue (“type of boat”).") == "type of boat"
+    assert g("Alternative spelling of taphophobia [a fear of being buried alive] ") == \
+        "a fear of being buried alive"
+    # a bracketed gloss cut off by the source, spanning sentences, is kept whole
+    assert g("Alternative spelling of venipuncture [(hematology) The puncture of a vein. Usually to draw blood") \
+        == "(hematology) The puncture of a vein. Usually to draw blood"
+    # a recovered gloss doesn't run into the next clause
+    assert g("Absolute power; Alternative spelling of autarky (“self-reliance”); Self-government.") == \
+        "Absolute power; self-reliance; Self-government."
+    # a stray OCR "(" doesn't shield a later pointer clause from removal
+    assert "bread" not in g("Sc. smuik(e, smeuk. Smoke. Obsolete spelling of bread.")
+
+
+def test_plural_prefilter_covers_every_parsed_plural():
+    import re
+    from concordance.crossref import PLURAL_PREFILTER_SQL, plural_target
+    for d in ("Plural of goblin.", "plural form of took.", "Archaic plural of ox.",
+              "Obsolete plural form of child."):
+        assert plural_target(d), d
+        assert re.search(PLURAL_PREFILTER_SQL, d, re.IGNORECASE), d

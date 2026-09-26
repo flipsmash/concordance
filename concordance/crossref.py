@@ -131,7 +131,54 @@ _POINTER_RE = re.compile(
     r"|(?:comparative|superlative)\s+(?:form\s+)?of\b"
     r")", re.IGNORECASE)
 _GLOSS_DASH_RE = re.compile(r"\s(?:\u2014|\u2013|--|-)\s|:\s")
-_CLAUSE_SPLIT_RE = re.compile(r"(?<=[.;])\s+")
+# The pointer's own gloss can also follow the target in brackets or quoted
+# parens: "Alternative form of pirogue (“type of boat”).", "Alternative
+# spelling of taphophobia [a fear of being buried alive]" -- often cut off
+# mid-bracket by the source, so a missing closer runs to the end.
+_GLOSS_OPENERS = {"[": "]", "(“": "”)", '("': '")'}
+
+
+def _clauses(text: str) -> list[str]:
+    """Split at "." / ";" + whitespace, but never inside [...], (...) or “...”
+    -- a bracketed gloss is often several sentences. A "(" or "“" only counts
+    if it closes later (OCR text is full of stray ones); a "[" counts even
+    unclosed, since sources cut bracketed glosses off mid-sentence."""
+    out, depth, start, i = [], 0, 0, 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "[" or (ch in "(\u201c" and text.find(")" if ch == "(" else "\u201d", i) >= 0):
+            depth += 1
+        elif ch in "])\u201d":
+            depth = max(0, depth - 1)
+        elif ch in ".;" and depth == 0 and i + 1 < len(text) and text[i + 1].isspace():
+            out.append(text[start:i + 1])
+            i += 1
+            while i < len(text) and text[i].isspace():
+                i += 1
+            start = i
+            continue
+        i += 1
+    if start < len(text):
+        out.append(text[start:])
+    return out
+
+
+def _pointer_gloss(clause: str, after: int) -> str:
+    """The gloss a pointer clause carries for itself (after a dash/colon, or in
+    brackets/quoted parens after the target), whichever marker comes first;
+    "" if it has none. `after` is where the pointer phrase ends."""
+    best = None
+    dash = _GLOSS_DASH_RE.search(clause)
+    if dash:
+        best = (dash.start(), clause[dash.end():])
+    for opener, closer in _GLOSS_OPENERS.items():
+        at = clause.find(opener, after)
+        if at < 0 or (best and best[0] <= at):
+            continue
+        body = clause[at + len(opener):]
+        end = body.find(closer)
+        best = (at, body[:end] if end >= 0 else body)
+    return best[1].strip() if best else ""
 
 
 def classification_gloss(definition: str | None) -> str:
@@ -140,14 +187,18 @@ def classification_gloss(definition: str | None) -> str:
     meaning) should see. A pointer clause with its own gloss keeps only the
     gloss; a bare pointer clause is dropped; other clauses pass through."""
     kept = []
-    for clause in _CLAUSE_SPLIT_RE.split((definition or "").strip()):
-        if not _POINTER_RE.match(clause):
+    for clause in _clauses((definition or "").strip()):
+        m = _POINTER_RE.match(clause)
+        if not m:
             kept.append(clause)
             continue
-        parts = _GLOSS_DASH_RE.split(clause, maxsplit=1)
-        if len(parts) == 2 and parts[1].strip():
-            kept.append(parts[1].strip())
-    return " ".join(kept).strip()
+        gloss = _pointer_gloss(clause, m.end())
+        if gloss:
+            kept.append(gloss)
+    # a recovered gloss has no closing punctuation of its own; keep it from
+    # running into the next clause
+    return " ".join(k if i == len(kept) - 1 or k.rstrip()[-1:] in ".;:!?" else k.rstrip() + ";"
+                    for i, k in enumerate(kept)).strip()
 
 
 # --- the local Wiktionary dump's "abbreviation of X" stub --------------------
@@ -179,6 +230,11 @@ _PLURAL_OF_RE = re.compile(
     r"^(?:alternative |archaic |dialectal |obsolete )?plural (?:form )?of (\S+?)\.?$",
     re.IGNORECASE,
 )
+
+
+# A superset of _PLURAL_OF_RE's matches, for a SQL `~*` prefilter. Postgres
+# regexes can't take the Python pattern itself (no non-greedy `+?`).
+PLURAL_PREFILTER_SQL = "plural (form )?of"
 
 
 def plural_target(definition: str | None) -> str | None:

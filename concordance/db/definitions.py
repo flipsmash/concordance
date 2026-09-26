@@ -640,21 +640,19 @@ def dedupe_plural_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int 
     from ..model import Candidate, Occurrence, junk_pos_reason
 
     s = _safe_schema(schema)
-    # Broad SQL prefilter (plain substring, case-insensitive) + precise
-    # Python-side regex match below -- NOT a direct `~*` on
-    # crossref._PLURAL_OF_RE.pattern. Postgres's regex dialect is POSIX ERE, which
-    # doesn't support Python re's non-greedy `+?`, so the exact same pattern
-    # string silently matches a different (smaller) row set in each engine
-    # -- confirmed empirically. A plain literal substring has no such
-    # quantifiers so it's safe to run directly in Postgres as a superset
-    # filter; crossref.plural_target() (needed anyway, to parse the singular
-    # out) does the real, precise matching in Python.
+    # Broad SQL prefilter (crossref.PLURAL_PREFILTER_SQL, a superset) +
+    # precise Python-side match below -- NOT a direct `~*` on
+    # crossref._PLURAL_OF_RE.pattern: Postgres's POSIX ERE has no non-greedy
+    # `+?`, so the same pattern string matches a different row set there.
+    # crossref.plural_target() (needed anyway, to parse the singular out)
+    # does the real matching.
     with conn.cursor() as cur:
         cur.execute(
             f"""SELECT id, lemma, definition, part_of_speech, sentence, chapter, as_seen
                 FROM {s}.word
-                WHERE active AND definition ~* 'plural of'
-                ORDER BY id""" + (f" LIMIT {int(limit)}" if limit else ""))
+                WHERE active AND definition ~* %s
+                ORDER BY id""" + (f" LIMIT {int(limit)}" if limit else ""),
+            (crossref.PLURAL_PREFILTER_SQL,))
         rows = cur.fetchall()
 
     stats = {"attempted": len(rows), "linked": 0, "left_inactive": 0, "created": 0,
