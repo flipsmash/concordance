@@ -267,3 +267,11 @@ def test_bare_pointer_gets_the_targets_first_sense_never_the_target_word():
     prompt = classify._prompt_items(items)
     assert prompt[0]["def"] == "A bundle of sticks for fuel."
     assert all("faggot" not in p["def"] for p in prompt)
+
+
+def test_sentence_is_sent_only_when_there_is_no_definition():
+    from concordance import classify
+    items = [{"word": "boomslang", "pos": "noun", "definition": "A venomous snake.", "sentence": "a boomslang, no?"},
+             {"word": "wanworth", "pos": "noun", "definition": "", "sentence": "bought at a wanworth"}]
+    p = classify._prompt_items(items)
+    assert p[0]["sentence"] == "" and p[1]["sentence"] == "bought at a wanworth"

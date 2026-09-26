@@ -9,3 +9,4 @@ and link here for the rest.
 - [0003](0003-fill-definitions-single-pass.md) fill-definitions is one pass, reaches MW, and always tries WEB
 - [0004](0004-junk-pos-recheck-on-cached-words.md) Junk-POS resolutions are re-checked on every re-encounter
 - [0005](0005-variant-detector-flags-only.md) The foreign/spelling-variant detector flags for review, never casts out
+- [0006](0006-classifier-batch-and-sentence.md) Classifier: one word per call; the book sentence only without a definition

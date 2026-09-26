@@ -463,7 +463,7 @@ def classify(
     model: Optional[Path] = typer.Option(None, "--model", "-m", help="Model (defaults to the 14B)."),
     limit: int = typer.Option(0, "--limit", "-l", help="Only classify the first N words (0 = all)."),
     only_missing: bool = typer.Option(False, "--only-missing", help="Only classify words that have no category yet."),
-    batch: int = typer.Option(0, "--batch", help="Override the batch size (smaller = fewer omissions)."),
+    batch: int = typer.Option(0, "--batch", help="Override the batch size (default 1: one word per call -- batched answers depend on batch-mates)."),
     commit_every: int = typer.Option(200, "--commit-every",
                                       help="Commit to the DB after every N words, not just once at the end -- "
                                            "so a crash mid-run loses at most one partial chunk, not everything."),

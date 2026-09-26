@@ -59,7 +59,10 @@ def _prompt_items(items: list[dict]) -> list[dict]:
             "word": it["word"],
             "pos": it.get("pos", ""),
             "def": gloss[:200],
-            "sentence": (it.get("sentence") or "")[:200],
+            # The book sentence only when there is no definition to go on:
+            # measured against a hand-labelled set it added nothing beside a
+            # definition, and it is often misleading (glossary/index lines).
+            "sentence": "" if gloss else (it.get("sentence") or "")[:200],
             "hint": hint,
         })
     return out
@@ -75,7 +78,11 @@ class Classifier:
         if not mp or not Path(mp).exists():
             raise RuntimeError(f"classifier model not found: {mp!r}")
         self.llm = Llama(model_path=mp, n_gpu_layers=cfg.n_gpu_layers, n_ctx=cfg.n_ctx, verbose=False)
-        self.batch = 15
+        # One word per call. Batched, the answers depended on which words
+        # shared the batch: re-ordering alone changed the primary code for
+        # over half of a 150-word test set (at batch 1: 12 of 150), at the
+        # same accuracy and no extra time. See docs/decisions/0006.
+        self.batch = 1
 
     def close(self) -> None:
         """Deterministically frees the model's GPU memory -- see

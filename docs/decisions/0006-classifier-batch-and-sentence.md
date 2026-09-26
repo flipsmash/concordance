@@ -1,0 +1,32 @@
+# Classifier: one word per call; the book sentence only without a definition
+
+Where: concordance/classify.py (`Classifier.batch`, `_prompt_items`)
+
+Measured 2026-09-26 on a hand-labelled set of 150 active words, 30 per stratum:
+single-sense, multi-sense, cross-reference, blank definition, and "sentence"
+that is really a glossary/index line. Each word's acceptable primary codes
+were written down before any run. Cells are primary-code correct / top-level
+field correct / scored (143; 7 blank-definition words had no defensible label).
+
+| variant (Qwen2.5-14B unless noted) | primary | field | omitted | primary flips vs. re-run |
+|---|---|---|---|---|
+| A: def + sentence, batch 15 | 60-64 | 105-106 | 7-8 | 77/150 |
+| B: sentence only if no def, batch 15 | 61 | 100-111 | 1-17 | 94/150 |
+| C: sentence if no def or multi-sense, batch 15 | 60-75 | 97-111 | 3-19 | 81/150 |
+| D: B at batch 1 | 62-63 | 104-105 | 1 | **12/150** |
+| E: B, 3-run vote | 68 | 111 | 0 | n/a (3x cost) |
+| F: two-stage (field, then code), batch 1 | 66-68 | 95-101 | 0 | - |
+| Qwen3-30B-A3B, C | 58-65 | 97 | 15 | 89/150 |
+
+Findings:
+- The sentence makes no measurable difference beside a definition, and it
+  can't be dropped outright: ~3,200 active words have no definition and the
+  sentence is all they have. Kept only for those.
+- Batching was the source of the churn: which other words shared a batch
+  changed over half the primary codes at temperature 0. One word per call is
+  as accurate, no slower, and nearly deterministic.
+- Accuracy itself (~45% exact code, ~75% field against this strict gold) did
+  not move with any prompt change, the two-stage split, voting, or the larger
+  local model. The model does understand the words (asked plainly it calls a
+  boomslang an animal); it is picking from the ~230-code list that fails.
+  The chat template was verified correct (Qwen ChatML from the GGUF).
