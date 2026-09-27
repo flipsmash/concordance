@@ -285,6 +285,14 @@ def oed_ingest(
     cfg = OedConfig(schema=schema)
     oed_db.apply_schema(conn, schema)
 
+    def _flag_lemmas() -> None:
+        # The definition cascade only reads entries flagged as lemmas; an
+        # entry whose flag was never computed is invisible to it (the
+        # 2026-09-24 add-missing run left 99.5k entries that way).
+        with console.status("[bold]Computing lemma flags for new entries…"):
+            ls = oed_db.compute_lemma_flags(conn, schema, only_missing=True)
+        console.print(f"  lemma flags: {ls['entries']} new entries checked, {ls['lemma']} lemma")
+
     if add_missing:
         from .oed.pipeline import add_missing_entries
         totals = {"candidates": 0, "matched": 0, "added": 0, "obsolete_added": 0, "obsolete_marked": 0, "pruned": 0}
@@ -301,6 +309,8 @@ def oed_ingest(
                           f"[bold]{s['added']}[/bold] {'would be ' if dry_run else ''}added "
                           f"({s['obsolete_added']} obsolete), {s['obsolete_marked']} stored entries marked obsolete"
                           + (f", {s['pruned']} pruned out of order" if s["pruned"] else ""))
+        if not dry_run:
+            _flag_lemmas()
         conn.close()
         console.print(f"[green]✓[/green] oed-ingest --add-missing{' (dry run)' if dry_run else ''}: "
                       f"[bold]{totals['added']}[/bold] entries {'would be ' if dry_run else ''}added across "
@@ -331,6 +341,7 @@ def oed_ingest(
             console.print(f"[bold]{stats['entries_written']}[/bold] entries written "
                            f"over {stats['pages']} page(s)")
 
+    _flag_lemmas()
     conn.close()
     console.print()
     console.rule("[bold green]Done[/bold green]")
@@ -2010,9 +2021,10 @@ def oed_lemma_cmd(
     concordance/oed/lemma.py's module docstring for the two-tier computation
     (OED's own POS tag when present, spaCy's context-free guess otherwise).
 
-    Standalone like `oed-ipa`/`oed-ingest` -- not part of `maintain`, re-run
-    periodically as new volumes land. Feeds `oed-concordance-match`, which
-    limits its cross-reference to lemma entries only, for manageability."""
+    `oed-ingest` (both modes) now runs this for its own new entries, so run
+    it standalone only to backfill or, with --refetch, to recompute all.
+    Feeds the definition cascade and `oed-concordance-match`, which both read
+    lemma entries only -- an entry never flagged is invisible to them."""
     conn = _connect(database_url)
     from .oed import db as oed_db
     oed_db.apply_schema(conn, schema)
