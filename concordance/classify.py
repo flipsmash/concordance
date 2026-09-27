@@ -13,6 +13,7 @@ assignable USAS set so hallucinated codes (G3.1, K5.3) are dropped.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from . import db, usas, wndomains
@@ -25,22 +26,40 @@ _LABEL = {c["code"]: c["name"] for c in _CATS}
 _ASSIGNABLE = set(_LABEL)
 _REFERENCE = "\n".join(f"{c['code']} {c['name']}" for c in _CATS)
 
-_SYSTEM = (
-    "You tag English words with USAS semantic category codes. Use ONLY codes from "
-    "this list:\n\n" + _REFERENCE + "\n\n"
-    "For each word choose the FEWEST codes that capture its core meaning IN THE GIVEN "
-    "SENSE — usually ONE, at most three, most specific first. Add a 2nd or 3rd code ONLY when "
-    "it captures a genuinely distinct, well-supported aspect (e.g. a word that is both a "
-    "physical object AND a food). Do NOT pad with loosely-related codes; if unsure about an "
-    "extra code, leave it out. A word may legitimately be both a domain and an expressive term. "
-    "Classify ONLY the sense described by 'def' and used in 'sentence'; other meanings the same "
-    "spelling may have elsewhere are irrelevant and must not influence the codes. "
-    "A 'hint' lists domain codes suggested by a lexicon — keep the ones that fit the "
-    "sentence, drop the rest, and ADD codes for meaning the hint misses (emotion, quality, "
-    "manner, thought, social, etc.). "
-    'Output ONLY a JSON array, one object per input word IN ORDER, no prose: '
-    '[{"w":"<word>","c":["CODE",...]}]. Include EVERY input word exactly once.'
+# Two steps per word (docs/decisions/0006): the broad field first, from the
+# 21 top-level fields each listed with what it covers; then the specific
+# codes, choosing only among that field's own. Picking straight from all
+# ~230 codes, the model understood the word but grabbed the wrong line
+# (a snake -> "Objects generally"): on a hand-labelled test set this took
+# exact-code accuracy from 63 to 78 of 143, and is fully repeatable.
+_FIELDS = [c for c in usas.categories() if c["level"] == 0]
+_FIELD_CODES = {c["code"] for c in _FIELDS}
+_FIELD_SYSTEM = (
+    "You sort English words into broad semantic fields. Fields:\n"
+    + "\n".join(f"{f['code']} {f['name']} -- covers: "
+                + "; ".join(n for code, n in _LABEL.items() if code[0] == f["code"] and code != f["code"])
+                for f in _FIELDS)
+    + "\n\nClassify ONLY the sense given by the definition (or, if there is no definition, the "
+      "example sentence). Answer with the field letter(s) that fit, best first, at most two, comma-separated, nothing else."
 )
+
+
+def _code_system(letters: list[str]) -> str:
+    sub = "\n".join(f"{c} {n}" for c, n in _LABEL.items() if c[0] in letters)
+    return ("Choose USAS codes for the word from THIS list only:\n" + sub + "\n\n"
+            "Pick the FEWEST codes that capture the given sense, most specific and best first, "
+            "at most three. Answer with the codes, comma-separated, nothing else.")
+
+
+def _word_block(p: dict) -> str:
+    """One _prompt_items entry as the plain-text block both steps see."""
+    lines = [f"word: {p['word']}", f"part of speech: {p.get('pos') or 'unknown'}",
+             f"definition: {p.get('def') or '(none)'}"]
+    if p.get("sentence"):
+        lines.append(f"example sentence from a book: {p['sentence']}")
+    if p.get("hint"):
+        lines.append(f"lexicon hint (may be wrong): {', '.join(p['hint'])}")
+    return "\n".join(lines)
 
 
 def _prompt_items(items: list[dict]) -> list[dict]:
@@ -58,7 +77,7 @@ def _prompt_items(items: list[dict]) -> list[dict]:
         out.append({
             "word": it["word"],
             "pos": it.get("pos", ""),
-            "def": gloss[:200],
+            "def": gloss[:300],
             # The book sentence only when there is no definition to go on:
             # measured against a hand-labelled set it added nothing beside a
             # definition, and it is often misleading (glossary/index lines).
@@ -69,8 +88,6 @@ def _prompt_items(items: list[dict]) -> list[dict]:
 
 
 class Classifier:
-    _MAX_PASSES = 3
-
     def __init__(self, cfg: Config | None = None, model_path: str | None = None):
         from llama_cpp import Llama
         cfg = cfg or Config()
@@ -78,11 +95,6 @@ class Classifier:
         if not mp or not Path(mp).exists():
             raise RuntimeError(f"classifier model not found: {mp!r}")
         self.llm = Llama(model_path=mp, n_gpu_layers=cfg.n_gpu_layers, n_ctx=cfg.n_ctx, verbose=False)
-        # One word per call. Batched, the answers depended on which words
-        # shared the batch: re-ordering alone changed the primary code for
-        # over half of a 150-word test set (at batch 1: 12 of 150), at the
-        # same accuracy and no extra time. See docs/decisions/0006.
-        self.batch = 1
 
     def close(self) -> None:
         """Deterministically frees the model's GPU memory -- see
@@ -91,39 +103,29 @@ class Classifier:
         self.llm.close()
 
     def classify(self, items: list[dict]) -> dict[str, list[str]]:
-        """word(lower) -> list of validated USAS codes."""
+        """word(lower) -> list of validated USAS codes ([] if nothing usable)."""
         result: dict[str, list[str]] = {}
-        for i in range(0, len(items), self.batch):
-            self._classify_batch(items[i : i + self.batch], result)
+        for it in items:
+            result[it["word"].lower()] = self._classify_one(it)
         return result
 
-    def _classify_batch(self, batch: list[dict], result: dict) -> None:
-        pending = list(batch)
-        for _ in range(self._MAX_PASSES):
-            got = self._query(pending)
-            for word, codes in got.items():
-                result[word] = codes
-            pending = [it for it in batch if it["word"].lower() not in result]
-            if not pending:
-                break
-        for it in pending:                       # unresolved after retries: leave empty
-            result.setdefault(it["word"].lower(), [])
-
-    def _query(self, items: list[dict]) -> dict[str, list[str]]:
-        payload = json.dumps(_prompt_items(items), ensure_ascii=False)
+    def _ask(self, system: str, user: str, max_tokens: int) -> str:
         out = self.llm.create_chat_completion(
-            messages=[{"role": "system", "content": _SYSTEM},
-                      {"role": "user", "content": payload}],
-            temperature=0.0, max_tokens=len(items) * 40 + 128)
-        parsed = _parse(out["choices"][0]["message"]["content"])
-        got = {}
-        for obj in parsed:
-            w = str(obj.get("w", "")).strip().lower()
-            if not w:
-                continue
-            codes = [c for c in _validate(obj.get("c", []))]
-            got[w] = codes
-        return got
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+            temperature=0.0, max_tokens=max_tokens)
+        return out["choices"][0]["message"]["content"] or ""
+
+    def _classify_one(self, it: dict) -> list[str]:
+        block = _word_block(_prompt_items([it])[0])
+        raw = self._ask(_FIELD_SYSTEM, block, 12)
+        # "L, B" or "L LIFE & LIVING THINGS": the first letter of each
+        # comma-separated answer, never of every word in it
+        letters = [x.strip().upper()[:1] for x in re.split(r"[,;]", raw) if x.strip()]
+        letters = list(dict.fromkeys(l for l in letters if l in _FIELD_CODES))[:2]
+        if not letters:
+            return []
+        raw = self._ask(_code_system(letters), block, 30)
+        return _validate([c.strip().split(" ")[0] for c in re.split(r"[,;]", raw) if c.strip()])[:3]
 
 
 def _validate(codes) -> list[str]:
@@ -174,7 +176,7 @@ def _parse(text: str):
 
 
 def classify_and_store(conn, schema: str, cfg: Config | None = None, limit: int = 0,
-                       only_missing: bool = False, batch: int | None = None,
+                       only_missing: bool = False,
                        commit_every: int = 200, word_ids: list[int] | None = None) -> dict:
     """Classify every word in {schema}.word and write tags to word_category.
     Idempotent for the LLM-sourced rows (cleared and rewritten each run).
@@ -203,8 +205,6 @@ def classify_and_store(conn, schema: str, cfg: Config | None = None, limit: int 
               "sentence": r[4] or "", "_id": r[0]} for r in rows]
     bare_pointer_senses(conn, items)
     clf = Classifier(cfg)  # loaded once, reused for every chunk below
-    if batch:
-        clf.batch = batch
 
     stats = {"words": len(items), "classified": 0, "assignments": 0, "vanished": 0}
 

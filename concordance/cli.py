@@ -463,7 +463,6 @@ def classify(
     model: Optional[Path] = typer.Option(None, "--model", "-m", help="Model (defaults to the 14B)."),
     limit: int = typer.Option(0, "--limit", "-l", help="Only classify the first N words (0 = all)."),
     only_missing: bool = typer.Option(False, "--only-missing", help="Only classify words that have no category yet."),
-    batch: int = typer.Option(0, "--batch", help="Override the batch size (default 1: one word per call -- batched answers depend on batch-mates)."),
     commit_every: int = typer.Option(200, "--commit-every",
                                       help="Commit to the DB after every N words, not just once at the end -- "
                                            "so a crash mid-run loses at most one partial chunk, not everything."),
@@ -489,7 +488,7 @@ def classify(
     if word_ids is not None and dry_run:
         console.print(f"[green]✓[/green] classify (dry run): {len(word_ids)} words would be re-classified")
         return
-    stats = classify_and_store(conn, schema, cfg, limit, only_missing=only_missing, batch=batch or None,
+    stats = classify_and_store(conn, schema, cfg, limit, only_missing=only_missing,
                                commit_every=commit_every, word_ids=word_ids)
     conn.close()
     console.print(f"[green]✓[/green] classified [bold]{stats['classified']}[/bold]/{stats['words']} words "
@@ -2169,7 +2168,7 @@ def maintain(
     if not skip_classify:
         from .classify import classify_and_store
         with console.status("[bold]Classifying USAS domains…"):
-            stats = classify_and_store(conn, schema, cfg, limit, only_missing=True, batch=None)
+            stats = classify_and_store(conn, schema, cfg, limit, only_missing=True)
         console.print(f"[green]✓[/green] classify: [bold]{stats['classified']}[/bold]/{stats['words']} words "
                       f"-> {stats['assignments']} category assignments"
                       + (f" ({stats['vanished']} vanished mid-run, skipped)" if stats.get("vanished") else ""))
