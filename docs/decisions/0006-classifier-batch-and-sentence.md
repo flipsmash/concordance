@@ -42,3 +42,8 @@ Findings:
   stays the classifier for new words and re-runs because it is repeatable:
   a word's categories change only when its definition does. The weaker half
   is the field step -- the place to work if accuracy matters later.
+- Other local models that fit 12 GB, shipped two-step classifier, same set
+  (2026-09-27): Qwen2.5-14B (current) 78 / 108; Gemma 3 12B 76 / 106 (paired
+  27 vs 29 -- a tie; ~20% faster); Qwen3-14B, non-thinking mode, 60 / 97
+  (paired 16 vs 34 -- clearly worse). Kept Qwen2.5-14B. The eval set and
+  scripts live in the git-ignored data/classify_eval/ (book sentences).
