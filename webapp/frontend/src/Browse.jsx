@@ -11,6 +11,7 @@ import { useAuth } from './AuthContext'
 import { colorForBucket } from './domainColors'
 import { usePagedTable } from './usePagedTable'
 import './Browse.css'
+import useSurpriseShortcut, { SURPRISE_SHORTCUT_HINT } from './useSurpriseShortcut'
 
 const API_BASE = ''
 const WORD_SORTS = new Set(['lemma', 'difficulty', 'part_of_speech', 'book_count'])
@@ -322,6 +323,7 @@ function Browse() {
       })
       .catch(() => {})
   }
+  useSurpriseShortcut(surpriseMe)
 
   // Admin-only. Soft-delete (the existing DELETE /api/words/{id}, already
   // used by the admin curation view's AcceptedView.jsx) -- same optimistic-
@@ -401,7 +403,7 @@ function Browse() {
             <input type="checkbox" checked={quizzableOnly} onChange={(e) => setQuizzableOnly(e.target.checked)} />
             Quizzable only
           </label>
-          <button type="button" className="browse-surprise" onClick={surpriseMe}>
+          <button type="button" className="browse-surprise" onClick={surpriseMe} title={SURPRISE_SHORTCUT_HINT}>
             🎲 Surprise me
           </button>
           <button

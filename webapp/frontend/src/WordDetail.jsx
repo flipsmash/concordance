@@ -7,6 +7,7 @@ import LinkedDefinition from './LinkedDefinition'
 import { colorForBucket } from './domainColors'
 import { googleSearchUrl } from './externalLinks'
 import './WordDetail.css'
+import useSurpriseShortcut, { SURPRISE_SHORTCUT_HINT } from './useSurpriseShortcut'
 
 const API_BASE = ''
 const BOOKS_PREVIEW_COUNT = 10
@@ -58,6 +59,7 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
       .catch(() => {})
       .finally(() => setSurpriseLoading(false))
   }
+  useSurpriseShortcut(surpriseMe, !surpriseLoading)
 
   // Admin-only. Same soft-delete endpoint (DELETE /api/words/{id}) the admin
   // curation view's AcceptedView.jsx already uses -- word.active becomes
@@ -223,7 +225,7 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
         <AddToSetMenu wordIds={[word.id]} />
         <button
           type="button"
-          className="word-detail-surprise"
+          className="word-detail-surprise" title={SURPRISE_SHORTCUT_HINT}
           onClick={surpriseMe}
           disabled={surpriseLoading}
         >

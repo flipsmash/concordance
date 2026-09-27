@@ -7,6 +7,7 @@ import SortControl from './SortControl'
 import { usePagedTable } from './usePagedTable'
 import './Authors.css'
 import './Browse.css'
+import useSurpriseShortcut, { SURPRISE_SHORTCUT_HINT } from './useSurpriseShortcut'
 
 const API_BASE = ''
 const PAGE_SIZE = 30
@@ -154,6 +155,7 @@ function Books() {
       })
       .catch(() => {})
   }
+  useSurpriseShortcut(surpriseMe)
 
   return (
     <div className="authors-page">
@@ -161,7 +163,7 @@ function Books() {
         <h1>Browse by book</h1>
       </header>
 
-      <button type="button" className="authors-surprise" onClick={surpriseMe}>
+      <button type="button" className="authors-surprise" onClick={surpriseMe} title={SURPRISE_SHORTCUT_HINT}>
         🎲 Surprise me
       </button>
 

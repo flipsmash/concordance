@@ -13,6 +13,7 @@ import { useWordFilters } from './useWordFilters'
 import './Authors.css'
 import './Browse.css'
 import './WorkDetail.css'
+import useSurpriseShortcut, { SURPRISE_SHORTCUT_HINT } from './useSurpriseShortcut'
 
 const API_BASE = ''
 const PAGE_SIZE = 30
@@ -130,6 +131,7 @@ function AuthorWorks() {
       })
       .catch(() => {})
   }
+  useSurpriseShortcut(surpriseMe)
 
   useEffect(() => {
     setRelated(null)
@@ -173,7 +175,7 @@ function AuthorWorks() {
             Goodreads ↗
           </a>
         </div>
-        <button type="button" className="authors-surprise" onClick={surpriseMe}>
+        <button type="button" className="authors-surprise" onClick={surpriseMe} title={SURPRISE_SHORTCUT_HINT}>
           🎲 Surprise me
         </button>
       </header>
