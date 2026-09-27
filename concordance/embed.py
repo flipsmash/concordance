@@ -39,12 +39,23 @@ FASTTEXT_DIM = 300
 
 
 def definition_text(definition: str | None, synonyms: list[str] | None,
-                    sentence: str | None) -> tuple[str, str] | None:
+                    sentence: str | None, pointer_sense: str = "") -> tuple[str, str] | None:
     """(text, source_label) to embed for a word, or None if nothing usable
     exists. Order matters: a real dictionary gloss beats a synonym list beats
-    a single example sentence, but any of the three is fine to embed from."""
-    if definition and definition.strip():
-        return definition.strip(), "definition"
+    a single example sentence, but any of the three is fine to embed from.
+
+    Never the cross-referenced spelling, same rule as classification: only
+    the word's own gloss (crossref.classification_gloss), or for a bare
+    pointer ("Archaic form of X.") its target's first sense (`pointer_sense`,
+    from classify.bare_pointer_senses) -- otherwise "Variant spelling of
+    faggot" pulls fagot toward the slur in the similarity graph."""
+    from .crossref import classification_gloss
+
+    gloss = classification_gloss(definition)
+    if gloss:
+        return gloss, "definition"
+    if pointer_sense:
+        return pointer_sense, "pointer target sense"
     if synonyms:
         joined = ", ".join(s.strip() for s in synonyms if s.strip())
         if joined:

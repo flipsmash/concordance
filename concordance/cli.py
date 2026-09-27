@@ -1792,6 +1792,10 @@ def embed(
     refresh: bool = typer.Option(False, "--refresh", help="Recompute all (default: only words missing a vector)."),
     limit: int = typer.Option(0, "--limit", "-l", help="Cap words processed (0 = all)."),
     batch: int = typer.Option(64, "--batch", help="Definition-embedding batch size."),
+    pointer_affected: bool = typer.Option(False, "--pointer-affected",
+                                          help="Re-embed only words whose definition cross-references another "
+                                               "spelling (their embedding input changed: own gloss only, never "
+                                               "the other spelling)."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Compute per-word semantic-distance vectors into word_embedding: a
@@ -1806,9 +1810,17 @@ def embed(
     db.apply_schema(conn, schema)
 
     if signal in ("definition", "both"):
+        ids = None
+        if pointer_affected:
+            from .crossref import classification_gloss
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT id, definition FROM {db._safe_schema(schema)}.word "
+                            "WHERE active AND coalesce(definition, '') <> ''")
+                ids = [wid for wid, d in cur.fetchall() if classification_gloss(d) != d.strip()]
+            console.print(f"  {len(ids):,} words cross-reference another spelling")
         with console.status("[bold]Embedding definitions…"):
-            stats = db.compute_definition_embeddings(conn, schema, only_missing=not refresh,
-                                                      limit=limit, batch=batch)
+            stats = db.compute_definition_embeddings(conn, schema, only_missing=not (refresh or pointer_affected),
+                                                      limit=limit, batch=batch, word_ids=ids)
         console.print(f"[green]✓[/green] definition: [bold]{stats['embedded']}[/bold]/{stats['words']} "
                       f"embedded ({stats['skipped_no_text']} skipped, no text)")
     if signal in ("fasttext", "both"):

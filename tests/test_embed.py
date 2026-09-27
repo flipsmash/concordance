@@ -32,3 +32,16 @@ def test_definition_text_none_when_nothing_usable():
 def test_definition_text_skips_blank_synonyms():
     assert embed.definition_text("", ["", "  "], "fallback sentence") == \
         ("fallback sentence", "sentence")
+
+
+def test_definition_text_never_embeds_the_cross_referenced_spelling():
+    from concordance.embed import definition_text
+    assert definition_text("Variant spelling of faggot — A bundle of sticks.", [], "") == \
+        ("A bundle of sticks.", "definition")
+    assert definition_text("Archaic form of vampirism.", [], "the vampyrism spread",
+                           pointer_sense="The state of being a vampire.") == \
+        ("The state of being a vampire.", "pointer target sense")
+    # a bare pointer with no known target sense falls through to synonyms/sentence
+    assert definition_text("Archaic form of vampirism.", [], "the vampyrism spread") == \
+        ("the vampyrism spread", "sentence")
+    assert definition_text("A real gloss.", [], "") == ("A real gloss.", "definition")

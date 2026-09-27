@@ -6,7 +6,8 @@ from .core import DEFAULT_SCHEMA, _safe_schema
 
 
 def compute_definition_embeddings(conn, schema: str = DEFAULT_SCHEMA, only_missing: bool = True,
-                                  limit: int = 0, batch: int = 64) -> dict:
+                                  limit: int = 0, batch: int = 64,
+                                  word_ids: list[int] | None = None) -> dict:
     """Embed definition_text(definition, synonyms, sentence) into
     word_embedding.definition_vector for every active word. Resumable via
     only_missing (scale-ready — see embed.py's module docstring for why this
@@ -17,16 +18,23 @@ def compute_definition_embeddings(conn, schema: str = DEFAULT_SCHEMA, only_missi
     register_vector(conn)
     where = (f"NOT EXISTS (SELECT 1 FROM {s}.word_embedding e "
              f"WHERE e.word_id = w.id AND e.definition_vector IS NOT NULL) AND ") if only_missing else ""
+    if word_ids is not None:
+        where += "w.id = ANY(%(ids)s) AND "
     with conn.cursor() as cur:
         cur.execute(f"SELECT w.id, w.lemma, w.definition, w.synonyms, w.sentence "
                     f"FROM {s}.word w WHERE {where}w.active" +
-                    (f" LIMIT {int(limit)}" if limit else ""))
+                    (f" LIMIT {int(limit)}" if limit else ""), {"ids": word_ids or []})
         rows = cur.fetchall()
+
+    from ..classify import bare_pointer_senses
+    items = [{"_id": wid, "definition": definition} for wid, _, definition, _, _ in rows]
+    bare_pointer_senses(conn, items)
+    senses = {it["_id"]: it.get("pointer_sense", "") for it in items}
 
     stats = {"words": len(rows), "embedded": 0, "skipped_no_text": 0}
     resolved = []
     for wid, lemma, definition, synonyms, sentence in rows:
-        text = _embed.definition_text(definition, synonyms, sentence)
+        text = _embed.definition_text(definition, synonyms, sentence, senses.get(wid, ""))
         if text is None:
             stats["skipped_no_text"] += 1
             continue
