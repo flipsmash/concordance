@@ -35,3 +35,10 @@ Findings:
   only with two steps, 17 only with one), field unchanged, and fully
   repeatable (0 of 150 primaries changed on a re-run). Cost: ~2.4 s/word
   instead of ~0.9. The shipped Classifier reproduces F2 exactly (78/108).
+- Against the categories actually live at the time (one run of the old
+  batch-15 setup, a good draw: 72 exact / 114 field), two-step is a wash:
+  78 / 108; paired, +6 exact and -6 field, neither significant. So the
+  corpus was NOT reclassified (~47 GPU hours for no measurable gain). Two-step
+  stays the classifier for new words and re-runs because it is repeatable:
+  a word's categories change only when its definition does. The weaker half
+  is the field step -- the place to work if accuracy matters later.
