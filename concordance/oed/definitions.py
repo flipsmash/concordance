@@ -38,7 +38,7 @@ from .lemma import pos_categories
 
 DEFAULT_SCHEMA = "oed"
 
-_MIN_LENGTH = 15
+_MIN_LENGTH = 4
 _MAX_LENGTH = 600
 
 _SEE_QUOT_RE = re.compile(r"^\(see quot[^)]*\)\s*", re.IGNORECASE)
@@ -47,7 +47,7 @@ _SEE_QUOT_RE = re.compile(r"^\(see quot[^)]*\)\s*", re.IGNORECASE)
 # digit, so the boundary has to anchor before the optional letter, not the
 # digit (matches parse.py's own _YEAR_RE intent, but case-insensitive: the
 # original is lowercase-only and misses a sentence-leading "C1400").
-_YEAR_CUT_RE = re.compile(r"\b[ac]?1[3-9]\d{2}\b", re.IGNORECASE)
+_YEAR_CUT_RE = re.compile(r"\b[ac]?1[0-9]\d{2}\b", re.IGNORECASE)   # OED cites from the 1000s on
 
 
 @dataclass
@@ -58,12 +58,100 @@ class OedSense:
     definition: str  # cleaned, semicolon-joined across this entry's senses
 
 
+# --- the entry header that precedes the gloss ---------------------------------
+#
+# A sense's text often still opens with the entry's header material, which
+# the OCR'd layout ends with a period and TWO spaces before the gloss:
+#   "Obs. Also abaue, abaw(e.  trans. To put to confusion, discomfit"
+#   "Now Sc. and north, dial. In 4-6 (9) deve, 6 Sc. deiv(e.  fl. intr. To become deaf"
+#   "rare.  Violently extreme"          "titju:d).  Want of promptitude"
+# Status/region/subject labels, "Also ..." / "In 4-6 ..." / "Forms: ..."
+# spelling lists, and the tail of a pronunciation. The header is dropped only
+# when every piece of it looks like header material, so a gloss that happens
+# to contain ".  " is never cut.
+_LABELS = frozenset("""obs rare now sc north south dial nonce nonce-wd nonce-word wd word hist exc
+    archaeol archseol arch bot zool med mus law her astron chem anat path eccl theol phys geol min math
+    gram rhet mil naut techn local slang colloq vulgar poet fig transf chiefly only and or in the of
+    u.s n.e s.w eng scot irish amer anglo-ind cf erron obsol
+    sb vbl ppl pple pa adj adv attrib trans intr absol refl pass prop phr prec ellipt spec
+    austral austral. canad n.z s.afr n.amer anglo-irish orig collect""".split())
+_VARIANTS_INTRO_RE = re.compile(r"^(?:also|forms?:)$", re.IGNORECASE)
+# The header ends where 2+ spaces start the gloss.
+_HEADER_SPLIT_RE = re.compile(r"\s{2,}")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.)])\s+(?=[A-Z(=]|[a-z]+\.)")
+# Sense numbering and grammar labels left at the start of the gloss itself.
+_LEAD_RE = re.compile(
+    r"^(?:(?:[ft]?\s*\d{1,2}(?:\s+\d{1,2})*\s*\.|[ft]l\.|[A-Da-d]\s*\.|[IVX]{1,4}\.|\([a-d]\)|\|\||[*†‡]|"
+    r"(?:trans|t\s+rans|intr|in\s+tr|absol|refl|pass|attrib|fig|transf|sb|adj|a|adv|v|vbl|ppl|pa\.\s*pple)\.)\s*)+",
+    re.IGNORECASE)
+# A citation year the scan garbled (*747, i860, l66o): cut there too.
+_OCR_YEAR_CUT_RE = re.compile(r"(?:^|\s)[*il|!2]\d{3}\b|\b01[3-9]\d{2}\b|\b1[3-9]\d[oO]\b")
+_TRAILING_SEE_QUOT_RE = re.compile(r"[:;,]?\s*\(?see quot\.?\)?$", re.IGNORECASE)
+# A dangling sub-sense marker or sense number where the scan ran on: "... fight. a", "... two. 1"
+_TRAILING_MARKER_RE = re.compile(r"[.;,]\s+(?:[a-d]|\d{1,2}|[IVX]{1,4})\s*$")
+# A division heading, not a definition: "Literal senses", "Figurative uses"
+_HEADING_RE = re.compile(r"^(?:literal|figurative|transferred|general|other|special|simple|compound)\w*"
+                         r"\s+(?:senses?|uses?|meanings?)$", re.IGNORECASE)
+
+
+def _header_like(head: str) -> bool:
+    """Every token is a label, a number, OCR noise or a pronunciation tail --
+    or comes after "Also"/"Forms:"/"In <number>", which introduce a list of
+    old spellings. Any ordinary word before that means it's real prose."""
+    from wordfreq import zipf_frequency
+
+    if "[" in head or "]" in head:          # etymology, not header: _plausible's bracket check needs it intact
+        return False
+    tokens = head.split()
+    for i, tok in enumerate(tokens):
+        bare = re.sub(r"[^a-z.\-]", "", tok.lower()).strip(".-")
+        nxt = tokens[i + 1] if i + 1 < len(tokens) else ""
+        # "Also blestly", "Also 8 moys", "Forms: 4-6 ...", "In 4-6 ..." introduce
+        # old spellings -- but "Also, too, moreover" (eke) is a real gloss:
+        # the next word has to look like a variant, not an everyday word.
+        variant_next = bool(nxt) and (any(ch.isdigit() or ch in "(-" for ch in nxt)
+                                      or zipf_frequency(nxt.strip(".,;:()").lower(), "en") < 3.0)
+        intro = _VARIANTS_INTRO_RE.match(tok.strip(".,;"))
+        if (intro and (tok.lower().startswith("form") or variant_next)) or (
+                bare == "in" and nxt[:1].isdigit()):
+            return True
+        if (not bare or bare in _LABELS or len(bare) <= 2 or ")" in tok
+                or any(ch.isdigit() for ch in tok) or not re.search(r"[a-z]{3}", tok.lower())):
+            continue
+        return False
+    return bool(tokens)
+
+
+def _strip_header(text: str) -> str:
+    # Prefer the layout's two-space break; fall back to a sentence break for
+    # headers the scan closed up ("Also blestly. In a blessed manner").
+    for split in (_HEADER_SPLIT_RE, _SENTENCE_SPLIT_RE):
+        cut = next((m for m in split.finditer(text[:200]) if _header_like(text[: m.start()])), None)
+        if cut:
+            text = text[cut.end():]
+            break
+    prev = None
+    while prev != text:                     # "fl. intr. To become deaf" -> "To become deaf"
+        prev = text
+        text = _LEAD_RE.sub("", text).lstrip()
+    return text
+
+
 def _clean_one_sense(text: str | None) -> str:
     text = (text or "").strip()
     text = _SEE_QUOT_RE.sub("", text).strip()
-    m = _YEAR_CUT_RE.search(text)
-    if m:
-        text = text[: m.start()]
+    for _ in range(3):                      # "Obs. rare. To go": one header piece per pass
+        stripped = _strip_header(text)
+        if stripped == text:
+            break
+        text = stripped
+    text = _SEE_QUOT_RE.sub("", text).strip()
+    for cut in (_YEAR_CUT_RE, _OCR_YEAR_CUT_RE):
+        m = cut.search(text)
+        if m:
+            text = text[: m.start()]
+    text = _TRAILING_SEE_QUOT_RE.sub("", text.strip(" .,;:"))
+    text = _TRAILING_MARKER_RE.sub("", text)
     return text.strip(" .,;:")
 
 
@@ -77,7 +165,13 @@ def _plausible(text: str) -> bool:
     convention, or a genuinely empty sense). Real prose has no legitimate
     reason to contain an unmatched bracket at all, so this stays exact
     equality rather than a looser one-sided check."""
-    return len(text) >= _MIN_LENGTH and text.count("[") == text.count("]")
+    # Once the entry header is stripped a real gloss can be one word
+    # ("Simian", "= LATEWARD"), so length alone no longer separates prose
+    # from fragments: require a real word instead, and reject a division
+    # heading ("Literal senses") that only introduces the senses below it.
+    return (len(text) >= _MIN_LENGTH and text.count("[") == text.count("]")
+            and bool(re.search(r"[A-Za-z]{3}", text)) and not _HEADING_RE.match(text)
+            and not _header_like(text))         # "Also prae-", "u:mi'nif3r3s)", "Phys. and Path"
 
 
 def _pick_definition(parts: list[str]) -> str:

@@ -49,10 +49,16 @@ def pytest_sessionfinish(session, exitstatus):
     try:
         import psycopg
         with psycopg.connect(url, connect_timeout=3) as conn, conn.cursor() as cur:
+            # A failed test can leave its connection open holding a lock on its
+            # schema; skip that schema rather than wait on it forever.
+            cur.execute("SET lock_timeout = '5s'")
             cur.execute(r"""SELECT nspname FROM pg_namespace
                             WHERE nspname LIKE 'cc\_test\_%' OR nspname LIKE 'oed\_test\_%'""")
             for (name,) in cur.fetchall():
-                cur.execute(f'DROP SCHEMA "{name}" CASCADE')
-                conn.commit()           # one per transaction: a batch exhausts max_locks_per_transaction
+                try:
+                    cur.execute(f'DROP SCHEMA "{name}" CASCADE')
+                    conn.commit()       # one per transaction: a batch exhausts max_locks_per_transaction
+                except psycopg.errors.LockNotAvailable:
+                    conn.rollback()
     except Exception:  # noqa: BLE001 -- cleanup is best-effort
         pass

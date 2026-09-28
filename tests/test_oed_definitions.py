@@ -190,3 +190,40 @@ def test_definition_lexicon_bulk_lookup_filters_and_homographs():
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
     conn.close()
+
+
+def test_clean_one_sense_strips_the_entry_header_and_ocr_debris():
+    from concordance.oed.definitions import _clean_one_sense as c
+    cases = {
+        "Obs. rare- 1 ,  The murder of a lord or master": "The murder of a lord or master",
+        "Obs. rare. In 5 stugg(er)e.  A pig-trough": "A pig-trough",
+        "Now Sc. and north, dial. In 4-6 (9) deve, 6 Sc. deiv(e.  fl. intr. To become deaf":
+            "To become deaf",
+        "north, dial. Forms: i jelostr, geolster, 9 youster.  Fetid discharge from a wound":
+            "Fetid discharge from a wound",
+        "Also blestly. In a blessed manner; fortunately, happily": "In a blessed manner; fortunately, happily",
+        "titju:d).  Want of promptitude or quickness in action": "Want of promptitude or quickness in action",
+        "J. Obs.  An apparatus for measuring light; a photometer. *747 Phil. Trans. XLIV":
+            "An apparatus for measuring light; a photometer",
+        "Sc. Also culleshangee, -gy.  Noisy quarrel, uproar; confused fight. a": "Noisy quarrel, uproar; confused fight",
+        "Counsellor, adviser, steward. 1039 in Earle Land Charters": "Counsellor, adviser, steward",
+    }
+    for raw, want in cases.items():
+        assert c(raw) == want, raw
+
+
+def test_clean_one_sense_leaves_real_prose_alone():
+    from concordance.oed.definitions import _clean_one_sense as c
+    # a gloss that starts with "Also", or has a double space inside it
+    assert c("Also, too, moreover; in addition") == "Also, too, moreover; in addition"
+    assert c("A sharp  pain in the side") == "A sharp  pain in the side"
+    assert c("To form or shape into pellets") == "To form or shape into pellets"
+    assert c("In an itinerary way.  Also, in the course of itinerancy").startswith("In an itinerary way")
+
+
+def test_plausible_rejects_header_only_senses():
+    from concordance.oed.definitions import _clean_one_sense as c, _plausible as p
+    for junk in ["Forms: 4-6 delicat, 5 -caat, 5-6 de-, dylycate", "Also prae-", "Bot.  (See quot.)",
+                 "u:mi'nif3r3s)", "Phys. and Path", "Literal senses"]:
+        assert not p(c(junk)), junk
+    assert p(c("rare~ x .  Simian"))                      # a one-word gloss is fine once the header is gone
