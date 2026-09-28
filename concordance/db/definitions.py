@@ -941,7 +941,7 @@ def compute_definition_links(conn, schema: str = DEFAULT_SCHEMA, *, limit: int =
     this command" is the staleness fix, same manual-backfill convention
     already used everywhere else in this codebase (mw-backfill, dedupe-
     plurals, expand-synonyms) rather than a new automatic-invalidation hook."""
-    from .. import tokenize
+    from .. import crossref, tokenize
 
     s = _safe_schema(schema)
     nlp = tokenize.load_nlp()
@@ -962,7 +962,11 @@ def compute_definition_links(conn, schema: str = DEFAULT_SCHEMA, *, limit: int =
     docs = nlp.pipe((definition for _, _, definition in rows), batch_size=200)
 
     with conn.cursor() as cur:
-        for i, ((word_id, lemma_lc, _definition), doc) in enumerate(zip(rows, docs), 1):
+        for i, ((word_id, lemma_lc, definition), doc) in enumerate(zip(rows, docs), 1):
+            # Never link the spelling a cross-reference points at ("Variant
+            # spelling of faggot" must not link "faggot" from fagot's page) --
+            # same rule as classification and embeddings.
+            pointed_at = crossref.pointer_targets(definition)
             # target lemma -> first surface form seen for it in this definition
             matches: dict[str, str] = {}
             for tok in doc:
@@ -970,6 +974,8 @@ def compute_definition_links(conn, schema: str = DEFAULT_SCHEMA, *, limit: int =
                     continue
                 target_lemma = tokenize._resolve_lemma(tok)
                 if target_lemma == lemma_lc or target_lemma not in lemma_to_id:
+                    continue
+                if tok.text.lower() in pointed_at or target_lemma in pointed_at:
                     continue
                 matches.setdefault(target_lemma, tok.text)
 

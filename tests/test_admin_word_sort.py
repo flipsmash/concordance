@@ -141,3 +141,35 @@ def test_admin_word_search_ranks_by_relevance_not_the_active_sort_column():
         assert res.json()["items"][0]["lemma"] == "hell"
     finally:
         main.SCHEMA = old_schema
+
+
+@pg
+def test_undefined_only_filter_and_bulk_prune():
+    from starlette.testclient import TestClient
+
+    from webapp.backend import main
+
+    schema = "cc_test_admin_bulk_prune"
+    _fresh_schema(schema)
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        for lemma in ("blankone", "blanktwo"):
+            cur.execute(f"INSERT INTO {schema}.word (lemma, definition, active, validity_label) "
+                        f"VALUES (%s, '', true, 'likely-artifact') RETURNING id", (lemma,))
+    conn.commit()
+    old_schema = main.SCHEMA
+    main.SCHEMA = schema
+    try:
+        client = TestClient(main.app, base_url="https://testserver")
+        client.post("/api/auth/login", json={"username": "adminuser", "password": "password123"})
+        res = client.get("/api/words", params={"undefined_only": "true", "validity_label": "likely-artifact"})
+        items = res.json()["items"]
+        assert sorted(w["lemma"] for w in items) == ["blankone", "blanktwo"]
+
+        res = client.post("/api/words/prune", json={"ids": [w["id"] for w in items]})
+        assert res.status_code == 200 and res.json() == {"pruned": 2}
+        assert client.get("/api/words", params={"undefined_only": "true"}).json()["total"] == 0
+        assert client.get("/api/words").json()["total"] == 3          # the defined words are untouched
+    finally:
+        main.SCHEMA = old_schema
+        conn.close()

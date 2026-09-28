@@ -136,6 +136,15 @@
   margin: 0;
 }
 
+.word-detail-undefined {
+  color: var(--text);
+  font-size: 15px;
+}
+
+.word-detail-undefined-evidence {
+  font-size: 13px;
+}
+
 .word-detail-edit-definition {
   border: none;
   background: transparent;

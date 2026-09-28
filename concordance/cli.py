@@ -1505,6 +1505,97 @@ def wiktextract_morphology(
                   f"with a single-root affix etymology")
 
 
+@app.command("derive-definitions")
+def derive_definitions_cmd(
+    apply: str = typer.Option("", "--apply",
+                              help="Write proposals of these kinds: 'inflection', 'derivative', or 'all'. "
+                                   "Default: dry run."),
+    out: Path = typer.Option(Path("data/review/derived_definitions.csv"), "--out",
+                             help="Where the dry run writes every proposal for review."),
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Define undefined words whose meaning follows from a root in the local
+    Wiktionary: archaic verb inflections (inveighest), superlatives
+    (crabbedest), and transparent derivatives (visageless, affiancement).
+    The root must have the part of speech the affix needs. Definitions are
+    marked `derived (...)`. Without --apply, writes every proposal to --out."""
+    import csv
+
+    from . import derived_definitions as dd
+    conn = _connect(database_url)
+    proposals = dd.propose(conn, schema)
+    kinds = {"all": {"inflection", "derivative"}}.get(apply, {apply} if apply else set())
+    if kinds:
+        chosen = [p for p in proposals if p.kind in kinds]
+        dd.apply(conn, chosen, schema)
+        console.print(f"[green]✓[/green] derive-definitions: defined [bold]{len(chosen)}[/bold] words "
+                      f"({', '.join(sorted(kinds))})")
+    else:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with out.open("w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["word_id", "word", "kind", "root", "definition", "approve (y/n)"])
+            for p in proposals:
+                w.writerow([p.word_id, p.lemma, p.kind, p.root, p.definition, ""])
+        console.print(f"[green]✓[/green] derive-definitions (dry run): {len(proposals)} proposals "
+                      f"({sum(p.kind == 'inflection' for p in proposals)} inflections) written to {out}")
+    conn.close()
+
+@app.command("apply-reviewed")
+def apply_reviewed_cmd(
+    review_file: Path = typer.Argument(..., help="A review CSV (derive-definitions or the imported-mix-up list) "
+                                                 "with 'y' in its approve column for the rows to apply."),
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Apply the rows marked 'y' in a reviewed CSV:
+      - derive-definitions proposals: store the derived definition (only if
+        the word is still undefined);
+      - imported mix-ups: replace the wrong definition with the word's own
+        local Wiktionary / 0 Dict entry, or clear it so the next maintain
+        looks the word up again. The old text goes to previous_definition."""
+    import csv
+
+    rows = list(csv.DictReader(review_file.open()))
+    approve_col = next((k for k in (rows[0] if rows else {}) if k.startswith("approve")), None)
+    if not approve_col:
+        console.print("[red]✗[/red] no approve column in that file"); raise typer.Exit(code=1)
+    ids = {int(r["word_id"]) for r in rows if (r[approve_col] or "").strip().lower() in ("y", "yes")}
+    conn = _connect(database_url)
+    s = db._safe_schema(schema)
+    if "kind" in rows[0]:                                   # derive-definitions proposals
+        from . import derived_definitions as dd
+        chosen = [p for p in dd.propose(conn, schema) if p.word_id in ids]
+        dd.apply(conn, chosen, schema)
+        console.print(f"[green]✓[/green] apply-reviewed: defined [bold]{len(chosen)}[/bold] of {len(ids)} approved words")
+    else:                                                   # imported mix-ups
+        from . import localdict, resolve
+        from .db.sync import _invalidate_definition_dependents
+        from .model import Candidate
+        from .oed import definitions as od
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT id, lemma FROM {s}.word WHERE id = ANY(%s)", (sorted(ids),))
+            words = cur.fetchall()
+            lemmas = {l.lower() for _, l in words}
+            lex, olex = localdict.build_lexicon(conn, lemmas), od.definition_lexicon(conn, lemmas)
+            replaced = cleared = 0
+            for wid, lemma in words:
+                cand = Candidate(lemma=lemma, pos="")
+                if localdict.enrich(cand, lex) or resolve._from_oed(cand, olex):
+                    cur.execute(f"""UPDATE {s}.word SET previous_definition=definition, definition=%s,
+                                        definition_source=%s, updated_at=now() WHERE id=%s""",
+                                (cand.definition, cand.definition_source, wid))
+                    replaced += 1
+                else:
+                    cur.execute(f"""UPDATE {s}.word SET previous_definition=definition, definition='',
+                                        definition_source='', updated_at=now() WHERE id=%s""", (wid,))
+                    cleared += 1
+                _invalidate_definition_dependents(cur, s, wid)
+        conn.commit()
+        console.print(f"[green]✓[/green] apply-reviewed: {replaced} replaced, {cleared} cleared for a fresh lookup")
+    conn.close()
+
 @app.command("redefine-imported")
 def redefine_imported_cmd(
     apply: bool = typer.Option(False, "--apply", help="Write the changes (default: dry run)."),

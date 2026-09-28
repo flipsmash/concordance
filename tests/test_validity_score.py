@@ -361,3 +361,10 @@ def test_bare_pointer_target_only_for_gloss_less_pointers():
     assert t("Variant spelling of faggot — A bundle of sticks.") is None   # has its own gloss
     assert t("Alternative form of pirogue (“type of boat”).") is None
     assert t("A real definition.") is None
+
+
+def test_pointer_targets_lists_every_pointed_at_spelling():
+    from concordance.crossref import pointer_targets as t
+    assert t("Variant spelling of faggot — A bundle of sticks.") == {"faggot"}
+    assert t("(obsolete) To attend.; Obsolete form of intend.") == {"intend"}
+    assert t("A bundle of sticks for fuel.") == set()

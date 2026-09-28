@@ -30,6 +30,8 @@ function AcceptedView() {
   const [qInput, setQInput] = useState('')
   const [q, setQ] = useState('')
   const [letter, setLetter] = useState('')
+  const [undefinedOnly, setUndefinedOnly] = useState(false)
+  const [selected, setSelected] = useState(() => new Set())
 
   useEffect(() => {
     fetch(`${API_BASE}/api/pos-values`)
@@ -57,8 +59,46 @@ function AcceptedView() {
     pageSize: PAGE_SIZE,
     defaultSort: 'difficulty',
     defaultDir: 'asc',
-    extraParams: { pos, validity_label: validityLabel, variant_flag: variantFlag, q, letter },
+    extraParams: {
+      pos, validity_label: validityLabel, variant_flag: variantFlag, q, letter,
+      undefined_only: undefinedOnly ? 'true' : '',
+    },
   })
+
+  // A selection only ever covers the rows on screen: any change of page,
+  // filter or sort (a new `items` array) clears it.
+  useEffect(() => setSelected(new Set()), [items])
+
+  function toggleSelected(id) {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const allOnPageSelected = items.length > 0 && items.every((w) => selected.has(w.id))
+
+  function toggleAllOnPage() {
+    setSelected(allOnPageSelected ? new Set() : new Set(items.map((w) => w.id)))
+  }
+
+  // Same reversible soft delete as the per-row button, for a whole selection.
+  function handlePruneSelected() {
+    const ids = [...selected]
+    if (!ids.length || !window.confirm(`Prune ${ids.length} word${ids.length === 1 ? '' : 's'}?`)) return
+    fetch(`${API_BASE}/api/words/prune`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error(`prune failed: ${res.status}`)
+        load()
+      })
+      .catch((err) => setError(err.message))
+  }
 
   function handlePosChange(value) {
     setPos(value)
@@ -77,6 +117,11 @@ function AcceptedView() {
 
   function handleQChange(value) {
     setQInput(value)
+    resetPage()
+  }
+
+  function handleUndefinedOnlyChange(value) {
+    setUndefinedOnly(value)
     resetPage()
   }
 
@@ -130,9 +175,22 @@ function AcceptedView() {
             ))}
           </select>
         </label>
+        <label className="pos-filter">
+          <input
+            type="checkbox"
+            checked={undefinedOnly}
+            onChange={(e) => handleUndefinedOnlyChange(e.target.checked)}
+          />{' '}
+          Undefined only
+        </label>
         <span className="count">
           {total.toLocaleString()} active term{total === 1 ? '' : 's'}
         </span>
+        {selected.size > 0 && (
+          <button type="button" className="delete-btn" onClick={handlePruneSelected}>
+            Prune selected ({selected.size})
+          </button>
+        )}
         <InviteButton />
       </div>
 
@@ -164,6 +222,14 @@ function AcceptedView() {
         <table>
           <thead>
             <tr>
+              <th>
+                <input
+                  type="checkbox"
+                  checked={allOnPageSelected}
+                  onChange={toggleAllOnPage}
+                  title="Select every word on this page"
+                />
+              </th>
               {COLUMNS.map((col) => (
                 <th
                   key={col.key}
@@ -182,6 +248,9 @@ function AcceptedView() {
           <tbody>
             {items.map((w) => (
               <tr key={w.id}>
+                <td>
+                  <input type="checkbox" checked={selected.has(w.id)} onChange={() => toggleSelected(w.id)} />
+                </td>
                 <td className="lemma">
                   <Link to={`/words/${w.id}`}>{w.lemma}</Link>
                   {w.rescued_from_reject && (
@@ -214,7 +283,7 @@ function AcceptedView() {
             ))}
             {!loading && items.length === 0 && (
               <tr>
-                <td colSpan={COLUMNS.length + 1} className="empty">
+                <td colSpan={COLUMNS.length + 2} className="empty">
                   Nothing here.
                 </td>
               </tr>

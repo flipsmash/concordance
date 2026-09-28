@@ -200,6 +200,22 @@ def bare_pointer_target(definition: str | None) -> str | None:
     return None
 
 
+def pointer_targets(definition: str | None) -> set[str]:
+    """Every word a definition's cross-reference clauses point at, lowercased
+    ("Variant spelling of faggot — A bundle of sticks" -> {"faggot"}),
+    whether or not the clause also has a gloss of its own."""
+    out = set()
+    for clause in _clauses((definition or "").strip()):
+        m = _POINTER_RE.match(clause)
+        if m:
+            t = _TARGET_RE.match(clause, m.end())
+            target = t.group(1).strip().strip("'\"\u201c\u201d").lower() if t else ""
+            if target:
+                out.add(target)
+                out.update(target.split())
+    return out
+
+
 def classification_gloss(definition: str | None) -> str:
     """`definition` with every cross-reference to another spelling removed --
     the text semantic classification (and anything else judging THIS word's

@@ -24,6 +24,29 @@ function CategoryChip({ category }) {
   )
 }
 
+// Shown in place of a definition when no dictionary we check has the word:
+// validity_score's own assessment, in words, instead of a bare dash.
+const VALIDITY_SENTENCES = {
+  'likely-valid': 'It looks like a genuine word — probably rare, archaic, or formed from a known root.',
+  uncertain: 'It may be a rare word, a nonce coinage, or a scanning error.',
+  'likely-artifact': 'It is probably a scanning error, a fragment, or not a real English word.',
+}
+
+function UndefinedNote({ word }) {
+  return (
+    <span className="word-detail-undefined">
+      <em>Not in any dictionary we check.</em>{' '}
+      {VALIDITY_SENTENCES[word.validity_label] || 'It has not been assessed yet.'}
+      {word.suggested_correction && (
+        <>
+          {' '}Possibly a misspelling of <strong>{word.suggested_correction}</strong>.
+        </>
+      )}
+      {word.validity_notes && <span className="word-detail-undefined-evidence"> (Evidence: {word.validity_notes}.)</span>}
+    </span>
+  )
+}
+
 function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
   const { id } = useParams()
   const navigate = useNavigate()
@@ -265,7 +288,11 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
           </div>
         ) : (
           <p className="word-detail-definition">
-            {word.definition ? <LinkedDefinition text={word.definition} links={word.definition_links} /> : '—'}
+            {word.definition ? (
+              <LinkedDefinition text={word.definition} links={word.definition_links} />
+            ) : (
+              <UndefinedNote word={word} />
+            )}
             {user?.is_admin && (
               <button type="button" className="word-detail-edit-definition" onClick={startEditingDefinition}>
                 ✎ Edit

@@ -263,6 +263,7 @@ def list_words(
     variant_flag: str | None = None,
     q: str | None = None,
     letter: str | None = Query(None, min_length=1, max_length=1),
+    undefined_only: bool = False,
     _: dict = Depends(require_admin),
 ) -> WordPage:
     order_col = SORT_COLUMNS[sort]
@@ -279,6 +280,8 @@ def list_words(
     if variant_flag:
         filters.append("w.variant_flag_reason = %s")
         params.append(variant_flag)
+    if undefined_only:
+        filters.append("coalesce(w.definition, '') = ''")
     if letter:
         filters.append("w.lemma_lc LIKE %s")
         params.append(f"{letter.lower()}%")
@@ -367,6 +370,23 @@ def prune_word(word_id: int, _: dict = Depends(require_admin)) -> None:
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="word not found")
         conn.commit()
+
+
+class BulkPruneRequest(BaseModel):
+    ids: list[int] = Field(..., min_length=1, max_length=500)
+
+
+@app.post("/api/words/prune", status_code=200)
+def prune_words(body: BulkPruneRequest, _: dict = Depends(require_admin)) -> dict:
+    """Soft-delete several words at once -- the same reversible active=false
+    as DELETE /api/words/{id}, for clearing a filtered review list (e.g. the
+    undefined "likely-artifact" words) a page at a time."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"UPDATE {SCHEMA}.word SET active = false, updated_at = now() "
+                    f"WHERE id = ANY(%s) AND active", (body.ids,))
+        pruned = cur.rowcount
+        conn.commit()
+    return {"pruned": pruned}
 
 
 class DefinitionUpdateRequest(BaseModel):
@@ -737,6 +757,12 @@ class WordDetail(BaseModel):
 
     audio_source: str | None  # 'commons'|'mw'|'azure'|'piper'|'azure_guess'|'none'|None (no row)
 
+    # For a word no dictionary defines: validity_score's assessment, shown
+    # instead of a bare blank definition.
+    validity_label: str | None = None
+    validity_notes: str | None = None
+    suggested_correction: str | None = None
+
     categories: list[WordCategory]
     books: list[BookRef]
     definition_links: list[DefinitionLink]
@@ -764,7 +790,7 @@ def word_detail(word_id: int, _: dict = Depends(require_viewer)) -> WordDetail:
                        d.difficulty, d.difficulty_factors, d.quizzable, d.quizzable_reason,
                        w.quiz_definition, w.quiz_def_source,
                        n.peak, n.recent, n.recency_ratio, n.peak_year,
-                       a.source
+                       a.source, w.validity_label, w.validity_notes, w.suggested_correction
                 FROM {SCHEMA}.word w
                 LEFT JOIN {SCHEMA}.word_difficulty d ON d.word_id = w.id
                 LEFT JOIN {SCHEMA}.word_ngram n ON n.word_id = w.id
@@ -779,7 +805,7 @@ def word_detail(word_id: int, _: dict = Depends(require_viewer)) -> WordDetail:
          first_added, archaic, archaic_evidence, archaic_confidence, difficulty, difficulty_factors,
          quizzable, quizzable_reason, quiz_definition, quiz_def_source,
          ngram_peak, ngram_recent, ngram_recency_ratio, ngram_peak_year,
-         audio_source) = row
+         audio_source, validity_label, validity_notes, suggested_correction) = row
 
         cur.execute(
             f"""SELECT c.code, c.name, wc.is_primary, wc.confidence, top.name
@@ -835,6 +861,8 @@ def word_detail(word_id: int, _: dict = Depends(require_viewer)) -> WordDetail:
         quiz_definition=quiz_definition, quiz_def_source=quiz_def_source,
         ngram_peak=ngram_peak, ngram_recent=ngram_recent, ngram_recency_ratio=ngram_recency_ratio,
         ngram_peak_year=ngram_peak_year, audio_source=audio_source,
+        validity_label=validity_label, validity_notes=validity_notes,
+        suggested_correction=suggested_correction,
         categories=categories, books=books, definition_links=definition_links,
     )
 
