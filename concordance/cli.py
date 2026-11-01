@@ -243,12 +243,13 @@ def oed_ingest(
     paths: Optional[list[Path]] = typer.Argument(None, help="OED volume PDF(s). Omit to process every .pdf in dictionaries/."),
     force: bool = typer.Option(False, "--force", help="Re-ingest a volume already marked done (e.g. after a file replacement)."),
     page_limit: Optional[int] = typer.Option(None, "--page-limit", help="Stop after this many pages (per volume) — useful for a smoke test."),
-    add_missing: bool = typer.Option(
-        False, "--add-missing",
-        help="Re-scan already-ingested volumes with the v2 headword detector and add only the entries "
-             "missed the first time (records OED's dagger as is_obsolete). No pronunciation work -- "
-             "run `oed-pronounce` afterwards (GPU)."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="With --add-missing: count only, write nothing."),
+    rescan: bool = typer.Option(
+        False, "--rescan",
+        help="Re-detect already-ingested volumes: add entries and pointers missed so far and re-slice existing "
+             "ones in place, keeping their ids and pronunciations. No pronunciation work -- run `oed-pronounce` "
+             "afterwards (GPU)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="With --rescan: count only, write nothing."),
+    jobs: int = typer.Option(1, "--jobs", "-j", help="With --rescan: volumes to process at once."),
     schema: str = typer.Option("oed", "--schema", help="Postgres schema to write into (separate from the concordance schema)."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
@@ -274,7 +275,7 @@ def oed_ingest(
             console.print(f"[red]✗[/red] no such directory: {dictionaries_dir}/")
             raise typer.Exit(code=1)
         volumes = sorted(dictionaries_dir.glob("*.pdf"))
-        if add_missing:     # finished volumes get moved to dictionaries/done/
+        if rescan:          # finished volumes get moved to dictionaries/done/
             volumes += sorted((dictionaries_dir / "done").glob("*.pdf"))
         if not volumes:
             console.print(f"[yellow]![/yellow] no .pdf files found in {dictionaries_dir}/")
@@ -288,32 +289,40 @@ def oed_ingest(
     def _flag_lemmas() -> None:
         # The definition cascade only reads entries flagged as lemmas; an
         # entry whose flag was never computed is invisible to it (the
-        # 2026-09-24 add-missing run left 99.5k entries that way).
+        # 2026-09-24 rescan left 99.5k entries that way).
         with console.status("[bold]Computing lemma flags for new entries…"):
             ls = oed_db.compute_lemma_flags(conn, schema, only_missing=True)
         console.print(f"  lemma flags: {ls['entries']} new entries checked, {ls['lemma']} lemma")
 
-    if add_missing:
-        from .oed.pipeline import add_missing_entries
-        totals = {"candidates": 0, "matched": 0, "added": 0, "obsolete_added": 0, "obsolete_marked": 0, "pruned": 0}
-        for i, vol_path in enumerate(volumes, 1):
-            console.rule(f"[bold]{i}/{len(volumes)} · {vol_path.name}")
-            try:
-                s = add_missing_entries(vol_path, conn, cfg, console, page_limit=page_limit, dry_run=dry_run)
-            except Exception as exc:  # noqa: BLE001
-                console.print(f"[red]✗[/red] {exc}")
-                continue
-            for k in totals:
-                totals[k] += s[k]
-            console.print(f"{s['pages']} pages: {s['candidates']} entries found, {s['matched']} already stored, "
-                          f"[bold]{s['added']}[/bold] {'would be ' if dry_run else ''}added "
-                          f"({s['obsolete_added']} obsolete), {s['obsolete_marked']} stored entries marked obsolete"
-                          + (f", {s['pruned']} pruned out of order" if s["pruned"] else ""))
+    if rescan:
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+
+        from . import db as _db
+        from .oed.pipeline import rescan_job
+        added = 0
+        with ProcessPoolExecutor(max_workers=jobs) as pool:
+            futures = {pool.submit(rescan_job, p, database_url or _db.database_url(), cfg, page_limit, dry_run): p
+                       for p in volumes}
+            for done, future in enumerate(as_completed(futures), 1):
+                vol_path = futures[future]
+                try:
+                    s = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    console.print(f"[red]✗[/red] {vol_path.name}: {exc}")
+                    continue
+                added += s["added"]
+                console.print(f"{done}/{len(volumes)} {vol_path.name}: {s['pages']} pages, {s['detected']} detected, "
+                              f"{s['matched']} already stored, [bold]{s['added']}[/bold] "
+                              f"{'would be ' if dry_run else ''}added ({s['added_pointers']} pointers), "
+                              f"{s['resliced']} re-sliced, {s['renamed']} renamed, "
+                              f"{s['became_pointers']} now pointers, {len(s['unconfirmed'])} unconfirmed, "
+                              f"{len(s['unplaced'])} unplaced, {len(s['duplicates'])} duplicates, "
+                              f"{s['pruned']} pruned out of order")
         if not dry_run:
             _flag_lemmas()
         conn.close()
-        console.print(f"[green]✓[/green] oed-ingest --add-missing{' (dry run)' if dry_run else ''}: "
-                      f"[bold]{totals['added']}[/bold] entries {'would be ' if dry_run else ''}added across "
+        console.print(f"[green]✓[/green] oed-ingest --rescan{' (dry run)' if dry_run else ''}: "
+                      f"[bold]{added}[/bold] entries {'would be ' if dry_run else ''}added across "
                       f"{len(volumes)} volume(s); run `concordance oed-pronounce` for their pronunciations")
         return
 
@@ -2031,8 +2040,8 @@ def oed_pronounce(
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Transcribe pronunciations (double-pass vision model, GPU) for entries
-    that never had one attempted -- the entries `oed-ingest --add-missing`
-    wrote. Resumable per batch; safe to stop and re-run."""
+    that never had one attempted -- the entries `oed-ingest --rescan` wrote.
+    Resumable per batch; safe to stop and re-run."""
     from .oed import db as oed_db
     from .oed import pronunciation as _pron
     from .oed.config import OedConfig

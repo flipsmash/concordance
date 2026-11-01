@@ -128,7 +128,7 @@ def oed_entries(
         cur.execute(
             f"""SELECT e.id, e.headword, e.homograph_number, e.part_of_speech,
                        e.page_number, e.volume_id, e.pronunciation_ipa,
-                       e.pronunciation_needs_review, e.concordance_match
+                       e.pronunciation_needs_review, e.concordance_match, e.pointer_target
                 FROM {OED_SCHEMA}.entry e
                 WHERE {where}
                 ORDER BY {order_col} {order_dir}, e.id ASC
@@ -157,7 +157,8 @@ def oed_entries(
         OedEntryRow(
             id=r[0], headword=r[1], homograph_number=r[2], part_of_speech=r[3],
             page_number=r[4], volume_id=r[5], pronunciation_ipa=r[6],
-            pronunciation_needs_review=r[7], first_definition=first_def_by_entry.get(r[0]),
+            pronunciation_needs_review=r[7],
+            first_definition=first_def_by_entry.get(r[0]) or (f"see {r[9]}" if r[9] else None),
             concordance_match=r[8],
         )
         for r in rows
@@ -190,6 +191,7 @@ class OedEntryDetail(BaseModel):
     part_of_speech: str | None
     etymology: str | None
     entry_type: str
+    pointer_target: str | None  # for a 'pointer' entry, the word it refers to
     page_number: int
     raw_text: str
     pronunciation_ipa: str | None
@@ -208,7 +210,7 @@ def oed_entry_detail(entry_id: int, _: dict = Depends(_main.require_admin)) -> O
             f"""SELECT id, volume_id, headword, homograph_number, part_of_speech,
                        etymology, entry_type, page_number, raw_text,
                        pronunciation_ipa, pronunciation_raw, pronunciation_needs_review,
-                       concordance_match, headword_norm
+                       concordance_match, headword_norm, pointer_target
                 FROM {OED_SCHEMA}.entry WHERE id = %s""",
             (entry_id,),
         )
@@ -258,7 +260,8 @@ def oed_entry_detail(entry_id: int, _: dict = Depends(_main.require_admin)) -> O
     return OedEntryDetail(
         id=entry_row[0], volume_id=entry_row[1], headword=entry_row[2],
         homograph_number=entry_row[3], part_of_speech=entry_row[4],
-        etymology=entry_row[5], entry_type=entry_row[6], page_number=entry_row[7],
+        etymology=entry_row[5], entry_type=entry_row[6], pointer_target=entry_row[14],
+        page_number=entry_row[7],
         raw_text=entry_row[8], pronunciation_ipa=entry_row[9],
         pronunciation_raw=entry_row[10], pronunciation_needs_review=entry_row[11],
         concordance_match=entry_row[12], concordance_word_id=concordance_word_id,

@@ -8,24 +8,17 @@ from dataclasses import dataclass
 @dataclass
 class OedConfig:
     # --- Headword detection (segment.py) ----------------------------------
-    # A line-start span at least this many times the page's body-text size
-    # is treated as a headword candidate. This has a real, measured
-    # precision ceiling on the baked-OCR font-size estimates: on one real
-    # page, the true headword "abbreviate" (7.05) and the false-positive
-    # body word "compendium." (numerically indistinguishable in the same
-    # size band) could NOT be separated by any threshold value — some real
-    # headwords and some OCR-noise-inflated body words occupy the same size
-    # range. 1.30 was chosen as a measured tradeoff (cuts a real page's
-    # false-positive hits from 133->97 while losing only a couple of
-    # legitimate small-size headwords), not a value that eliminates the
-    # problem — it doesn't fully exist to eliminate. See segment.py.
-    headword_size_mult: float = 1.30
-    # Headword candidates must start within this many points of the page's
-    # left text margin (per column) — kills the dominant false-positive class
-    # found in the pilot: small-caps cross-references inside body text
-    # (e.g. "ABBOT" inside "abbotship"'s etymology) get flagged as
-    # headword-sized but never start flush at the column margin the way a
-    # real entry does.
+    # A headword is a flush-left row whose first word is printed bold and
+    # which has extra leading above it. Measured on hand-labelled pages: true
+    # entries have ink >= ~1.5 (stroke width / page median) and a gap >= ~1.4
+    # (line pitches), other flush-left rows ink <= ~1.3 and gap <= ~1.24. Ink
+    # above headword_ink_max is a smudge or a mis-boxed span, not type.
+    headword_ink_min: float = 1.4
+    headword_ink_max: float = 3.0
+    headword_gap_min: float = 1.2
+    ink_zoom: float = 4.0             # render scale for measuring stroke width
+    # Headword candidates must start within this many points of the column's
+    # left text margin: senses and quotations are indented, entries aren't.
     left_margin_tolerance: float = 4.0
 
     # --- Pronunciation crop (pronunciation.py) -----------------------------

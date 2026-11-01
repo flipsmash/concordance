@@ -126,6 +126,45 @@ def test_definition_lexicon_degrades_gracefully_when_oed_schema_absent():
 
 
 @pg
+def test_definition_lexicon_follows_a_pointer_one_hop():
+    schema = "oed_test_pointer"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    oed_db.apply_schema(conn, schema)
+    volume_id = oed_db.upsert_volume(conn, file_name="t.pdf", file_hash_="h", volume_label="t",
+                                     page_count=1, schema=schema)
+
+    def add(headword, *, target=None, senses=(), entry_type="main"):
+        entry_id = oed_db.insert_entry(
+            conn, volume_id=volume_id, headword=headword, homograph_number=None, part_of_speech="sb",
+            etymology=None, entry_type=entry_type, parent_entry_id=None, page_number=1, raw_text="raw",
+            schema=schema, pointer_target=target)
+        oed_db.insert_definitions(conn, entry_id, list(senses), schema=schema)
+        with conn.cursor() as cur:
+            cur.execute(f"UPDATE {schema}.entry SET lemma = true WHERE id = %s", (entry_id,))
+
+    gloss = "A real or imagined cause for complaint"
+    add("grievance", senses=[{"sense_label": None, "definition_text": gloss}])
+    add("greevance", target="grievance", entry_type="pointer")
+    add("grevaunce", target="greevance", entry_type="pointer")      # a pointer to a pointer: one hop only
+    add("spelling", senses=[{"sense_label": None, "definition_text": "The way a word is written out"}])
+    add("spelling", target="grievance", entry_type="pointer")       # its own definition wins
+    add("nowhere", target="absentword", entry_type="pointer")
+    conn.commit()
+
+    lexicon = oed_defs.definition_lexicon(conn, {"greevance", "grevaunce", "spelling", "nowhere"}, schema=schema)
+    assert lexicon["greevance"][0].definition == gloss
+    assert "grevaunce" not in lexicon and "nowhere" not in lexicon
+    assert [s.definition for s in lexicon["spelling"]] == ["The way a word is written out"]
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
 def test_definition_lexicon_bulk_lookup_filters_and_homographs():
     schema = "oed_test_defs"
     conn = db.connect(_URL)

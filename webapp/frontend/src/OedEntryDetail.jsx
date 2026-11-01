@@ -42,6 +42,7 @@ function OedEntryDetail() {
         {entry.part_of_speech && <span className="oed-meta-item">{entry.part_of_speech}</span>}
         <span className="oed-meta-item">page {entry.page_number}</span>
         <span className="oed-meta-item">{entry.entry_type}</span>
+        {entry.pointer_target && <span className="oed-meta-item">see {entry.pointer_target}</span>}
         {entry.pronunciation_ipa ? (
           <span className="oed-meta-item oed-ipa">/{entry.pronunciation_ipa}/</span>
         ) : (
