@@ -57,8 +57,11 @@ def print_zipf(ngram_recent: float | None) -> float | None:
     return max(_ZIPF_FLOOR, math.log10(ngram_recent * 1e9))
 
 
+_BLENDS = {"root": "root-blend", "compound": "compound-blend"}
+
+
 def unified_zipf(web_zipf: float, ngram_recent: float | None,
-                 root_zipf: float | None = None) -> tuple[float, str]:
+                 root_zipf: float | None = None, root_kind: str = "root") -> tuple[float, str]:
     """The single zipf-unit frequency rarity is scaled from, and its source.
 
     wordfreq's Zipf bottoms out around 0.84 -- a 0 there means "not listed",
@@ -69,14 +72,17 @@ def unified_zipf(web_zipf: float, ngram_recent: float | None,
     "cognoscibility" peaks in 1674), and faded words are the archaic factor's
     job anyway. A transparent derivation whose root wordfreq lists as more
     common moves _ROOT_WEIGHT of the way toward the root's Zipf (source
-    "root-blend"); a root wordfreq doesn't list (zipf 0) says nothing."""
+    "root-blend"); a root wordfreq doesn't list (zipf 0) says nothing. A
+    transparent compound blends the same way toward its RARER part
+    (root_kind "compound", source "compound-blend"): knowing "wood" doesn't
+    help with woodwose, so the weaker link sets the ease."""
     if web_zipf > 0:
         z, src = web_zipf, "wordfreq"
     else:
         pz = print_zipf(ngram_recent)
         z, src = (pz, "ngram") if pz is not None else (_ZIPF_FLOOR, "unseen")
     if root_zipf is not None and root_zipf > 0 and root_zipf > z:
-        z, src = z + _ROOT_WEIGHT * (root_zipf - z), "root-blend"
+        z, src = z + _ROOT_WEIGHT * (root_zipf - z), _BLENDS[root_kind]
     return z, src
 
 
@@ -87,17 +93,20 @@ def _rarity(zipf: float) -> float:
 def score(web_zipf: float, ngram_recent: float | None, ngram_peak: float | None = None,
           archaic: str = "current", archaic_conf: float | None = None,
           has_domain: bool = False, morph_transparent: bool = False,
-          root_zipf: float | None = None) -> tuple[int, dict]:
+          root_zipf: float | None = None, root_kind: str = "root") -> tuple[int, dict]:
     """Return (difficulty 0-100, factors dict incl. a human 'why').
 
     `zipf` in the factors is the unified value rarity is computed from (so the
     two always move together); `zipf_web`/`zipf_print`/`zipf_root` are the raw
     inputs and `zipf_source` says how it was reached (wordfreq | ngram | unseen,
-    or root-blend when a common root pulled it up).
+    or root-blend / compound-blend when a common root or common compound
+    parts pulled it up). For a compound, root_zipf is the zipf of its rarer
+    part and morph_transparent means compound.py judged it transparent or
+    partly so (only transparent ones are given a root_zipf to blend toward).
 
     Morphological transparency is credited ONCE: through the root blend when
     the root is common enough to apply, else as the flat morph ease."""
-    zipf, src = unified_zipf(web_zipf, ngram_recent, root_zipf)
+    zipf, src = unified_zipf(web_zipf, ngram_recent, root_zipf, root_kind)
     pz = print_zipf(ngram_recent)
     factors: dict = {"zipf": round(zipf, 2), "zipf_source": src,
                      "zipf_web": round(web_zipf, 2),
@@ -113,17 +122,18 @@ def score(web_zipf: float, ngram_recent: float | None, ngram_peak: float | None 
     domain = 0.06 if has_domain else 0.0
     factors["domain"] = domain
 
-    morph = -0.10 if (morph_transparent and src != "root-blend") else 0.0
+    morph = -0.10 if (morph_transparent and src not in _BLENDS.values()) else 0.0
     factors["morph"] = morph
 
     total = _clamp(rarity + arch + domain + morph)
-    factors["why"] = _why(zipf, src, ngram_peak, archaic, arch, domain, morph)
+    factors["why"] = _why(zipf, src, ngram_peak, archaic, arch, domain, morph, root_kind)
     return round(total * 100), factors
 
 
-def _why(zipf, src, ngram_peak, archaic, arch, domain, morph) -> str:
+def _why(zipf, src, ngram_peak, archaic, arch, domain, morph, root_kind="root") -> str:
     hard, easy = [], []
-    via = {"ngram": ", from print", "root-blend": ", eased toward its root"}.get(src, "")
+    via = {"ngram": ", from print", "root-blend": ", eased toward its root",
+           "compound-blend": ", eased toward its parts"}.get(src, "")
     if zipf <= 1.0:
         hard.append(f"very rare (zipf {zipf:.1f}{via})")
     elif zipf <= 2.5:
@@ -135,9 +145,12 @@ def _why(zipf, src, ngram_peak, archaic, arch, domain, morph) -> str:
     if domain > 0:
         hard.append("specialised domain")
     if morph < 0:
-        easy.append("morphologically transparent")
+        easy.append("meaning follows from its parts" if root_kind == "compound"
+                    else "morphologically transparent")
     if src == "root-blend" and zipf > 2.5:
         easy.append("common root")
+    if src == "compound-blend" and zipf > 2.5:
+        easy.append("common parts")
     s = "hard: " + (", ".join(hard) if hard else "—")
     if easy:
         s += "; eased by: " + ", ".join(easy)

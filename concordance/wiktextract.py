@@ -192,8 +192,10 @@ def sound_lexicon(conn, lemmas: set[str], dump_path: str | Path | None = None,
 # word is the root a reader would recognise (serpenticide -> serpent,
 # weedicide -> weed) -- a curated split, unlike guessing at letter
 # boundaries (parricide is not parr + -icide). Compounds of two free words
-# (downland = down + land) are deliberately left out: whether those are
-# transparent is a judgment call, not a lookup.
+# (downland = down + land) are kept apart, in compound: Wiktionary vouches
+# for WHERE such a word splits, but whether the meaning follows from the
+# parts is a judgment call, not a lookup (ashcake, killcrop and goldcrest
+# are all tagged compounds) -- compound.py makes that call.
 
 _AFFIX_TEMPLATES = {"affix", "af", "suffix", "suf", "prefix", "pre", "confix", "con"}
 
@@ -227,24 +229,76 @@ def affix_root(obj: dict) -> str | None:
     return None
 
 
-def load_affix_roots(conn, dump_path: str | Path | None = None, wikt_schema: str = "wikt",
-                     progress_cb=None) -> dict:
-    """`concordance wiktextract-morphology`: rebuild <wikt_schema>.affix_root
-    (term -> the root of its first English entry with a single-root affix
-    etymology). Built under a new name and swapped in."""
+_COMPOUND_TEMPLATES = {"compound", "com"}
+_PLAIN_PART = re.compile(r"[a-z][a-z']*")
+
+
+def _template_parts(t: dict) -> list[str]:
+    """A template's numbered component args (after the language code), with
+    any <t:gloss> / #POS modifier dropped."""
+    args = t.get("args") or {}
+    keys = sorted((k for k in args if k.isdigit() and k != "1"), key=int)
+    return [p for p in ((args[k] or "").split("<")[0].split("#")[0].strip() for k in keys) if p]
+
+
+def compound_parts(obj: dict) -> list[str] | None:
+    """The free English words an entry's compound etymology joins, in order
+    (downland -> [down, land]), or None. Only when they spell the word
+    itself, so the split is real: belfry's "barrow + frith" is history, not
+    a split a reader can see. A trailing suffix may ride along
+    (drygulcher = dry + gulch + -er -> [dry, gulch])."""
+    word = (obj.get("word") or "").strip().lower()
+    for t in obj.get("etymology_templates") or []:
+        name = t.get("name")
+        if name not in _COMPOUND_TEMPLATES and name not in ("affix", "af"):
+            continue
+        if (t.get("args") or {}).get("1") != "en":
+            continue
+        parts = [p.lower() for p in _template_parts(t)]
+        free = [p for p in parts if not (p.startswith("-") or p.endswith("-"))]
+        if len(free) < 2 or not all(_PLAIN_PART.fullmatch(p) for p in free):
+            continue
+        if re.sub(r"[^a-z']", "", "".join(p.strip("-") for p in parts)) == re.sub(r"[^a-z']", "", word):
+            return free
+    return None
+
+
+def _swap_in(cur, g: str, name: str, select_sql: str) -> int:
+    """Build <g>.<name> from select_sql under a temporary name, then swap it
+    in for the old table (readers never see a half-built one)."""
+    cur.execute(f"DROP TABLE IF EXISTS {g}.{name}_new")
+    cur.execute(f"CREATE TABLE {g}.{name}_new AS {select_sql}")
+    cur.execute(f"ALTER TABLE {g}.{name}_new ADD PRIMARY KEY (term)")
+    cur.execute(f"DROP TABLE IF EXISTS {g}.{name}")
+    cur.execute(f"ALTER TABLE {g}.{name}_new RENAME TO {name}")
+    cur.execute(f"ALTER INDEX {g}.{name}_new_pkey RENAME TO {name}_pkey")
+    cur.execute(f"SELECT count(*) FROM {g}.{name}")
+    return cur.fetchone()[0]
+
+
+def load_morphology(conn, dump_path: str | Path | None = None, wikt_schema: str = "wikt",
+                    progress_cb=None) -> dict:
+    """`concordance wiktextract-morphology`: one pass over the dump rebuilds
+    <wikt_schema>.affix_root (term -> the root of its first English entry
+    with a single-root affix etymology) and <wikt_schema>.compound (term ->
+    the parts of its first English entry with a compound etymology that
+    spells it). Each is built under a new name and swapped in."""
     from .db import _safe_schema
     g = _safe_schema(wikt_schema)
     path = Path(dump_path or DEFAULT_DUMP_PATH)
     if not path.exists():
         raise FileNotFoundError(f"Wiktextract dump not found at {path}")
-    n = 0
+    n = n_comp = 0
     with conn.cursor() as cur:
         cur.execute(f"CREATE SCHEMA IF NOT EXISTS {g}")
         cur.execute(f"DROP TABLE IF EXISTS {g}.affix_root_raw")
+        cur.execute(f"DROP TABLE IF EXISTS {g}.compound_raw")
         cur.execute(f"""CREATE UNLOGGED TABLE {g}.affix_root_raw (
                             seq bigint NOT NULL, term text NOT NULL, root text NOT NULL, etymology text)""")
-        with cur.copy(f"COPY {g}.affix_root_raw (seq, term, root, etymology) FROM STDIN") as copy, \
-                gzip.open(path, "rt", encoding="utf-8") as f:
+        cur.execute(f"""CREATE UNLOGGED TABLE {g}.compound_raw (
+                            seq bigint NOT NULL, term text NOT NULL, parts text[] NOT NULL, etymology text)""")
+        roots, compounds = [], []
+        with gzip.open(path, "rt", encoding="utf-8") as f:
             for i, line in enumerate(f, 1):
                 if progress_cb and i % 2_000_000 == 0:
                     progress_cb(i)
@@ -256,21 +310,27 @@ def load_affix_roots(conn, dump_path: str | Path | None = None, wikt_schema: str
                     continue
                 if obj.get("lang_code") != "en":
                     continue
+                term = (obj.get("word") or "").strip().lower()
+                ety = (obj.get("etymology_text") or "")[:300]
                 root = affix_root(obj)
                 if root:
                     n += 1
-                    copy.write_row((i, (obj.get("word") or "").strip().lower(), root,
-                                    (obj.get("etymology_text") or "")[:300]))
-        cur.execute(f"DROP TABLE IF EXISTS {g}.affix_root_new")
-        cur.execute(f"""CREATE TABLE {g}.affix_root_new AS
-                        SELECT DISTINCT ON (term) term, root, etymology
-                        FROM {g}.affix_root_raw ORDER BY term, seq""")
-        cur.execute(f"ALTER TABLE {g}.affix_root_new ADD PRIMARY KEY (term)")
-        cur.execute(f"DROP TABLE IF EXISTS {g}.affix_root")
-        cur.execute(f"ALTER TABLE {g}.affix_root_new RENAME TO affix_root")
-        cur.execute(f"ALTER INDEX {g}.affix_root_new_pkey RENAME TO affix_root_pkey")
+                    roots.append((i, term, root, ety))
+                parts = compound_parts(obj)
+                if parts:
+                    n_comp += 1
+                    compounds.append((i, term, parts, ety))
+        with cur.copy(f"COPY {g}.affix_root_raw (seq, term, root, etymology) FROM STDIN") as copy:
+            for row in roots:
+                copy.write_row(row)
+        with cur.copy(f"COPY {g}.compound_raw (seq, term, parts, etymology) FROM STDIN") as copy:
+            for row in compounds:
+                copy.write_row(row)
+        terms = _swap_in(cur, g, "affix_root", f"""SELECT DISTINCT ON (term) term, root, etymology
+                                                  FROM {g}.affix_root_raw ORDER BY term, seq""")
+        comp_terms = _swap_in(cur, g, "compound", f"""SELECT DISTINCT ON (term) term, parts, etymology
+                                                     FROM {g}.compound_raw ORDER BY term, seq""")
         cur.execute(f"DROP TABLE {g}.affix_root_raw")
-        cur.execute(f"SELECT count(*) FROM {g}.affix_root")
-        terms = cur.fetchone()[0]
+        cur.execute(f"DROP TABLE {g}.compound_raw")
     conn.commit()
-    return {"entries": n, "terms": terms}
+    return {"entries": n, "terms": terms, "compound_entries": n_comp, "compound_terms": comp_terms}

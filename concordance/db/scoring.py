@@ -48,10 +48,14 @@ def compute_difficulty(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> di
     to gate a re-check on."""
     import statistics
     from psycopg.types.json import Json
+    from .. import compound
     from .. import difficulty as _diff
     from wordfreq import zipf_frequency
     from ..validity_score import _morph_root
     s = _safe_schema(schema)
+    # compound.py's cached verdicts: a transparent compound blends toward
+    # its rarer part, a partly transparent one gets the flat ease.
+    compounds = compound.verdicts(conn, schema)
     with conn.cursor() as cur:
         cur.execute(f"""
             SELECT w.id, w.lemma, g.peak, g.recent, d.archaic, d.archaic_confidence, coalesce(dom.fields,'')
@@ -76,10 +80,18 @@ def compute_difficulty(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> di
             key = lemma.strip().lower()
             root = _morph_root(key) or affix_roots.get(key)
             has_domain = any(f in _diff.DOMAIN_FIELDS for f in fields)
+            transparent, root_zipf, root_kind = root is not None, None, "root"
+            if root:
+                root_zipf = zipf_frequency(root, "en")
+            elif key in compounds:
+                parts, verdict = compounds[key]
+                transparent, root_kind = verdict in ("transparent", "partly"), "compound"
+                if verdict == "transparent" and parts:
+                    root_zipf = compound.rarer_part_zipf(parts)
             sc, factors = _diff.score(
                 zipf_frequency(key, "en"), recent, peak, archaic or "current", aconf,
-                has_domain, morph_transparent=root is not None,
-                root_zipf=zipf_frequency(root, "en") if root else None)
+                has_domain, morph_transparent=transparent,
+                root_zipf=root_zipf, root_kind=root_kind)
             scores.append(sc)
             cur.execute(
                 f"""INSERT INTO {s}.word_difficulty (word_id, difficulty, difficulty_factors, updated_at)

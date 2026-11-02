@@ -603,6 +603,37 @@ def difficulty(
 
 
 @app.command()
+def compounds(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    model: Optional[Path] = typer.Option(None, "--model", "-m", help="Judge model (defaults to the 14B)."),
+    words: Optional[str] = typer.Option(None, "--words",
+                                        help="Comma-separated lemmas to judge (a trial run); default: every candidate."),
+    refresh: bool = typer.Option(False, "--refresh", help="Re-judge words that already have a cached verdict."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap number of candidates judged."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Judge whether compound words' meanings follow from their parts
+    (woodchopper yes, killcrop no), caching one verdict per word.
+    `difficulty` then eases transparent ones toward their rarer part.
+    Run `wiktextract-morphology` first so Wiktionary's attested splits are
+    used. Only words without a verdict are judged unless --refresh."""
+    from .compound import judge_and_store
+    conn = _connect(database_url)
+    db.apply_schema(conn, schema)
+    cfg = Config()
+    if model:
+        cfg.model_path = str(model)
+    lemmas = [w.strip() for w in words.split(",") if w.strip()] if words else None
+    stats = judge_and_store(conn, schema, cfg, limit, refresh=refresh, lemmas=lemmas)
+    conn.close()
+    console.print(f"[green]✓[/green] compounds: [bold]{stats['candidates']}[/bold] judged "
+                  f"({stats['transparent']} transparent, {stats['partly']} partly, "
+                  f"{stats['opaque']} opaque, {stats['not_compound']} not compounds, "
+                  f"{stats['unparsed']} unusable answers)")
+
+
+
+@app.command()
 def quizdef(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
     model: Optional[Path] = typer.Option(None, "--model", "-m", help="Model for rewrites (defaults to the 14B)."),
@@ -1492,17 +1523,21 @@ def wiktextract_morphology(
     dump: Optional[Path] = typer.Option(None, "--dump", help="wiktextract JSONL.gz (default: data/wiktextract-en.jsonl.gz)."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
-    """Load wikt.affix_root from the Wiktionary dump: the single English root
-    of every word whose etymology is root + affixes ("serpent + -i- + -cide").
-    `difficulty` eases such words toward their root, like a suffixed
-    derivative. Rerun after downloading a newer dump. ~10-15 minutes."""
+    """Load wikt.affix_root and wikt.compound from the Wiktionary dump: the
+    single English root of every word whose etymology is root + affixes
+    ("serpent + -i- + -cide"), and the parts of every word whose etymology
+    is a compound that spells it ("down + land"). `difficulty` eases affix
+    words toward their root, like a suffixed derivative; `compounds` uses
+    the compound parts as the split to judge. Rerun after downloading a
+    newer dump. ~10-15 minutes."""
     from . import wiktextract
     conn = _connect(database_url)
     with console.status("[bold]Reading Wiktionary etymologies…"):
-        stats = wiktextract.load_affix_roots(conn, str(dump) if dump else None)
+        stats = wiktextract.load_morphology(conn, str(dump) if dump else None)
     conn.close()
     console.print(f"[green]✓[/green] wiktextract-morphology: [bold]{stats['terms']:,}[/bold] terms "
-                  f"with a single-root affix etymology")
+                  f"with a single-root affix etymology, [bold]{stats['compound_terms']:,}[/bold] "
+                  f"with a compound etymology")
 
 
 @app.command("derive-definitions")
@@ -2206,6 +2241,8 @@ def maintain(
     skip_normalize_pos: bool = typer.Option(False, "--skip-normalize-pos"),
     skip_ngram: bool = typer.Option(False, "--skip-ngram"),
     skip_archaic: bool = typer.Option(False, "--skip-archaic"),
+    skip_compounds: bool = typer.Option(False, "--skip-compounds",
+                                         help="Skip judging new compound words' transparency (loads a local LLM)."),
     skip_difficulty: bool = typer.Option(False, "--skip-difficulty"),
     skip_quizdef: bool = typer.Option(False, "--skip-quizdef"),
     skip_quizzable: bool = typer.Option(False, "--skip-quizzable"),
@@ -2220,7 +2257,7 @@ def maintain(
 ) -> None:
     """Run the full post-ingest maintenance chain in dependency order:
     fill-definitions -> classify -> normalize-pos -> ngram -> archaic ->
-    difficulty -> quizdef -> quizzable -> calibrate-difficulty ->
+    compounds -> difficulty -> quizdef -> quizzable -> calibrate-difficulty ->
     wordnik-pron -> ipa -> embed -> backfill-analogies.
     This is the whole documented sequence from the README's
     "Backfilling definitions" / "Enrichment & scoring" / "Definition-quality
@@ -2322,6 +2359,17 @@ def maintain(
         console.print(f"[green]✓[/green] archaic flags set on [bold]{total}[/bold] words — {parts}")
     else:
         console.print("[dim]archaic skipped.[/dim]")
+
+    if not skip_compounds:
+        from .compound import judge_and_store
+        console.print("[bold]Judging compound transparency (new words only)…[/bold]")
+        stats = judge_and_store(conn, schema, cfg, limit)
+        console.print(f"[green]✓[/green] compounds: [bold]{stats['candidates']}[/bold] judged "
+                      f"({stats['transparent']} transparent, {stats['partly']} partly, "
+                      f"{stats['opaque']} opaque, {stats['not_compound']} not compounds, "
+                      f"{stats['unparsed']} unusable answers)")
+    else:
+        console.print("[dim]compounds skipped.[/dim]")
 
     if not skip_difficulty:
         console.print("[bold]Computing ex-ante difficulty scores…[/bold]")

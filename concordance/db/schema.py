@@ -1066,8 +1066,24 @@ def _migration_0001_baseline(conn: psycopg.Connection, s: str) -> None:
         conn.rollback()
 
 
+def _migration_0002_compound_verdict(conn: psycopg.Connection, s: str) -> None:
+    """compound.py's cached transparency verdicts. Keyed by lemma, not word
+    id (like the cross-book verdict cache), so a word that is deleted and
+    later re-added keeps its verdict and never costs a second model call.
+    parts is the split the model chose (NULL when it chose none)."""
+    with conn.cursor() as cur:
+        cur.execute(f"""CREATE TABLE IF NOT EXISTS {s}.compound_verdict (
+            lemma_lc   text PRIMARY KEY,
+            parts      text[],
+            verdict    text NOT NULL
+                       CHECK (verdict IN ('transparent', 'partly', 'opaque', 'not_compound')),
+            model      text,
+            judged_at  timestamptz NOT NULL DEFAULT now())""")
+
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, _migration_0001_baseline),
+    (2, _migration_0002_compound_verdict),
 ]
 
 

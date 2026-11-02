@@ -84,3 +84,24 @@ def test_affix_root_takes_the_single_free_component_only():
         {"name": "affix", "args": {"1": "en", "2": "la:colon", "3": "-iform"}}]}) is None
     assert wiktextract.affix_root({"word": "cardinalate", "etymology_templates": [
         {"name": "suffix", "args": {"1": "en", "2": "cardinal#Noun", "3": "-ate"}}]}) == "cardinal"
+
+
+def test_compound_parts_only_when_they_spell_the_word():
+    def obj(word, *templates):
+        return {"word": word, "etymology_templates": list(templates)}
+    assert wiktextract.compound_parts(obj("downland",
+        {"name": "compound", "args": {"1": "en", "2": "down", "3": "land"}})) == ["down", "land"]
+    # {{affix}} with two free words is a compound too; a trailing suffix may ride along
+    assert wiktextract.compound_parts(obj("drygulcher",
+        {"name": "af", "args": {"1": "en", "2": "dry", "3": "gulch", "4": "-er"}})) == ["dry", "gulch"]
+    # gloss / POS modifiers dropped
+    assert wiktextract.compound_parts(obj("eelpot",
+        {"name": "com", "args": {"1": "en", "2": "eel<t:fish>", "3": "pot#Noun"}})) == ["eel", "pot"]
+    # history, not a visible split
+    assert wiktextract.compound_parts(obj("belfry",
+        {"name": "compound", "args": {"1": "en", "2": "barrow", "3": "frith"}})) is None
+    # root + affixes is affix_root's business; other languages' compounds are not ours
+    assert wiktextract.compound_parts(obj("serpenticide",
+        {"name": "affix", "args": {"1": "en", "2": "serpent", "3": "-icide"}})) is None
+    assert wiktextract.compound_parts(obj("downland",
+        {"name": "compound", "args": {"1": "enm", "2": "down", "3": "land"}})) is None
