@@ -17,7 +17,8 @@ compound_verdict and never re-asked:
   transparent   the everyday senses of the parts give the meaning
                 -> blended halfway toward the rarer part's zipf
   partly        one part literal, the other figurative or specialised
-                -> the flat transparency ease only
+                -> no ease: about a quarter of these calls were really
+                   opaque words on hand-labelled samples
   opaque        the parts don't lead to the meaning -> no ease
   not_compound  none of the offered splits is how the word was formed
 

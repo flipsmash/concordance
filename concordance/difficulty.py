@@ -101,8 +101,8 @@ def score(web_zipf: float, ngram_recent: float | None, ngram_peak: float | None 
     inputs and `zipf_source` says how it was reached (wordfreq | ngram | unseen,
     or root-blend / compound-blend when a common root or common compound
     parts pulled it up). For a compound, root_zipf is the zipf of its rarer
-    part and morph_transparent means compound.py judged it transparent or
-    partly so (only transparent ones are given a root_zipf to blend toward).
+    part and morph_transparent means compound.py judged it transparent (the
+    flat ease applies only when that part is no more common than the word).
 
     Morphological transparency is credited ONCE: through the root blend when
     the root is common enough to apply, else as the flat morph ease."""

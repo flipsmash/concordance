@@ -53,8 +53,10 @@ def compute_difficulty(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> di
     from wordfreq import zipf_frequency
     from ..validity_score import _morph_root
     s = _safe_schema(schema)
-    # compound.py's cached verdicts: a transparent compound blends toward
-    # its rarer part, a partly transparent one gets the flat ease.
+    # compound.py's cached verdicts: only a transparent compound is eased
+    # (toward its rarer part). "partly" gets nothing -- on hand-labelled
+    # samples about a quarter of the model's partly calls were really
+    # opaque words (peagoose = a fool), while its transparent calls held up.
     compounds = compound.verdicts(conn, schema)
     with conn.cursor() as cur:
         cur.execute(f"""
@@ -85,8 +87,8 @@ def compute_difficulty(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> di
                 root_zipf = zipf_frequency(root, "en")
             elif key in compounds:
                 parts, verdict = compounds[key]
-                transparent, root_kind = verdict in ("transparent", "partly"), "compound"
                 if verdict == "transparent" and parts:
+                    transparent, root_kind = True, "compound"
                     root_zipf = compound.rarer_part_zipf(parts)
             sc, factors = _diff.score(
                 zipf_frequency(key, "en"), recent, peak, archaic or "current", aconf,

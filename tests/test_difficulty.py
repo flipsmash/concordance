@@ -87,8 +87,8 @@ def test_transparent_compound_blends_toward_its_parts():
     sc, f = d.score(0.0, 1e-9, morph_transparent=True, root_zipf=4.0, root_kind="compound")
     assert f["zipf_source"] == "compound-blend" and f["morph"] == 0.0
     assert abs(f["zipf"] - 2.0) < 1e-9 and "eased toward its parts" in f["why"]
-    # partly transparent (no root_zipf): the flat ease, worded for a compound
-    _, f = d.score(0.0, 1e-9, morph_transparent=True, root_kind="compound")
+    # transparent but the rarer part is unlisted: the flat ease, worded for a compound
+    _, f = d.score(0.0, 1e-9, morph_transparent=True, root_zipf=0.0, root_kind="compound")
     assert f["morph"] == -0.10 and "meaning follows from its parts" in f["why"]
     # a compound never scores easier than the same word as a root derivative
     assert d.score(0.0, 1e-9, morph_transparent=True, root_zipf=4.0, root_kind="compound")[0] == \
