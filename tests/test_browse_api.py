@@ -2361,3 +2361,39 @@ def test_ngram_trend_validation_and_lookup():
         assert not bogus["found"] and bogus["per_million"] == [0.0] * 22
     finally:
         restore()
+
+
+@pg
+def test_corpus_map_endpoint_is_columnar_cached_and_compressed():
+    client, conn, restore = _setup("cc_test_corpus_map_api")
+    schema = "cc_test_corpus_map_api"
+    try:
+        _login(client)
+        r = client.get("/api/browse/corpus-map?entity=book")
+        assert r.status_code == 200 and r.json()["computed_at"] is None      # never computed
+        ids = [_insert_book(conn, schema, f"Book {i}", f"Author {i % 3}") for i in range(60)]
+        with conn.cursor() as cur:
+            for i, bid in enumerate(ids):
+                cur.execute(f"""INSERT INTO {schema}.corpus_map_point
+                                (entity, key, label, x, y, cluster, subcluster, word_count, sparse)
+                                VALUES ('book', %s, %s, %s, %s, %s, 0, 50, %s)""",
+                            (str(bid), f"Book {i}", i * 10.04, 500.0, i % 2, i == 0))
+            cur.execute(f"""INSERT INTO {schema}.corpus_map_cluster (entity, cluster, subcluster, size, x, y, label_words)
+                            VALUES ('book', 0, -1, 30, 1, 2, ARRAY['wigwam']), ('book', 1, -1, 30, 3, 4, ARRAY['quirt'])""")
+            cur.execute(f"""INSERT INTO {schema}.corpus_map_run (entity, n, params, seconds)
+                            VALUES ('book', 60, '{{}}', 1.0)""")
+        conn.commit()
+        r = client.get("/api/browse/corpus-map?entity=book", headers={"Accept-Encoding": "gzip"})
+        assert r.status_code == 200 and r.headers.get("content-encoding") == "gzip"
+        body = r.json()
+        pts = body["points"]
+        assert body["n"] == 60 and len(pts["key"]) == 60 and set(pts) >= {"x", "y", "cluster", "author", "sparse"}
+        i0 = pts["key"].index(ids[0])
+        assert pts["label"][i0] == "Book 0" and pts["author"][i0] == "Author 0" and pts["sparse"][i0] == 1
+        assert pts["x"][pts["key"].index(ids[1])] == 10.0                    # rounded to 1 decimal
+        assert [c["label_words"] for c in body["clusters"]] == [["wigwam"], ["quirt"]]
+        etag = r.headers["etag"]
+        assert client.get("/api/browse/corpus-map?entity=book", headers={"If-None-Match": etag}).status_code == 304
+        assert client.get("/api/browse/corpus-map?entity=author").json()["computed_at"] is None
+    finally:
+        restore()

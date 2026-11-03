@@ -30,6 +30,10 @@ from concordance.model import Candidate, RejectReason, junk_pos_reason, normaliz
 from webapp.backend import auth
 
 app = FastAPI(title="Concordance Review API")
+# Compress JSON responses: the full-corpus map alone is several MB of plain
+# JSON (~29k titles) and compresses ~5x; small responses are left alone.
+from fastapi.middleware.gzip import GZipMiddleware  # noqa: E402
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 SCHEMA = cdb.DEFAULT_SCHEMA
 SORT_COLUMNS = {
