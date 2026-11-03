@@ -303,6 +303,7 @@ concordance book-clustering      # hierarchical clustering + 2D map over the top
 concordance author-similarity    # same, one level up, for authors
 concordance author-clustering    # hierarchical clustering + 2D map over the top-N authors
 concordance relate               # convenience wrapper: runs all four above with default options
+concordance corpus-map           # EVERY book and author on one 2-D map, with labelled clusters
 ```
 
 Lexical (shared-vocabulary) relatedness — a different axis from the semantic
@@ -319,8 +320,20 @@ overwriting the default one). `relate` skips flags per step
 (`--skip-book-similarity`, etc.) and `--limit` (similarity steps only); use
 the standalone commands for `--top-k`/`--top-n`/`--n-clusters`/`--min-fame`.
 
-None of these four are part of `maintain` — run standalone on your own
-schedule. Reachable from the web app's Visualizations page.
+`corpus-map` is the full-corpus view the top-N clustering can't be: the same
+vocabulary vectors, reduced with TruncatedSVD and laid out in 2-D with UMAP
+(fixed seed), grouped by two levels of KMeans whose cluster counts scale
+with the corpus (about √n ÷ 4), each cluster named by its most distinctive
+words. A couple of minutes for ~29k books and ~7k authors; `--entity
+book|author|both`. It prints how many of each book's exact top-20
+neighbours share its cluster — positions are approximate, the neighbour
+lists stay exact. Books with no distinctive words are left off; books added
+after a run aren't on the map until the next one.
+
+None of these are part of `maintain` (and `relate` doesn't include
+`corpus-map`) — run standalone on your own schedule. Reachable from the web
+app's Visualizations page and the Books/Authors relatedness pages'
+"Everything" tab.
 
 ## Cultural & historical importance
 
@@ -443,7 +456,8 @@ Every relatedness view in one place: book/author ego-graphs
 graph, a shared-vocabulary comparison panel (the actual overlapping rare
 words between any two books/authors, computed on demand), a cluster
 map/similarity matrix/dendrogram over the top-N entities from a clustering
-run, a USAS category-overlap graph, and a discipline-category map (PCA over
+run, a zoomable map of every book or author ("Everything" tab: clusters
+labelled by their distinctive words, search, exact neighbours on click), a USAS category-overlap graph, and a discipline-category map (PCA over
 each entity's category-distribution vector — a different axis from every
 shared-vocabulary view above).
 
@@ -513,16 +527,15 @@ Every stage below is real and running end-to-end, not a stub:
 - Web app: review/prune UI, invite-gated user accounts, quizzing (4 question types, spaced repetition), full visualization suite.
 - Enrichment: USAS domain tagging, ex-ante + per-user-calibrated difficulty, quiz-safe definitions, pronunciation audio (real recordings first), unified definition-lookup cascade with a human-review flag for foreign/archaic-spelling hits.
 - Scoring: absolute 1–10 cultural-fame score for every book/author.
-- Relatedness: lexical (shared-vocabulary) and semantic (embedding) similarity, both for books and authors, surfaced as ego-graphs, cluster maps, similarity matrices, and dendrograms.
+- Relatedness: lexical (shared-vocabulary) and semantic (embedding) similarity, both for books and authors, surfaced as ego-graphs, cluster maps, similarity matrices, dendrograms, and a zoomable full-corpus map.
 - Analogy-relation graph powering a fourth quiz question type.
 - A separate OED reference-dictionary pipeline (own schema, own browsing UI), feeding back into the main pipeline as a pronunciation source.
 
 Deferred by choice, not forgotten: other languages, Anki export, scanned-PDF
 OCR, a curated names/gazetteer list to close the one known proper-noun-
-pollution gap (see DESIGN.md), and a genuinely full-corpus relatedness view —
-today's cluster map/matrix/dendrogram are honestly labeled "top N," because
-both the clustering math and the rendering itself stop being tractable well
-before real corpus scale.
+pollution gap (see DESIGN.md). (The full-corpus relatedness view, deferred
+here until 2026-11, is now `corpus-map` and the "Everything" tab; the cluster
+map/matrix/dendrogram stay honestly labelled "top N".)
 
 CSV-based ingestion (`run` → hand-edit → `finalize` → `sync-db`) still works
 but is no longer the primary workflow — see git history if you're on it.

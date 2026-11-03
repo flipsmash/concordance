@@ -1,0 +1,340 @@
+.corpus-map {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.corpus-map-note {
+  margin: 0;
+  font-size: 13px;
+}
+
+.corpus-map-empty code {
+  font-family: var(--mono);
+}
+
+.corpus-map-body {
+  display: flex;
+  gap: 12px;
+  height: min(72vh, 760px);
+  min-height: 420px;
+}
+
+.corpus-map-canvas {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.corpus-map-canvas canvas {
+  display: block;
+  touch-action: none;
+  cursor: grab;
+}
+
+.corpus-map-canvas canvas:active {
+  cursor: grabbing;
+}
+
+.corpus-map-tooltip {
+  position: absolute;
+  max-width: 280px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text-h);
+  font-size: 13px;
+  pointer-events: none;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
+}
+
+.corpus-map-zoom {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 4px;
+}
+
+.corpus-map-zoom button {
+  min-width: 32px;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text-h);
+  font: inherit;
+  cursor: pointer;
+}
+
+.corpus-map-zoom button:hover {
+  border-color: var(--accent);
+}
+
+.corpus-map-panel {
+  display: flex;
+  flex-direction: column;
+  width: 320px;
+  flex-shrink: 0;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.corpus-map-search {
+  position: relative;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.corpus-map-search input {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text-h);
+  font: inherit;
+}
+
+.corpus-map-matches {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  z-index: 2;
+  max-height: 320px;
+  margin: 4px 0 0;
+  padding: 4px 0;
+  overflow-y: auto;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.14);
+}
+
+.corpus-map-matches button,
+.corpus-map-neighbours button:first-child {
+  display: block;
+  width: 100%;
+  padding: 4px 8px;
+  border: 0;
+  background: none;
+  color: var(--text-h);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.corpus-map-matches button:hover,
+.corpus-map-neighbours button:first-child:hover:not(:disabled) {
+  background: var(--row-hover);
+}
+
+.corpus-map-nomatch {
+  padding: 4px 8px;
+  font-size: 13px;
+}
+
+.corpus-map-detail,
+.corpus-map-clusters {
+  flex: 1;
+  min-height: 0;
+  padding: 8px 12px 12px;
+  overflow-y: auto;
+}
+
+.corpus-map-detail h3 {
+  margin: 8px 0 2px;
+  color: var(--text-h);
+  font-size: 17px;
+}
+
+.corpus-map-detail h4 {
+  margin: 14px 0 4px;
+  color: var(--text-h);
+  font-size: 14px;
+}
+
+.corpus-map-detail p {
+  margin: 2px 0;
+}
+
+.corpus-map-back,
+.corpus-map-open {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.corpus-map-open {
+  margin-top: 8px;
+}
+
+.corpus-map-in {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.corpus-map-sparse {
+  font-size: 13px;
+  font-style: italic;
+}
+
+.corpus-map-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+  border-radius: 2px;
+}
+
+.corpus-map-neighbours {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.corpus-map-neighbours li {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.corpus-map-neighbours button:first-child {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.corpus-map-neighbours button:disabled {
+  color: var(--text);
+  cursor: default;
+}
+
+.corpus-map-shared {
+  flex-shrink: 0;
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.corpus-map-clusters > p {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+
+.corpus-map-clusters ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.corpus-map-cluster-row {
+  display: flex;
+  align-items: center;
+}
+
+.corpus-map-clusters li.active > .corpus-map-cluster-row {
+  background: var(--row-hover);
+  border-radius: 4px;
+}
+
+.corpus-map-expand {
+  width: 22px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.corpus-map-cluster-name {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 4px 4px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-h);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.corpus-map-cluster-name:hover {
+  background: var(--row-hover);
+}
+
+.corpus-map-words {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.corpus-map-size {
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+.corpus-map-subs {
+  padding-left: 38px !important;
+}
+
+.corpus-map-subs li {
+  list-style: none;
+}
+
+.corpus-map-subs .corpus-map-cluster-name {
+  box-sizing: border-box;
+  width: 100%;
+  font-size: 13px;
+}
+
+/* Phones: map on top, panel below it. */
+@media (max-width: 760px) {
+  .corpus-map-body {
+    flex-direction: column;
+    height: auto;
+  }
+
+  .corpus-map-canvas {
+    height: 60vh;
+    min-height: 320px;
+    flex: none;
+  }
+
+  .corpus-map-panel {
+    width: auto;
+    max-height: 60vh;
+  }
+}

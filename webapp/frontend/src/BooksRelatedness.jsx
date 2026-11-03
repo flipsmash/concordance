@@ -4,6 +4,7 @@ import BookClusterMap from './BookClusterMap'
 import BookDendrogram from './BookDendrogram'
 import BookMatrix from './BookMatrix'
 import ClusterHighlightSelect from './ClusterHighlightSelect'
+import CorpusMap from './CorpusMap'
 import RelatednessGraph from './RelatednessGraph'
 import './Authors.css'
 import './Browse.css' // .author-select* -- reused here for the highlight-a-book control
@@ -16,7 +17,12 @@ const TABS = [
   { id: 'matrix', label: 'Matrix' },
   { id: 'dendrogram', label: 'Dendrogram' },
   { id: 'graph', label: 'Graph' },
+  { id: 'everything', label: 'Everything' },
 ]
+
+// Module-level so CorpusMap's fetch effect sees stable functions.
+const bookRelatedUrl = (id) => `/api/browse/books/${id}/related?top_k=20&k2=0`
+const bookSharedUrl = (a, b) => `/api/browse/books/${a}/shared-words/${b}`
 
 const SCOPES = [
   { id: 'volume', label: 'Most-represented' },
@@ -79,9 +85,11 @@ function BooksRelatedness() {
     <div className="authors-page">
       <header className="authors-header">
         <div>
-          <h1>{clusterNodes ? `Top ${clusterNodes.length} books` : 'Top books'}</h1>
+          <h1>{tab === 'everything' ? 'Every book' : clusterNodes ? `Top ${clusterNodes.length} books` : 'Top books'}</h1>
           <p className="muted">
-            {scope === 'fame'
+            {tab === 'everything'
+              ? 'The whole corpus, grouped by shared vocabulary'
+              : scope === 'fame'
               ? 'Vocabulary overlap across the most historically important books (fame score ≥ 8)'
               : 'Vocabulary overlap across the most-represented books (by word count)'}
           </p>
@@ -92,13 +100,13 @@ function BooksRelatedness() {
       </header>
 
       <div className="authors-relatedness-controls">
-        <div className="graph-signal-toggle" role="group" aria-label="Selection">
+        {tab !== 'everything' && <div className="graph-signal-toggle" role="group" aria-label="Selection">
           {SCOPES.map((s) => (
             <button key={s.id} type="button" className={scope === s.id ? 'active' : ''} onClick={() => setScope(s.id)}>
               {s.label}
             </button>
           ))}
-        </div>
+        </div>}
         <div className="graph-signal-toggle" role="group" aria-label="View">
           {TABS.map((t) => (
             <button key={t.id} type="button" className={tab === t.id ? 'active' : ''} onClick={() => setTab(t.id)}>
@@ -106,10 +114,10 @@ function BooksRelatedness() {
             </button>
           ))}
         </div>
-        <div className="authors-relatedness-highlight">
+        {tab !== 'everything' && <div className="authors-relatedness-highlight">
           <span className="muted">Highlight:</span>
           <ClusterHighlightSelect items={highlightItems} value={highlighted} onChange={setHighlighted} />
-        </div>
+        </div>}
       </div>
 
       {tab === 'map' && <BookClusterMap highlightBookId={highlighted} onBookClick={goToBook} scope={scope} />}
@@ -117,6 +125,15 @@ function BooksRelatedness() {
       {tab === 'matrix' && <BookMatrix highlightBookId={highlighted} scope={scope} />}
 
       {tab === 'dendrogram' && <BookDendrogram highlightBookId={highlighted} onBookClick={goToBook} scope={scope} />}
+
+      {tab === 'everything' && (
+        <CorpusMap
+          entity="book"
+          relatedUrl={bookRelatedUrl}
+          sharedWordsUrl={bookSharedUrl}
+          onOpen={(pts, i) => goToBook({ id: pts.key[i], author: pts.author[i] })}
+        />
+      )}
 
       {tab === 'graph' && (
         <RelatednessGraph

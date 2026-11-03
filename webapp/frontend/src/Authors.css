@@ -35,6 +35,11 @@
   flex-wrap: wrap;
 }
 
+/* Five view tabs don't fit a phone's width in one row. */
+.authors-relatedness-controls .graph-signal-toggle {
+  flex-wrap: wrap;
+}
+
 .authors-relatedness-highlight {
   display: flex;
   align-items: center;
