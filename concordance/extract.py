@@ -35,7 +35,9 @@ def extract(path: str | Path) -> list[Chapter]:
     if suffix == ".pdf":
         return _extract_pdf(path)
     if suffix in {".txt", ".text", ".md"}:
-        return [Chapter(title=path.stem, text=path.read_text(encoding="utf-8", errors="replace"))]
+        from .archive_metadata import strip_gutenberg_boilerplate
+        text = strip_gutenberg_boilerplate(path.read_text(encoding="utf-8", errors="replace"))
+        return [Chapter(title=path.stem, text=text)]
     raise UnsupportedFormatError(
         f"Concordance reads EPUB, text PDF, and .txt — not '{suffix}'."
     )
@@ -59,9 +61,38 @@ def _extract_epub(path: Path) -> list[Chapter]:
         heading = soup.find(["h1", "h2", "h3"])
         title = heading.get_text(" ", strip=True) if heading else f"Section {i}"
         chapters.append(Chapter(title=title[:80], text=text))
+    chapters = strip_gutenberg_chapters(chapters)
     if not chapters:
         raise UnsupportedFormatError(f"No readable text found in {path.name}.")
     return chapters
+
+
+def strip_gutenberg_chapters(chapters: list[Chapter]) -> list[Chapter]:
+    """Drop Project Gutenberg's licence header and footer from an EPUB's
+    documents: everything before the last START marker and from the last END
+    marker on, the same boundaries archive_metadata uses for .txt files.
+    Without this the licence's own vocabulary was counted as the book's --
+    "nonproprietary" ended up linked to 6,571 books. A book with no markers
+    is returned unchanged."""
+    from .archive_metadata import _END_RE, _START_RE
+    start = end = None                     # (chapter index, offset)
+    for i, ch in enumerate(chapters):
+        for m in _START_RE.finditer(ch.text):
+            start = (i, m.end())
+        for m in _END_RE.finditer(ch.text):
+            end = (i, m.start())
+    if start and end and end <= start:     # a stray END before the real START
+        end = None
+    out = []
+    for i, ch in enumerate(chapters):
+        if (start and i < start[0]) or (end and i > end[0]):
+            continue
+        lo = start[1] if start and i == start[0] else 0
+        hi = end[1] if end and i == end[0] else len(ch.text)
+        text = ch.text[lo:hi]
+        if text.strip():
+            out.append(Chapter(title=ch.title, text=text))
+    return out
 
 
 def _extract_pdf(path: Path) -> list[Chapter]:

@@ -366,3 +366,87 @@ def clean_non_english_context(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool
         conn.commit()
     return {"words": len(lemmas), "found_in_books": len(found), "cast_out": len(actions),
             "actions": actions}
+
+
+# Words that reached the list only from Project Gutenberg's licence text and
+# file headers, before ingest stripped them (extract.strip_gutenberg_chapters,
+# archive_metadata.strip_gutenberg_boilerplate). Found by measurement, not
+# guessed: these were the only active words whose book links came mostly
+# from boilerplate -- "nonproprietary" alone was linked to 6,571 books, and
+# they grouped ~2,500 short works by licence wording instead of content.
+#
+# A pattern: a link is kept only if the word is in the book's licence-free
+# text. None: the word is Gutenberg's own editorial vocabulary even inside
+# the body ("This etext was produced by...", "ETEXT EDITOR'S BOOKMARKS",
+# "[Greek text deleted from etext]") -- checked over all 3,524 linked books
+# on 2026-11-03, not one authorial use -- so every link goes.
+_BOILERPLATE_TERMS: dict[str, str | None] = {
+    "nonproprietary": r"\bnon-?proprietary\b",
+    "etext": None,
+    "unenforceability": r"\bunenforceabilit(?:y|ies)\b",
+}
+
+
+def clean_boilerplate_links(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool = False,
+                            root: str | Path = ".") -> dict:
+    """`concordance clean-boilerplate-links`: re-check each book link of the
+    _BOILERPLATE_TERMS words against the book's own text with the Gutenberg
+    licence stripped; a link whose word isn't in that text is removed. A word
+    left with no links is cast out (variant_flag_reason
+    'gutenberg_boilerplate'), unless an admin added it. A book whose archive
+    file is missing keeps its link -- it can't be checked."""
+    import re
+    import warnings
+    from ..extract import extract
+    s = _safe_schema(schema)
+    texts: dict[str, str | None] = {}
+
+    def body(path: str) -> str | None:
+        if path not in texts:
+            p = Path(path) if Path(path).is_absolute() else Path(root) / path
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    texts[path] = "\n".join(c.text for c in extract(p))
+            except Exception:
+                texts[path] = None
+        return texts[path]
+
+    report = {}
+    with conn.cursor() as cur:
+        for lemma, pattern in _BOILERPLATE_TERMS.items():
+            cur.execute(f"SELECT id, admin_suggested FROM {s}.word WHERE lower(lemma) = %s", (lemma,))
+            row = cur.fetchone()
+            if not row:
+                continue
+            wid, admin = row
+            cur.execute(f"""SELECT b.id, b.archive_path FROM {s}.word_book wb
+                            JOIN {s}.book b ON b.id = wb.book_id WHERE wb.word_id = %s""", (wid,))
+            rx = re.compile(pattern, re.IGNORECASE) if pattern else None
+            keep, drop, unchecked = [], [], []
+            for bid, path in cur.fetchall():
+                if rx is None:
+                    drop.append(bid)
+                    continue
+                text = body(path) if path else None
+                if text is None:
+                    unchecked.append(bid)
+                elif rx.search(text):
+                    keep.append(bid)
+                else:
+                    drop.append(bid)
+            cast_out = not keep and not unchecked and not admin
+            report[lemma] = {"links": len(keep) + len(drop) + len(unchecked), "kept": len(keep),
+                             "removed": len(drop), "unchecked": len(unchecked), "cast_out": cast_out}
+            if apply:
+                cur.execute(f"DELETE FROM {s}.word_book WHERE word_id = %s AND book_id = ANY(%s)", (wid, drop))
+                if cast_out:
+                    cur.execute(f"""UPDATE {s}.word SET active=false, variant_flag_reason='gutenberg_boilerplate',
+                                        variant_flag_note=%s, variant_flagged_at=now(), updated_at=now()
+                                    WHERE id=%s""",
+                                ("only ever seen in Project Gutenberg licence/header text", wid))
+        if apply:
+            conn.commit()
+        else:
+            conn.rollback()
+    return report

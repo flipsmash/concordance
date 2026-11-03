@@ -3117,3 +3117,44 @@ def test_dedupe_plurals_never_creates_a_too_common_singular(monkeypatch):
             cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
         conn.commit()
         conn.close()
+
+
+@pg
+def test_clean_boilerplate_links(tmp_path):
+    from concordance.model import Candidate
+    schema = "cc_test_boilerplate_links"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+    start, end = "*** START OF THE PROJECT GUTENBERG EBOOK X ***", "*** END OF THE PROJECT GUTENBERG EBOOK X ***"
+    real = tmp_path / "real.txt"     # the word is in the book itself
+    real.write_text(f"{start}\nA nonproprietary remedy, he said.\n{end}\nnonproprietary licence", encoding="utf-8")
+    lic = tmp_path / "licence.txt"   # only in the licence footer
+    lic.write_text(f"{start}\nCall me Ishmael.\n{end}\nany nonproprietary or proprietary form", encoding="utf-8")
+
+    def cand(lemma):
+        c = Candidate(lemma=lemma, pos="NOUN"); c.definition = "x"; return c
+    db.sync_book_results(conn, "Real", kept=[cand("nonproprietary"), cand("etext")], rejected=[], schema=schema)
+    db.sync_book_results(conn, "Licence", kept=[cand("nonproprietary"), cand("unenforceability")],
+                         rejected=[], schema=schema)
+    with conn.cursor() as cur:
+        cur.execute(f"UPDATE {schema}.book SET archive_path=%s WHERE title='Real'", (str(real),))
+        cur.execute(f"UPDATE {schema}.book SET archive_path=%s WHERE title='Licence'", (str(lic),))
+    conn.commit()
+
+    dry = db.clean_boilerplate_links(conn, schema)
+    assert dry["nonproprietary"] == {"links": 2, "kept": 1, "removed": 1, "unchecked": 0, "cast_out": False}
+    assert dry["etext"]["removed"] == 1 and dry["etext"]["cast_out"]       # editorial-only: always removed
+    db.clean_boilerplate_links(conn, schema, apply=True)
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT w.lemma, w.active, w.variant_flag_reason, count(wb.book_id) FROM {schema}.word w
+                        LEFT JOIN {schema}.word_book wb ON wb.word_id = w.id GROUP BY w.id""")
+        got = {l: (a, f, n) for l, a, f, n in cur.fetchall()}
+    assert got["nonproprietary"] == (True, None, 1)
+    assert got["etext"] == (False, "gutenberg_boilerplate", 0)
+    assert got["unenforceability"] == (False, "gutenberg_boilerplate", 0)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()

@@ -1472,6 +1472,28 @@ def clean_dialect_spellings(
                   f"[bold]{stats['scanned']}[/bold] dialect respellings — {stats['counts']}")
 
 
+@app.command("clean-boilerplate-links")
+def clean_boilerplate_links(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    apply: bool = typer.Option(False, "--apply", help="Write changes (default: dry run, counts only)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Remove book links that only came from Project Gutenberg's licence text
+    ("nonproprietary", "etext"): each link is re-checked against the book's
+    archive file with the licence stripped. A word left with no links is
+    cast out (variant_flag_reason 'gutenberg_boilerplate'). Re-run
+    book-similarity / author-similarity afterwards."""
+    conn = _connect(database_url)
+    db.apply_schema(conn, schema)
+    with console.status("[bold]Checking book links against their own text…"):
+        report = db.clean_boilerplate_links(conn, schema, apply=apply)
+    conn.close()
+    for lemma, r in report.items():
+        console.print(f"  {lemma:18} {r['links']:>6} links: {r['kept']} kept, {r['removed']} removed, "
+                      f"{r['unchecked']} unchecked" + ("  [red]→ cast out[/red]" if r["cast_out"] else ""))
+    console.print(f"[green]✓[/green] clean-boilerplate-links{'' if apply else ' (dry run)'}")
+
+
 @app.command("clean-archaic-spellings")
 def clean_archaic_spellings(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),

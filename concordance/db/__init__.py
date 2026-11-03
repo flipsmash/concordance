@@ -80,6 +80,7 @@ from .cleanup import (  # noqa: F401
     clean_script_variants,
     _cast_out_variant,
     clean_dialect_spellings,
+    clean_boilerplate_links,
     clean_archaic_spellings,
     _UNTRUSTED_DEF_SOURCES,
     _TWIN_MIN_SIMILARITY,
