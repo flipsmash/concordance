@@ -63,13 +63,11 @@ def looks_like_definition_entry(headword: str, raw_text: str) -> bool:
     bracket or a POS abbreviation -- the two things every real OED entry
     has and a false-positive headword detection (an ordinary body-text word
     that happened to sit at a column's left margin at headword-ish size,
-    e.g. "form", "one", "great", "whence") never does. This is the
-    discriminator the user asked for ("they will always be in bold"): the
-    PDF's PyMuPDF span metadata carries no usable bold/flags signal for
-    this document (confirmed empirically -- every span reports
-    font='Courier', flags=8 regardless of visual weight), so bold can't be
-    read from the text layer directly. What CAN be read reliably is what
-    immediately follows a real headword, which serves the same purpose.
+    e.g. "form", "one", "great", "whence") never does. The PDF's span
+    metadata carries no bold signal (every span reports font='Courier',
+    flags=8), so until segment.py measured bold from the scan this check
+    stood in for it. Only scripts/prune_oed_false_positive_entries.py still
+    uses it.
     Measured against page_number>=213 of Volume I: 728/1798 (40%) of
     then-current candidates failed this check, and the failures were
     exactly the class of word the user flagged (form, one, common, due,
@@ -189,6 +187,8 @@ def parse_entry(headword: str, raw_text: str) -> dict:
     # re.match anchors on the stray comma and finds zero POS tokens even
     # though "adv." is right there, which was silently zeroing out POS
     # extraction on a lot of entries.
+    # A homograph superscript comes first when there is one ("branks 1 (...)").
+    body = re.sub(r"^\s*\d{1,2}(?=[\s,(.])", "", body.strip())
     body = re.sub(r"^\s*\([^)]{0,40}\)", "", body.strip())
     body = body.lstrip(" ,.;:")
 

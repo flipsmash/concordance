@@ -252,7 +252,7 @@ def test_compute_concordance_match_all_four_states_and_recheck_policy():
 
 @pytest.mark.skipif(not os.environ.get("CONCORDANCE_TEST_DB_URL"), reason="needs CONCORDANCE_TEST_DB_URL")
 def test_prune_out_of_order_survives_appended_second_pass():
-    """Regression (2026-09-24): --add-missing appends a second A->Z run of rows
+    """Regression (2026-09-24): a rescan appends a second A->Z run of rows
     after a volume's first; an id-ordered check deleted 14k real entries."""
     from concordance import db as cdb
     from concordance.oed import db as oed_db
@@ -285,6 +285,163 @@ def test_prune_out_of_order_survives_appended_second_pass():
         cur.execute(f"SELECT headword FROM {schema}.entry ORDER BY id")
         left = [r[0] for r in cur.fetchall()]
     assert "aardvark" in left and "zebra" not in left
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+
+
+def _span(text, x=20.0, y=100.0):
+    return {"text": text, "bbox": [x, y, x + 30, y + 8], "size": 8.0}
+
+
+def _row(text):
+    return {"spans": [_span(t, 20.0 + i * 40) for i, t in enumerate(text.split())], "yc": 100.0, "n": 1}
+
+
+def _entry(headword, row_index, raw_text, *, pointer=False, target=None, also=(), text=None):
+    return {"headword": headword, "text": text or headword, "row_index": row_index, "raw_text": raw_text,
+            "pointer": pointer, "pointer_target": target, "also": list(also), "obsolete": False,
+            "bbox": [20.0, 100.0, 50.0, 108.0]}
+
+
+@pg
+def test_rescan_reconciles_a_page_in_place():
+    """Stored rows keep their ids and pronunciation work. Swallowed text goes
+    to the new entry it belongs to, a pointer loses its definitions, and a
+    row the detector doesn't confirm is reported but left alone."""
+    from concordance import db as cdb
+    from concordance.oed import db as oed_db
+    from concordance.oed import extract
+    from concordance.oed.config import OedConfig
+    from concordance.oed.pipeline import new_rescan_stats, reconcile_page
+    schema = "cc_test_oed_rescan"
+    conn = cdb.connect(os.environ["CONCORDANCE_TEST_DB_URL"])
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    oed_db.apply_schema(conn, schema)
+    cfg = OedConfig(schema=schema)
+    vid = oed_db.upsert_volume(conn, file_name="t.pdf", file_hash_="h", volume_label="t", page_count=1, schema=schema)
+
+    rows = [_row("fsleng, v. Obs. To sling."), _row("slenk, sb. A side-blow."), _row("sleuce, obs. form of sluice."),
+            _row("sleugh plain body text")]
+    swallowed = " ".join(extract.row_text(r) for r in rows[:2])
+
+    def add(headword, raw_text, pass1=None):
+        entry_id = oed_db.insert_entry(conn, volume_id=vid, headword=headword, homograph_number=None,
+                                       part_of_speech=None, etymology=None, entry_type="main", parent_entry_id=None,
+                                       page_number=0, raw_text=raw_text, schema=schema)
+        oed_db.insert_definitions(conn, entry_id, [{"sense_label": None, "definition_text": raw_text}], schema=schema)
+        with conn.cursor() as cur:
+            cur.execute(f"UPDATE {schema}.entry SET pronunciation_pass1 = %s, lemma_computed_at = now() WHERE id = %s",
+                        (pass1, entry_id))
+        return entry_id
+
+    sleng = add("fsleng", swallowed, pass1="sl\u025b\u014b")
+    sleuce = add("sleuce", extract.row_text(rows[2]))
+    noise = add("sleugh", extract.row_text(rows[3]))
+    conn.commit()
+
+    def stored():
+        with conn.cursor() as cur:
+            cur.execute(f"""select id, headword, raw_text, entry_type, part_of_speech, pronunciation_pass1
+                            from {schema}.entry order by id""")
+            return [dict(zip(("id", "headword", "raw_text", "entry_type", "part_of_speech", "pronunciation_pass1"), r))
+                    for r in cur.fetchall()]
+
+    entries = [_entry("sleng", 0, extract.row_text(rows[0]), text="fsleng,"),
+               _entry("slenk", 1, extract.row_text(rows[1]), text="slenk,"),
+               _entry("sleuce", 2, extract.row_text(rows[2]), text="sleuce,", pointer=True, target="sluice",
+                      also=["sleuse"])]
+
+    before = stored()
+    dry = new_rescan_stats()
+    reconcile_page(None, vid, 0, before, rows, entries, cfg, dry)
+    assert (dry["matched"], dry["added"]) == (2, 2) and stored() == before    # a dry run writes nothing
+
+    stats = new_rescan_stats()
+    reconcile_page(conn, vid, 0, before, rows, entries, cfg, stats)
+    conn.commit()
+    assert (stats["matched"], stats["added"], stats["added_pointers"]) == (2, 2, 1)
+    assert stats["became_pointers"] == 1 and stats["renamed"] == 1
+    assert [u["id"] for u in stats["unconfirmed"]] == [noise]
+
+    after = {r["id"]: r for r in stored()}
+    assert after[sleng]["headword"] == "sleng" and after[sleng]["pronunciation_pass1"] == "sl\u025b\u014b"
+    assert after[sleng]["raw_text"] == extract.row_text(rows[0])
+    assert after[sleuce]["entry_type"] == "pointer"
+    assert after[noise]["raw_text"] == extract.row_text(rows[3])
+    by_word = {r["headword"]: r for r in after.values()}
+    assert by_word["slenk"]["raw_text"] == extract.row_text(rows[1])
+    assert by_word["sleuse"]["entry_type"] == "pointer"
+    with conn.cursor() as cur:
+        cur.execute(f"select e.headword, count(d.id) from {schema}.entry e left join {schema}.definition d "
+                    f"on d.entry_id = e.id group by 1")
+        defs = dict(cur.fetchall())
+        cur.execute(f"select pointer_target, pronunciation_needs_review from {schema}.entry where headword = 'sleuse'")
+        assert cur.fetchone() == ("sluice", False)
+        cur.execute(f"select lemma_computed_at from {schema}.entry where id = %s", (sleng,))
+        assert cur.fetchone()[0] is None                    # renamed, so re-checked
+    assert defs["sleuce"] == 0 and defs["sleuse"] == 0 and defs["slenk"] >= 1
+
+    # idempotent: a second pass finds everything stored and changes nothing
+    again = new_rescan_stats()
+    snapshot = stored()
+    reconcile_page(conn, vid, 0, snapshot, rows, entries, cfg, again)
+    conn.commit()
+    assert (again["added"], again["resliced"], again["renamed"]) == (0, 0, 0)
+    assert stored() == snapshot
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+
+
+@pg
+def test_prune_is_not_fooled_by_id_order_on_a_letter_boundary_page():
+    from concordance import db as cdb
+    from concordance.oed import db as oed_db
+    from concordance.oed.config import OedConfig
+    from concordance.oed.pipeline import _prune_out_of_order
+    schema = "cc_test_oed_prune_boundary"
+    conn = cdb.connect(os.environ["CONCORDANCE_TEST_DB_URL"])
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    oed_db.apply_schema(conn, schema)
+    vid = oed_db.upsert_volume(conn, file_name="t.pdf", file_hash_="h", volume_label="t", page_count=3, schema=schema)
+    # page 1 holds the last a- and the first b- words; the new a- row has the later id
+    for hw, page, det in [("apple", 0, "v1"), ("azure", 1, "v1"), ("baa", 1, "v1"), ("bear", 2, "v1"), ("azym", 1, "v3")]:
+        oed_db.insert_entry(conn, volume_id=vid, headword=hw, homograph_number=None, part_of_speech=None,
+                            etymology=None, entry_type="main", parent_entry_id=None, page_number=page,
+                            raw_text=hw, schema=schema, detector=det)
+    conn.commit()
+    assert _prune_out_of_order(conn, vid, OedConfig(schema=schema), only_detector="v3") == 0
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+
+
+@pg
+def test_apply_schema_upgrades_an_older_entry_type_constraint():
+    from concordance import db as cdb
+    from concordance.oed import db as oed_db
+    schema = "cc_test_oed_constraint"
+    conn = cdb.connect(os.environ["CONCORDANCE_TEST_DB_URL"])
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    oed_db.apply_schema(conn, schema)
+    with conn.cursor() as cur:
+        cur.execute(f"ALTER TABLE {schema}.entry DROP CONSTRAINT entry_entry_type_check")
+        cur.execute(f"ALTER TABLE {schema}.entry ADD CONSTRAINT entry_entry_type_check "
+                    f"CHECK (entry_type IN ('main', 'run_on', 'compound', 'variant_form'))")
+    conn.commit()
+    oed_db.apply_schema(conn, schema)
+    vid = oed_db.upsert_volume(conn, file_name="t.pdf", file_hash_="h", volume_label="t", page_count=1, schema=schema)
+    oed_db.insert_entry(conn, volume_id=vid, headword="greevance", homograph_number=None, part_of_speech=None,
+                        etymology=None, entry_type="pointer", parent_entry_id=None, page_number=0,
+                        raw_text="greevance, obs. form of grievance.", schema=schema, pointer_target="grievance")
+    conn.commit()
     with conn.cursor() as cur:
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()

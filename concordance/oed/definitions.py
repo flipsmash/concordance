@@ -191,16 +191,36 @@ def _pick_definition(parts: list[str]) -> str:
 
 def definition_lexicon(conn, headwords: set[str], schema: str = DEFAULT_SCHEMA) -> dict[str, list[OedSense]]:
     """headword_norm -> every distinct lemma=true oed.entry (homographs get
-    one OedSense each), definition already cleaned + sense-joined. Degrades
-    to {} if the oed schema/entry table doesn't exist yet -- same to_regclass
-    pattern oed.db.pronunciation_lexicon uses, since this is now reached from
-    the regular ingest/backfill cascade, not just an OED-specific command."""
+    one OedSense each), definition already cleaned + sense-joined. A headword
+    with no definition of its own that OED points elsewhere ("greevance, obs.
+    form of grievance") gets its target's senses, one hop only. Degrades to {}
+    if the oed schema/entry table doesn't exist yet -- same to_regclass pattern
+    oed.db.pronunciation_lexicon uses, since this is now reached from the
+    regular ingest/backfill cascade, not just an OED-specific command."""
     if not headwords:
         return {}
     with conn.cursor() as cur:
         cur.execute("SELECT to_regclass(%s)", (f"{schema}.entry",))
         if cur.fetchone()[0] is None:
             return {}
+    lexicon = _own_senses(conn, headwords, schema)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT headword_norm, pointer_target FROM {schema}.entry
+                WHERE entry_type = 'pointer' AND pointer_target IS NOT NULL AND headword_norm = ANY(%s)""",
+            (list(set(headwords) - set(lexicon)),),
+        )
+        pointers = cur.fetchall()
+    if pointers:
+        targets = _own_senses(conn, {target for _, target in pointers}, schema)
+        for headword_norm, target in pointers:
+            if target in targets:
+                lexicon.setdefault(headword_norm, []).extend(targets[target])
+    return lexicon
+
+
+def _own_senses(conn, headwords: set[str], schema: str) -> dict[str, list[OedSense]]:
+    with conn.cursor() as cur:
         cur.execute(
             f"""SELECT e.id, e.headword_norm, e.part_of_speech, e.etymology, d.definition_text
                 FROM {schema}.entry e

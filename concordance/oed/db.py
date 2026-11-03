@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS {s}.entry (
     part_of_speech     text,
     etymology          text,
     entry_type         text NOT NULL DEFAULT 'main'
-                       CHECK (entry_type IN ('main', 'run_on', 'compound', 'variant_form')),
+                       CHECK (entry_type IN ('main', 'run_on', 'compound', 'variant_form', 'pointer')),
     parent_entry_id    integer REFERENCES {s}.entry(id) ON DELETE SET NULL,
     page_number        integer NOT NULL,
     raw_text           text NOT NULL,
@@ -121,12 +121,12 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> None
         cur.execute(f"ALTER TABLE {schema}.entry ADD COLUMN IF NOT EXISTS lemma boolean NOT NULL DEFAULT false")
         cur.execute(f"ALTER TABLE {schema}.entry ADD COLUMN IF NOT EXISTS lemma_computed_at timestamptz")
         cur.execute(f"CREATE INDEX IF NOT EXISTS entry_lemma_idx ON {schema}.entry (lemma) WHERE lemma")
-        # OED's own obsolete marker: a dagger before the headword. Read by the
-        # v2 detector (`oed-ingest --add-missing`); NULL = not determined
-        # (v1-only entries the v2 pass didn't re-find).
+        # OED's own obsolete marker: a dagger before the headword. NULL = not
+        # determined (older entries the detector didn't re-find).
         cur.execute(f"ALTER TABLE {schema}.entry ADD COLUMN IF NOT EXISTS is_obsolete boolean")
-        # Which detector wrote the entry ('v1' = the original size+pattern
-        # pass, 'v2' = add-missing) -- lets a bad v2 run be undone precisely.
+        # Which detector first wrote the entry ('v1' size+pattern, 'v2'
+        # add-missing, 'v3' bold+leading) -- lets a bad run's inserts be undone
+        # precisely.
         cur.execute(f"ALTER TABLE {schema}.entry ADD COLUMN IF NOT EXISTS detector text NOT NULL DEFAULT 'v1'")
         # Headword span position on its page (x0, y0, x1, y1) -- the anchor
         # pronunciation.crop_rect needs, kept so `oed-pronounce` can
@@ -134,6 +134,22 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> None
         cur.execute(f"ALTER TABLE {schema}.entry ADD COLUMN IF NOT EXISTS headword_bbox double precision[]")
         cur.execute(f"CREATE INDEX IF NOT EXISTS entry_lemma_uncomputed_idx ON {schema}.entry (id) "
                     f"WHERE lemma_computed_at IS NULL")
+
+        # A one-line cross-reference ("greevance, obs. form of grievance"): a
+        # real term with no definition of its own, entry_type 'pointer', naming
+        # the word to look up instead (NULL for a relative "see next").
+        cur.execute(f"ALTER TABLE {schema}.entry ADD COLUMN IF NOT EXISTS pointer_target text")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS entry_pointer_idx ON {schema}.entry (headword_norm) "
+                    f"WHERE entry_type = 'pointer'")
+        # Tables created before 'pointer' existed. Checked first: re-adding the
+        # constraint scans and locks the table on every oed command.
+        cur.execute("SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                    "WHERE conrelid = %s::regclass AND conname = 'entry_entry_type_check'", (f"{schema}.entry",))
+        row = cur.fetchone()
+        if row and "pointer" not in row[0]:
+            cur.execute(f"ALTER TABLE {schema}.entry DROP CONSTRAINT entry_entry_type_check")
+            cur.execute(f"ALTER TABLE {schema}.entry ADD CONSTRAINT entry_entry_type_check CHECK "
+                        f"(entry_type IN ('main', 'run_on', 'compound', 'variant_form', 'pointer'))")
 
         # Cross-reference against concordance.word (both active and pruned
         # rows) / concordance.rejected_word (via the precomputed
@@ -270,18 +286,20 @@ def insert_entry(conn: psycopg.Connection, *, volume_id: int, headword: str,
                   etymology: str | None, entry_type: str, parent_entry_id: int | None,
                   page_number: int, raw_text: str, schema: str = DEFAULT_SCHEMA,
                   is_obsolete: bool | None = None, detector: str = "v1",
-                  headword_bbox: list[float] | None = None) -> int:
+                  headword_bbox: list[float] | None = None, pointer_target: str | None = None) -> int:
     with conn.cursor() as cur:
         cur.execute(
             f"""
             INSERT INTO {schema}.entry
                 (volume_id, headword, homograph_number, part_of_speech, etymology,
-                 entry_type, parent_entry_id, page_number, raw_text, is_obsolete, detector, headword_bbox)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 entry_type, parent_entry_id, page_number, raw_text, is_obsolete, detector, headword_bbox,
+                 pointer_target, pronunciation_needs_review)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (volume_id, headword, homograph_number, part_of_speech, etymology,
-             entry_type, parent_entry_id, page_number, raw_text, is_obsolete, detector, headword_bbox),
+             entry_type, parent_entry_id, page_number, raw_text, is_obsolete, detector, headword_bbox,
+             pointer_target, entry_type != "pointer"),
         )
         return cur.fetchone()[0]
 

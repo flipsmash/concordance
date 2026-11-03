@@ -7,8 +7,10 @@ on these scans, confirmed against real entries during the pilot)."""
 from __future__ import annotations
 
 import collections
+import statistics
 
 import fitz
+import numpy as np
 
 
 def flatten_spans(page: fitz.Page) -> list[dict]:
@@ -147,7 +149,7 @@ def page_columns(spans: list[dict], page_width: float) -> tuple[list[list[dict]]
     # Keep col_rows/margins aligned by index: an empty column (no spans
     # landed in that gutter-bounded x-range) has no margin, and dropping it
     # from `margins` alone while keeping it in `col_rows` would silently
-    # misalign every column after it under zip() in find_headwords_from_columns.
+    # misalign every column after it under zip() in segment.find_headwords.
     col_rows, margins = [], []
     for rows in all_col_rows:
         m = column_margin(rows)
@@ -159,3 +161,62 @@ def page_columns(spans: list[dict], page_width: float) -> tuple[list[list[dict]]
 
 def row_text(row: dict) -> str:
     return " ".join(s["text"] for s in sorted(row["spans"], key=lambda s: s["bbox"][0]))
+
+
+# --- bold, read from the scan -------------------------------------------------
+#
+# The text layer reports every span as the same font and flags, so it can't
+# say what's bold -- but the pixels can. A word's stroke width (its mean run of
+# dark pixels, left to right) divided by the page's median is measured at 1.5+
+# for headwords and under ~1.3 for ordinary flush-left text.
+
+INK_DARK_LEVEL = 110        # 0-255 grey, on a flattened page, below which a pixel counts as ink
+BACKGROUND_BLOCK_PT = 12    # cell for estimating the paper: wider than a stroke, narrower than the shadow
+BACKGROUND_PERCENTILE = 95
+BACKGROUND_FLOOR = 40       # never scale up what is black in itself (a page edge)
+
+
+def flatten_background(gray: np.ndarray, block: int) -> np.ndarray:
+    """`gray` rescaled so the local paper is white. Scans differ in exposure and
+    darken towards the spine, so one fixed ink level can sit at the ink's own
+    grey on one volume and read paper as ink in a shadow on another. The paper
+    in each `block`-square cell is that cell's bright end."""
+    h, w = gray.shape
+    rows, cols = max(h // block, 1), max(w // block, 1)
+    h -= h % rows                       # drop the remainder so the cells are equal; it reads as the last cell
+    w -= w % cols
+    cells = gray[:h, :w].reshape(rows, h // rows, cols, w // cols)
+    paper = np.percentile(cells, BACKGROUND_PERCENTILE, axis=(1, 3))
+    paper = np.maximum(paper, BACKGROUND_FLOOR)
+    row_of = np.minimum(np.arange(gray.shape[0]) // (h // rows), rows - 1)
+    col_of = np.minimum(np.arange(gray.shape[1]) // (w // cols), cols - 1)
+    return np.clip(gray / paper[np.ix_(row_of, col_of)] * 255, 0, 255).astype(np.uint8)
+
+
+def page_gray(page: fitz.Page, zoom: float) -> np.ndarray:
+    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), colorspace=fitz.csGRAY)
+    gray = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w)
+    return flatten_background(gray, int(BACKGROUND_BLOCK_PT * zoom))
+
+
+def stroke_width(gray: np.ndarray, bbox, zoom: float) -> float | None:
+    """Mean horizontal dark-run length (px) inside `bbox` (PDF points), or
+    None if the box holds no ink."""
+    x0, y0, x1, y1 = (int(v * zoom) for v in bbox)
+    crop = gray[max(y0, 0):y1, max(x0, 0):x1]
+    if crop.size == 0:
+        return None
+    dark = crop < INK_DARK_LEVEL
+    runs = (np.diff(dark.astype(np.int8), axis=1) == 1).sum()
+    return float(dark.sum() / runs) if runs else None
+
+
+def median_stroke(gray: np.ndarray, spans: list[dict], zoom: float) -> float | None:
+    """The page's typical stroke width, from words long enough to measure."""
+    widths = [stroke_width(gray, s["bbox"], zoom) for s in spans if len(s["text"].strip()) >= 4]
+    widths = [w for w in widths if w]
+    return statistics.median(widths) if widths else None
+
+
+def row_top(row: dict) -> float:
+    return min(s["bbox"][1] for s in row["spans"])

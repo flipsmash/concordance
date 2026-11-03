@@ -364,9 +364,19 @@ above, with its own admin-only browsing UI.
 concordance oed-ingest                                    # every .pdf in dictionaries/
 concordance oed-ingest dictionaries/09.pdf                # one volume
 concordance oed-ingest --page-limit 20 dictionaries/09.pdf   # smoke-test
+concordance oed-ingest --rescan --jobs 10                  # re-detect ingested volumes (--dry-run to preview)
+concordance oed-pronounce                                  # GPU: transcribe entries that have no pronunciation yet
 concordance oed-lemma                                      # flag lemma vs. inflected-form entries
 concordance oed-concordance-match                          # cross-reference against concordance's own vocabulary
 ```
+
+Headwords are found from the page itself: a flush-left row whose first word is
+bold, measured from the scan's stroke width, with extra leading above it. The
+OCR text only supplies the spelling, checked against the page's running heads.
+One-line cross-references ("greevance, obs. form of grievance") are stored as
+`entry_type = 'pointer'` with a `pointer_target`; they have no definitions of
+their own, so definition lookup follows them one hop. `--rescan` reconciles an
+already-ingested volume in place, keeping entry ids and pronunciation work.
 
 Idempotent and resumable by file hash. Pronunciation is read from a cropped
 page image by a local vision-LLM, never trusted from OCR text — falls back

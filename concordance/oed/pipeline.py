@@ -1,19 +1,19 @@
-"""Per-volume orchestration: hash-check -> extract -> segment -> stopword
-filter -> definition-entry filter -> parse -> pronunciation (composite,
-double-pass) -> DB write.
+"""Per-volume orchestration. `segment_page` is the one place a page turns into
+entries; `ingest_volume` writes them for a new volume (plus pronunciation), and
+`rescan_volume` reconciles them with what's already stored.
 
 Known gaps (documented rather than silently glossed over):
   * Entries are bounded to a single page. An entry whose body text continues
-    onto the next page gets truncated — most OED entries are short enough
-    that this is rare, but it's real and unhandled.
-  * homograph_number (lead¹/lead²) and entry_type (run_on/compound
-    detection) are not populated — see segment.py's docstring for why.
+    onto the next page gets truncated.
+  * homograph_number (lead¹/lead²) and run-on sub-entries are not populated --
+    see segment.py's docstring for why.
   * Sense/quotation parsing (parse.py) is a first-pass regex splitter, not
     calibrated against broad output yet.
 """
 
 from __future__ import annotations
 
+import collections
 from pathlib import Path
 
 import fitz
@@ -23,6 +23,8 @@ from rich.console import Console
 from . import db as oed_db
 from . import extract, parse, pronunciation, segment, sequence
 from .config import OedConfig
+
+_RESCAN_COMMIT_EVERY = 25           # pages
 
 
 def _volume_label(path: Path) -> str:
@@ -65,55 +67,13 @@ def ingest_volume(path: Path, conn: psycopg.Connection, cfg: OedConfig,
     try:
         for page_num in range(start_page, end_page):
             page = doc[page_num]
-            spans = extract.flatten_spans(page)
-            if not spans:
-                continue
-            col_rows, margins = extract.page_columns(spans, page.rect.width)
-            ordered = [row for rows in col_rows for row in rows]
-            hits = segment.find_headwords_from_columns(col_rows, margins, page_num, cfg)
-            if not hits:
-                _commit_page(conn, volume_id, page_num, cfg)
-                continue
-
-            hit_row_idx = _match_rows_to_hits(ordered, hits)
-            # hits is Y-order (top-to-bottom across both columns); `ordered`
-            # is column-major (left column fully, then right). Slicing
-            # ordered[start:end] between "consecutive" hits only makes sense
-            # if the hits themselves are walked in ordered's own order — a
-            # real bug found in the smoke test: a Y-order "next hit" from
-            # the opposite column produced a boundary index that didn't
-            # actually bound the same column, pulling unrelated entries'
-            # text into raw_text. Re-sort by resolved row index (dropping
-            # unmatched hits) before slicing.
-            resolved = sorted(
-                ((hit, idx) for hit, idx in zip(hits, hit_row_idx) if idx is not None),
-                key=lambda pair: pair[1],
-            )
-
-            for i, (hit, start_idx) in enumerate(resolved):
-                end_idx = resolved[i + 1][1] if i + 1 < len(resolved) else len(ordered)
-                raw_text = " ".join(extract.row_text(r) for r in ordered[start_idx:end_idx])
-
-                # Reject false-positive headword detections here, before any
-                # DB write: an ordinary body-text word caught by the
-                # size+margin heuristic (see segment.py) never has a
-                # pronunciation bracket or POS abbreviation immediately
-                # after it the way a real entry does. See
-                # parse.looks_like_definition_entry's docstring.
-                if not parse.looks_like_definition_entry(hit["text"], raw_text):
-                    continue
-
-                parsed = parse.parse_entry(hit["text"], raw_text)
-                entry_id = oed_db.insert_entry(
-                    conn, volume_id=volume_id, headword=hit["text"], homograph_number=None,
-                    part_of_speech=parsed["part_of_speech"], etymology=parsed["etymology"],
-                    entry_type="main", parent_entry_id=None, page_number=page_num,
-                    raw_text=raw_text, schema=cfg.schema,
-                )
-                if parsed["senses"]:
-                    oed_db.insert_definitions(conn, entry_id, parsed["senses"], schema=cfg.schema)
-                entries_written += 1
-                pending_crops.append((entry_id, hit["text"], page, hit["bbox"]))
+            _ordered, entries = segment_page(page, cfg)
+            for e in entries:
+                for headword in (e["headword"], *(e["also"] if e["pointer"] else ())):
+                    entry_id = _insert_entry(conn, volume_id, page_num, e, headword, cfg)
+                    entries_written += 1
+                    if not e["pointer"]:    # a pointer has no pronunciation of its own
+                        pending_crops.append((entry_id, headword, page, e["bbox"]))
 
             # `while`, not `if`: a single dense page can produce more than
             # one batch's worth of hits on its own (real pages measured
@@ -125,7 +85,7 @@ def ingest_volume(path: Path, conn: psycopg.Connection, cfg: OedConfig,
                 pending_crops = pending_crops[cfg.composite_batch_size:]
 
             _commit_page(conn, volume_id, page_num, cfg)
-            if entries_written and entries_written % 50 == 0:
+            if page_num % 50 == 0:
                 console.print(f"[dim]{path.name}: page {page_num}/{end_page}, {entries_written} entries[/dim]")
 
         # Trailing partial batch: chunked the same way, not passed whole —
@@ -165,21 +125,52 @@ def _commit_page(conn: psycopg.Connection, volume_id: int, page_num: int, cfg: O
                               last_page_committed=page_num + 1, schema=cfg.schema)
 
 
-def _match_rows_to_hits(ordered: list[dict], hits: list[dict]) -> list[int | None]:
-    """Index into `ordered` for each hit's row (matched by bbox), so entry
-    text can be sliced from that index to the next hit's index. A single
-    pass building a bbox->row-index lookup, rather than scanning every row
-    per hit — matters once a page has thousands of spans."""
-    lookup: dict[tuple[int, int], int] = {}
-    for i, row in enumerate(ordered):
-        for s in row["spans"]:
-            key = (round(s["bbox"][0]), round(s["bbox"][1]))
-            lookup.setdefault(key, i)
-    result: list[int | None] = []
-    for hit in hits:
-        key = (round(hit["bbox"][0]), round(hit["bbox"][1]))
-        result.append(lookup.get(key))
-    return result
+def segment_page(page: fitz.Page, cfg: OedConfig) -> tuple[list[dict], list[dict]]:
+    """A page's rows in reading order and its entries: segment.find_headwords'
+    hits, in that same order, each with `row_index`, `raw_text` (from its row
+    up to the next entry's), and `pointer`/`pointer_target`."""
+    spans = extract.flatten_spans(page)
+    if not spans:
+        return [], []
+    col_rows, margins = extract.page_columns(spans, page.rect.width)
+    gray = extract.page_gray(page, cfg.ink_zoom)
+    hits = segment.find_headwords(col_rows, margins, page.number, cfg, page.rect.height, gray)
+    top = segment.body_top([s for rows in col_rows for r in rows for s in r["spans"]], page.rect.height)
+    ordered = [row for rows in col_rows for row in rows if extract.row_top(row) > top]
+    index = {id(row): i for i, row in enumerate(ordered)}
+    hits.sort(key=lambda h: index[h["row_id"]])
+    entries = []
+    for i, hit in enumerate(hits):
+        start = index[hit["row_id"]]
+        end = index[hits[i + 1]["row_id"]] if i + 1 < len(hits) else len(ordered)
+        raw_text = " ".join(extract.row_text(r) for r in ordered[start:end])
+        rest = raw_text[len(hit["text"]):] if raw_text.startswith(hit["text"]) else raw_text
+        pointer, target = segment.classify_pointer(rest)
+        entries.append({**hit, "row_index": start, "raw_text": raw_text, "pointer": pointer,
+                        "pointer_target": target})
+    return ordered, entries
+
+
+def _insert_entry(conn: psycopg.Connection, volume_id: int, page_num: int, e: dict, headword: str,
+                  cfg: OedConfig) -> int:
+    parsed = _parse(e)
+    entry_id = oed_db.insert_entry(
+        conn, volume_id=volume_id, headword=headword, homograph_number=None,
+        part_of_speech=parsed["part_of_speech"], etymology=parsed["etymology"],
+        entry_type="pointer" if e["pointer"] else "main", parent_entry_id=None, page_number=page_num,
+        raw_text=e["raw_text"], schema=cfg.schema, is_obsolete=e["obsolete"], detector="v3",
+        headword_bbox=e["bbox"], pointer_target=e["pointer_target"],
+    )
+    if parsed["senses"]:
+        oed_db.insert_definitions(conn, entry_id, parsed["senses"], schema=cfg.schema)
+    return entry_id
+
+
+def _parse(e: dict) -> dict:
+    parsed = parse.parse_entry(e["text"], e["raw_text"])
+    if e["pointer"]:
+        parsed["senses"] = []           # the pointer's text is not a definition of the word
+    return parsed
 
 
 def _flush_pronunciation(conn: psycopg.Connection, batch: list[tuple[int, fitz.Page, list[float]]],
@@ -237,110 +228,172 @@ def _prune_out_of_order(conn: psycopg.Connection, volume_id: int, cfg: OedConfig
     """sequence.py's whole-volume alphabetical-order cleanup (see
     ingest_volume) -- deletes entries out of first-letter order.
 
-    Ordered by (page_number, id), NOT id alone: a first ingest writes in page
-    order so the two agree, but `--add-missing` APPENDS a second A->Z run of
-    rows after the first, and an id-ordered check read that as massively out
-    of order -- on 2026-09-24 it deleted 14,244 original entries (and ~6k new
-    ones) across the multi-letter volumes before this was caught; restored
-    from the 04:00 backup. Within one page the relative order of old and new
-    rows doesn't matter at first-letter granularity."""
+    Ordered by page, then first letter within a page, NOT by id: a rescan
+    APPENDS new rows after the old ones, and an id-ordered check read that as
+    massively out of order -- on 2026-09-24 it deleted 14,244 original entries
+    (and ~6k new ones) across the multi-letter volumes before this was caught;
+    restored from the 04:00 backup. Id order within a page is meaningless too,
+    which matters on the page where one letter ends and the next begins."""
     with conn.cursor() as cur:
-        cur.execute(f"select id, headword, detector from {cfg.schema}.entry where volume_id = %s "
-                    f"order by page_number, id", (volume_id,))
+        cur.execute(f"select id, headword, detector, page_number from {cfg.schema}.entry where volume_id = %s",
+                    (volume_id,))
         rows = cur.fetchall()
-        out_of_order = sequence.find_out_of_order_ids([(i, h) for i, h, _ in rows])
+        rows.sort(key=lambda r: (r[3], sequence._first_letter(r[1]), r[0]))
+        out_of_order = sequence.find_out_of_order_ids([(r[0], r[1]) for r in rows])
         if only_detector:
             # The check sees the whole volume but may only delete this pass's
             # own rows: LNDS ties are broken arbitrarily, and a noisy neighbour
             # ("fthro") once cost a real original entry ("throat").
-            det = {i: d for i, _, d in rows}
+            det = {r[0]: r[2] for r in rows}
             out_of_order = {i for i in out_of_order if det[i] == only_detector}
         if out_of_order:
             cur.execute(f"delete from {cfg.schema}.entry where id = any(%s)", (list(out_of_order),))
     return len(out_of_order)
 
 
-def add_missing_entries(path: Path, conn: psycopg.Connection, cfg: OedConfig, console: Console, *,
-                        page_limit: int | None = None, dry_run: bool = False) -> dict:
-    """`oed-ingest --add-missing`: re-scan an already-ingested volume with the
-    v2 detector (segment.find_headwords_v2) and insert only the entries v1
-    missed. Hits are matched to stored entries per page by headword_key, as a
-    multiset (a page can hold several same-spelled homographs: "slent" x4),
-    so re-running never duplicates. Every v2 hit that matches a stored entry
-    also records OED's dagger as is_obsolete. No pronunciation work here --
-    new entries are left for `oed-pronounce` (the GPU pass). Entries are
-    ordered by id within a volume for sequence.py, so this appends then
-    re-runs the out-of-order cleanup over the whole volume."""
-    from collections import Counter
+def _locate(raw_text: str, row_texts: list[str]) -> int | None:
+    """The row a stored entry begins on: its text started with that row's."""
+    best = None
+    for i, text in enumerate(row_texts):
+        if raw_text.startswith(text) and (best is None or len(text) > len(row_texts[best])):
+            best = i
+    return best
+
+
+def _update_entry(conn: psycopg.Connection, st: dict, e: dict, headword: str, cfg: OedConfig, stats: dict) -> None:
+    """Bring one stored entry in line with its re-detected page position,
+    leaving its id and pronunciation work alone. Its definitions are rebuilt
+    only if its text or type changed; a changed headword or part of speech
+    sends it back through the lemma and concordance checks."""
+    s = cfg.schema
+    entry_type = "pointer" if e["pointer"] else st["entry_type"]
+    parsed = _parse(e)
+    text_changed = st["raw_text"] != e["raw_text"] or st["entry_type"] != entry_type
+    renamed = st["headword"] != headword
+    recheck = renamed or st["part_of_speech"] != parsed["part_of_speech"]
+    stats["resliced"] += st["raw_text"] != e["raw_text"]
+    stats["renamed"] += renamed
+    stats["became_pointers"] += entry_type == "pointer" and st["entry_type"] != "pointer"
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""UPDATE {s}.entry
+                SET headword = %s, raw_text = %s, part_of_speech = %s, etymology = %s, entry_type = %s,
+                    pointer_target = %s, is_obsolete = %s, headword_bbox = %s,
+                    lemma_computed_at = CASE WHEN %s THEN NULL ELSE lemma_computed_at END,
+                    concordance_match_checked_at = CASE WHEN %s THEN NULL ELSE concordance_match_checked_at END
+                WHERE id = %s""",
+            (headword, e["raw_text"], parsed["part_of_speech"], parsed["etymology"], entry_type,
+             e["pointer_target"], e["obsolete"], e["bbox"], recheck, recheck, st["id"]))
+        if text_changed:
+            cur.execute(f"DELETE FROM {s}.definition WHERE entry_id = %s", (st["id"],))
+    if text_changed and parsed["senses"]:
+        oed_db.insert_definitions(conn, st["id"], parsed["senses"], schema=s)
+
+
+def new_rescan_stats(volume_id: int | None = None, pages: int = 0) -> dict:
+    return {"volume_id": volume_id, "pages": pages, "pruned": 0, "duplicates": [], "unconfirmed": [], "unplaced": [],
+            **dict.fromkeys(("detected", "pointers", "matched", "added", "added_pointers",
+                             "resliced", "renamed", "became_pointers"), 0)}
+
+
+def reconcile_page(conn: psycopg.Connection | None, volume_id: int, page_num: int, stored: list[dict],
+                   ordered: list[dict], entries: list[dict], cfg: OedConfig, stats: dict) -> None:
+    """Match one page's detected entries to its stored rows, updating matches
+    in place and inserting the rest. A stored row belongs to the entry that
+    starts on the row its text starts on -- spelling can't decide that, since
+    fixing the spelling is part of the job ("fsleng" -> "sleng") -- with the
+    headword key as the fallback for a row whose text no longer locates. Stored
+    rows nothing matches are reported, not touched. conn=None is a dry run."""
+    row_texts = [extract.row_text(r) for r in ordered]
+    on_row: dict[int, list[dict]] = collections.defaultdict(list)
+    unplaced: list[dict] = []
+    for st in sorted(stored, key=lambda st: st["pronunciation_pass1"] is None):   # keep transcribed rows first
+        idx = _locate(st["raw_text"], row_texts)
+        (unplaced if idx is None else on_row[idx]).append(st)
+
+    def take(candidates: list[dict], key: str, any_key: bool = False) -> dict | None:
+        for st in candidates:
+            if any_key or segment.headword_key(st["headword"]) == key:
+                candidates.remove(st)
+                return st
+        return None
+
+    for e in entries:
+        here = on_row[e["row_index"]]
+        for i, headword in enumerate((e["headword"], *(e["also"] if e["pointer"] else ()))):
+            stats["detected"] += 1
+            stats["pointers"] += e["pointer"]
+            key = segment._key(headword)
+            st = take(here, key) or take(unplaced, key) or (take(here, key, any_key=True) if i == 0 else None)
+            if st:
+                stats["matched"] += 1
+                if conn:
+                    _update_entry(conn, st, e, headword, cfg, stats)
+            else:
+                stats["added"] += 1
+                stats["added_pointers"] += e["pointer"]
+                if conn:
+                    _insert_entry(conn, volume_id, page_num, e, headword, cfg)
+
+    claimed_rows = {e["row_index"] for e in entries}
+    for idx, rest in on_row.items():
+        for st in rest:
+            kind = "duplicates" if idx in claimed_rows else "unconfirmed"
+            stats[kind].append({"id": st["id"], "page": page_num, "headword": st["headword"],
+                                "row": row_texts[idx][:70]})
+    stats["unplaced"].extend({"id": st["id"], "page": page_num, "headword": st["headword"]} for st in unplaced)
+
+
+def rescan_volume(path: Path, conn: psycopg.Connection, cfg: OedConfig, *, page_limit: int | None = None,
+                  dry_run: bool = False) -> dict:
+    """`oed-ingest --rescan`: re-detect an ingested volume and reconcile it with
+    what's stored -- new entries inserted, existing ones re-sliced in place so
+    none keeps text that belongs to the entries after it, nothing re-transcribed.
+    Idempotent. New entries are left for `oed-pronounce`, the GPU pass."""
     existing = oed_db.get_volume(conn, oed_db.file_hash(path), cfg.schema)
     if not existing:
         raise RuntimeError(f"{path.name}: not ingested yet -- run plain `oed-ingest` first")
     volume_id = existing["id"]
     doc = fitz.open(path)
     end_page = min(len(doc), page_limit) if page_limit else len(doc)
-    stats = {"volume_id": volume_id, "pages": end_page, "candidates": 0, "matched": 0,
-             "added": 0, "obsolete_added": 0, "obsolete_marked": 0, "pruned": 0}
+    stats = new_rescan_stats(volume_id, end_page)
 
     with conn.cursor() as cur:
-        cur.execute(f"select id, page_number, headword from {cfg.schema}.entry where volume_id = %s",
-                    (volume_id,))
-        stored: dict[int, dict[str, list[int]]] = {}
-        for eid, page_num, headword in cur.fetchall():
-            stored.setdefault(page_num, {}).setdefault(segment.headword_key(headword), []).append(eid)
+        cur.execute(f"""select id, page_number, headword, raw_text, entry_type, part_of_speech, pronunciation_pass1
+                        from {cfg.schema}.entry where volume_id = %s""", (volume_id,))
+        stored: dict[int, list[dict]] = collections.defaultdict(list)
+        for row in cur.fetchall():
+            stored[row[1]].append({"id": row[0], "headword": row[2], "raw_text": row[3], "entry_type": row[4],
+                                   "part_of_speech": row[5], "pronunciation_pass1": row[6]})
 
     for page_num in range(end_page):
-        page = doc[page_num]
-        spans = extract.flatten_spans(page)
-        if not spans:
-            continue
-        col_rows, margins = extract.page_columns(spans, page.rect.width)
-        ordered = [row for rows in col_rows for row in rows]
-        hits = segment.find_headwords_v2(col_rows, margins, page_num, cfg, page.rect.height)
-        resolved = sorted(((h, i) for h, i in zip(hits, _match_rows_to_hits(ordered, hits)) if i is not None),
-                          key=lambda pair: pair[1])
-        on_page = {k: list(v) for k, v in stored.get(page_num, {}).items()}
-        for i, (hit, start_idx) in enumerate(resolved):
-            end_idx = resolved[i + 1][1] if i + 1 < len(resolved) else len(ordered)
-            raw_text = " ".join(extract.row_text(r) for r in ordered[start_idx:end_idx])
-            if not (parse.looks_like_definition_entry(hit["text"], raw_text) or hit["loose_ok"]):
-                continue
-            stats["candidates"] += 1
-            key = segment.headword_key(hit["headword"])
-            if on_page.get(key):
-                entry_id = on_page[key].pop(0)            # already stored by v1
-                stats["matched"] += 1
-                if hit["obsolete"] and not dry_run:
-                    with conn.cursor() as cur:
-                        cur.execute(f"update {cfg.schema}.entry set is_obsolete = true where id = %s", (entry_id,))
-                stats["obsolete_marked"] += hit["obsolete"]
-                continue
-            stats["added"] += 1
-            stats["obsolete_added"] += hit["obsolete"]
-            if dry_run:
-                continue
-            parsed = parse.parse_entry(hit["text"], raw_text)
-            entry_id = oed_db.insert_entry(
-                conn, volume_id=volume_id, headword=hit["headword"], homograph_number=None,
-                part_of_speech=parsed["part_of_speech"], etymology=parsed["etymology"],
-                entry_type="main", parent_entry_id=None, page_number=page_num, raw_text=raw_text,
-                schema=cfg.schema, is_obsolete=hit["obsolete"], detector="v2", headword_bbox=hit["bbox"],
-            )
-            if parsed["senses"]:
-                oed_db.insert_definitions(conn, entry_id, parsed["senses"], schema=cfg.schema)
-        if not dry_run and page_num % 50 == 0:
+        ordered, entries = segment_page(doc[page_num], cfg)
+        if entries:
+            reconcile_page(None if dry_run else conn, volume_id, page_num, stored.get(page_num, []),
+                           ordered, entries, cfg, stats)
+        else:
+            stats["unplaced"].extend({"id": st["id"], "page": page_num, "headword": st["headword"]}
+                                     for st in stored.get(page_num, []))
+        if not dry_run and page_num % _RESCAN_COMMIT_EVERY == 0:
             conn.commit()
     if not dry_run:
-        stats["pruned"] = _prune_out_of_order(conn, volume_id, cfg, only_detector="v2")
+        stats["pruned"] = _prune_out_of_order(conn, volume_id, cfg, only_detector="v3")
         conn.commit()
     return stats
 
 
+def rescan_job(path: Path, database_url: str, cfg: OedConfig, page_limit: int | None, dry_run: bool) -> dict:
+    """rescan_volume in a worker process, on its own connection."""
+    with psycopg.connect(database_url) as conn:
+        return rescan_volume(path, conn, cfg, page_limit=page_limit, dry_run=dry_run)
+
+
 def pronounce_missing(path: Path, conn: psycopg.Connection, cfg: OedConfig, console: Console,
                       transcriber: pronunciation.Transcriber, *, limit: int = 0) -> dict:
-    """`oed-pronounce`: the GPU half of --add-missing -- run the usual
-    double-pass pronunciation (_flush_pronunciation) for this volume's
-    entries that were never attempted and carry a stored headword_bbox (every
-    v2-added entry). Resumable: each written batch stops being "never
+    """`oed-pronounce`: the GPU half of `--rescan` -- run the usual double-pass
+    pronunciation (_flush_pronunciation) for this volume's entries that were
+    never attempted and carry a stored headword_bbox. Pointers have no
+    pronunciation to read. Resumable: each written batch stops being "never
     attempted", so an interrupted run picks up where it left off."""
     existing = oed_db.get_volume(conn, oed_db.file_hash(path), cfg.schema)
     if not existing:
@@ -348,7 +401,7 @@ def pronounce_missing(path: Path, conn: psycopg.Connection, cfg: OedConfig, cons
     with conn.cursor() as cur:
         cur.execute(
             f"""select id, headword, page_number, headword_bbox from {cfg.schema}.entry
-                where volume_id = %s and headword_bbox is not null
+                where volume_id = %s and headword_bbox is not null and entry_type <> 'pointer'
                   and pronunciation_raw is null and pronunciation_pass1 is null and pronunciation_pass2 is null
                 order by page_number, id""" + (f" limit {int(limit)}" if limit else ""),
             (existing["id"],))
