@@ -1081,9 +1081,45 @@ def _migration_0002_compound_verdict(conn: psycopg.Connection, s: str) -> None:
             judged_at  timestamptz NOT NULL DEFAULT now())""")
 
 
+def _migration_0003_corpus_map(conn: psycopg.Connection, s: str) -> None:
+    """corpus_map.py's full-corpus map: every book (entity 'book', key = its
+    id) and author (entity 'author', key = the name) placed in 2-D, with a
+    two-level cluster hierarchy. Each run replaces one entity's rows in a
+    single transaction, so readers see the old map until the new one is
+    whole. A book missing here was added after the last run."""
+    with conn.cursor() as cur:
+        cur.execute(f"""CREATE TABLE IF NOT EXISTS {s}.corpus_map_point (
+            entity      text NOT NULL CHECK (entity IN ('book', 'author')),
+            key         text NOT NULL,
+            label       text NOT NULL,
+            x           real NOT NULL,
+            y           real NOT NULL,
+            cluster     integer NOT NULL,
+            subcluster  integer NOT NULL,
+            word_count  integer NOT NULL,
+            sparse      boolean NOT NULL,
+            PRIMARY KEY (entity, key))""")
+        cur.execute(f"""CREATE TABLE IF NOT EXISTS {s}.corpus_map_cluster (
+            entity      text NOT NULL CHECK (entity IN ('book', 'author')),
+            cluster     integer NOT NULL,
+            subcluster  integer NOT NULL,          -- -1 = the top-level cluster itself
+            size        integer NOT NULL,
+            x           real NOT NULL,
+            y           real NOT NULL,
+            label_words text[] NOT NULL,
+            PRIMARY KEY (entity, cluster, subcluster))""")
+        cur.execute(f"""CREATE TABLE IF NOT EXISTS {s}.corpus_map_run (
+            entity      text PRIMARY KEY CHECK (entity IN ('book', 'author')),
+            n           integer NOT NULL,
+            params      jsonb NOT NULL,
+            seconds     real NOT NULL,
+            computed_at timestamptz NOT NULL DEFAULT now())""")
+
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, _migration_0001_baseline),
     (2, _migration_0002_compound_verdict),
+    (3, _migration_0003_corpus_map),
 ]
 
 

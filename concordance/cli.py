@@ -1472,6 +1472,37 @@ def clean_dialect_spellings(
                   f"[bold]{stats['scanned']}[/bold] dialect respellings — {stats['counts']}")
 
 
+@app.command("corpus-map")
+def corpus_map_cmd(
+    entity: str = typer.Option("both", "--entity", help="book, author, or both."),
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Place EVERY book and author on one 2-D map with labelled clusters, for
+    the relatedness pages' "Everything" tab (the other tabs show the top 200
+    only). Same vocabulary measure as book-similarity / author-similarity.
+    A full recompute, deliberately not part of `maintain`: run it when you
+    want a fresh map (a few minutes). Books added since the last run are
+    simply not on the map yet."""
+    from . import corpus_map
+    entities = ["book", "author"] if entity == "both" else [entity]
+    if any(e not in ("book", "author") for e in entities):
+        raise typer.BadParameter("--entity must be book, author, or both")
+    conn = _connect(database_url)
+    db.apply_schema(conn, schema)
+    for e in entities:
+        console.print(f"[bold]Mapping every {e}…[/bold]")
+        st = corpus_map.compute(conn, schema, e, progress=console.print)
+        if not st["n"]:
+            console.print(f"[yellow]![/yellow] too few {e}s to map")
+            continue
+        ag = corpus_map.neighbour_agreement(conn, schema, e)
+        console.print(f"[green]✓[/green] corpus-map {e}s: [bold]{st['n']:,}[/bold] placed in {st['clusters']} clusters "
+                      f"/ {st['subclusters']} sub-clusters ({st['sparse']:,} sparse) in {st['seconds']}s; "
+                      f"{ag['same_cluster']:.0%} of exact neighbours share a cluster (chance {ag['chance']:.0%})")
+    conn.close()
+
+
 @app.command("clean-boilerplate-links")
 def clean_boilerplate_links(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
