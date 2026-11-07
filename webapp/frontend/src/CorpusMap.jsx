@@ -243,13 +243,27 @@ function CorpusMap({ entity, onOpen, relatedUrl, sharedWordsUrl }) {
     let first = true // fit the whole map once per load; later resizes keep the view
     const ro = new ResizeObserver(() => {
       const { width, height } = wrap.getBoundingClientRect()
+      const old = size.current
       size.current = { w: width, h: height }
       const dpr = window.devicePixelRatio || 1
       canvas.width = Math.round(width * dpr)
       canvas.height = Math.round(height * dpr)
       canvas.style.width = `${width}px`
       canvas.style.height = `${height}px`
-      if (first) fit()
+      if (first) {
+        fit()
+      } else if (old.w && old.h && (old.w !== width || old.h !== height)) {
+        // Maximize / restore / window resize: whatever was at the centre stays
+        // at the centre, and the zoom scales with the new size -- so the
+        // default view stays the whole map, centred, and a zoomed-in view
+        // keeps its focus instead of sliding off to one side.
+        const v = view.current
+        const cx = (old.w / 2 - v.tx) / v.k
+        const cy = (old.h / 2 - v.ty) / v.k
+        const fitK = Math.min((width - PAD * 2) / WORLD, (height - PAD * 2) / WORLD)
+        const k = v.k * (fitK / v.fitK)
+        view.current = { k, fitK, tx: width / 2 - cx * k, ty: height / 2 - cy * k }
+      }
       first = false
       requestDrawRef.current()
     })
