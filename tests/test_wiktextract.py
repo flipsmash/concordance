@@ -129,3 +129,23 @@ def test_etymology_links_formation_parts():
     assert parts("confix", "en", "light", "en") == ["light"]
     assert parts("compound", "wood", "chopper") == ["wood", "chopper"]
     assert parts("af", "dry", "gulch", "-er") == ["dry", "gulch"]
+
+
+def test_affix_root_reads_suffix_and_prefix_templates_by_position():
+    def root(word, name, *args):
+        a = {"1": "en", **{str(i + 2): v for i, v in enumerate(args)}}
+        return wiktextract.affix_root({"word": word, "etymology_templates": [{"name": name, "args": a}]})
+    assert root("fatherling", "suffix", "father", "ling") == "father"     # affix given without its hyphen
+    assert root("unsmiling", "prefix", "un", "smiling") == "smiling"
+    assert root("undoable", "prefix", "un", "re", "doable") == "doable"
+    assert root("bewitched", "confix", "be", "witch", "ed") == "witch"
+    assert root("enlighten", "confix", "en-", "-en") is None              # no stem
+
+
+def test_affix_root_hyphenated_parts_are_always_affixes():
+    def root(word, *templates):
+        return wiktextract.affix_root({"word": word, "etymology_templates": [
+            {"name": n, "args": {"1": "en", **{str(i + 2): v for i, v in enumerate(a)}}} for n, *a in templates]})
+    assert root("platitudinous", ("affix", "platitude", "-ous"), ("suf", "-ous")) == "platitude"
+    assert root("melomaniac", ("affix", "melo-"), ("suffix", "", "maniac")) == "maniac"
+    assert root("kinescope", ("confix", "kine-", "scope")) == "scope"

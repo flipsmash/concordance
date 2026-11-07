@@ -80,16 +80,16 @@ def compute_difficulty(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> di
         scores = []
         for wid, lemma, peak, recent, archaic, aconf, fields in rows:
             key = lemma.strip().lower()
-            root = _morph_root(key) or affix_roots.get(key)
             has_domain = any(f in _diff.DOMAIN_FIELDS for f in fields)
-            transparent, root_zipf, root_kind = root is not None, None, "root"
-            if root:
-                root_zipf = zipf_frequency(root, "en")
-            elif key in compounds:
-                parts, verdict = compounds[key]
-                if verdict == "transparent" and parts:
-                    transparent, root_kind = True, "compound"
-                    root_zipf = compound.rarer_part_zipf(parts)
+            # Every kind of transparency evidence, credited ONCE: whichever
+            # gives the most ease (farseeing: Wiktionary's root "farsee" is
+            # rare, but the judged compound far + seeing is not).
+            evidence = [(zipf_frequency(r, "en"), "root") for r in (_morph_root(key), affix_roots.get(key)) if r]
+            parts, verdict = compounds.get(key, (None, None))
+            if verdict == "transparent" and parts:
+                evidence.append((compound.rarer_part_zipf(parts), "compound"))
+            transparent = bool(evidence)
+            root_zipf, root_kind = max(evidence) if evidence else (None, "root")
             sc, factors = _diff.score(
                 zipf_frequency(key, "en"), recent, peak, archaic or "current", aconf,
                 has_domain, morph_transparent=transparent,

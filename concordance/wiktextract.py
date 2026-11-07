@@ -210,13 +210,31 @@ def affix_root(obj: dict) -> str | None:
         args = t.get("args") or {}
         if args.get("1") != "en":
             continue
-        for k, v in args.items():
-            if not k.isdigit() or k == "1":
-                continue
-            part = (v or "").split("<")[0].split("#")[0].strip()   # drop <t:gloss> / #Noun
+        keys = sorted((k for k in args if k.isdigit() and k != "1"), key=int)
+        # {{suffix}}/{{prefix}}/{{confix}} give their affixes WITHOUT hyphens
+        # ({{suffix|en|father|ling}}), so their stem is known by POSITION; read
+        # by hyphen, "ling" looked like a second free word and fatherling got no
+        # root at all. {{affix}}/{{af}} do hyphenate their affixes.
+        # A hyphenated part is always an affix ({{suf|en|-ous}}); among the
+        # rest, position decides: the first for a suffix template, the last for
+        # a prefix template, the middle of a three-part confix.
+        name = t.get("name")
+        clean = {k: (args[k] or "").split("<")[0].split("#")[0].strip() for k in keys}   # drop <t:gloss> / #Noun
+        bare = [k for k in keys if clean[k] and not (clean[k].startswith("-") or clean[k].endswith("-"))]
+        if name in ("suffix", "suf"):
+            stems = bare[:1]
+        elif name in ("prefix", "pre"):
+            stems = bare[-1:]
+        elif name in ("confix", "con") and len([k for k in keys if clean[k]]) >= 3:
+            stems = [keys[1]] if keys[1] in bare else []
+        else:
+            stems = bare            # {{affix}}/{{af}} and two-part confixes: hyphens alone decide
+        for k in keys:
+            part = clean[k]
             if not part:
                 continue
-            if part.startswith("-") or part.endswith("-"):
+            is_affix = k not in stems
+            if is_affix:
                 affixes += 1
             else:
                 free.add(part.lower())      # "la:colon" etc. kept, so it fails the check below
