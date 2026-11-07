@@ -347,6 +347,17 @@ function Visualizations() {
       </section>
 
       <section className="browse-facets viz-section">
+        <h2 className="viz-heading">Where the words come from</h2>
+        <p className="viz-description">
+          Each word&rsquo;s earliest source language &mdash; Latin, Old English, Greek, French, Norse&hellip; &mdash;
+          and the route it took into English, for the whole collection or one genre, and two side by side.
+        </p>
+        <Link to="/app/visualizations/origins" className="browse-quiz-link">
+          Open origins →
+        </Link>
+      </section>
+
+      <section className="browse-facets viz-section">
         <h2 className="viz-heading">Works &amp; authors by discipline category</h2>
         <p className="viz-description">
           See how vocabulary distributes across subject-matter fields (science, law, arts…) --

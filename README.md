@@ -304,6 +304,7 @@ concordance author-similarity    # same, one level up, for authors
 concordance author-clustering    # hierarchical clustering + 2D map over the top-N authors
 concordance relate               # convenience wrapper: runs all four above with default options
 concordance corpus-map           # EVERY book and author on one 2-D map, with labelled clusters
+concordance word-origins         # each word's earliest source language + route into English (Origins page)
 ```
 
 Lexical (shared-vocabulary) relatedness — a different axis from the semantic
@@ -330,7 +331,15 @@ neighbours share its cluster — positions are approximate, the neighbour
 lists stay exact. Books with no distinctive words are left off; books added
 after a run aren't on the map until the next one.
 
-None of these are part of `maintain` (and `relate` doesn't include
+`word-origins` (also a `maintain` step, ~20 s) follows Wiktionary's etymology
+links -- loaded by `wiktextract-morphology` -- back to each word's earliest
+attested language, then falls back to variant pointers, the 0 Dict's
+etymologies, derivations and judge-verified compound splits; ~74% of words
+get an origin (nothing is guessed), shown on Visualizations → Origins as a
+sunburst (family › route) and treemap (family › language), by genre or two
+side by side.
+
+None of the others are part of `maintain` (and `relate` doesn't include
 `corpus-map`) — run standalone on your own schedule. Reachable from the web
 app's Visualizations page and the Books/Authors relatedness pages'
 "Everything" tab.

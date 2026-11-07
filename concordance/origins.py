@@ -63,9 +63,24 @@ _FAMILY_CODES = {
 _CODE_FAMILY = {c: f for f, cs in _FAMILY_CODES.items() for c in cs}
 _ETY_ONLY = {"ML.": "Latin", "LL.": "Latin", "NL.": "Latin", "VL.": "Latin", "CL.": "Latin", "EL.": "Latin",
              "MGr.": "Greek", "LGr.": "Greek"}
-_ETY_ONLY_NAMES = {"ML.": "Medieval Latin", "LL.": "Late Latin", "NL.": "New Latin", "VL.": "Vulgar Latin",
-                   "CL.": "Classical Latin", "EL.": "Ecclesiastical Latin", "MGr.": "Medieval Greek",
-                   "LGr.": "Late Greek"}
+# Names for codes that never head a dump entry of their own (Wiktionary's
+# etymology-only varieties and language groups), so wikt.lang_name lacks them.
+_ETY_ONLY_NAMES = {
+    "ML.": "Medieval Latin", "LL.": "Late Latin", "NL.": "New Latin", "VL.": "Vulgar Latin",
+    "CL.": "Classical Latin", "EL.": "Ecclesiastical Latin", "MGr.": "Medieval Greek", "LGr.": "Late Greek",
+    "la-lat": "Late Latin", "la-med": "Medieval Latin", "la-new": "New Latin", "la-vul": "Vulgar Latin",
+    "la-cla": "Classical Latin", "la-ecc": "Ecclesiastical Latin", "la-eme": "Early Medieval Latin",
+    "la-ren": "Renaissance Latin", "itc-ola": "Old Latin", "frk": "Frankish", "qsb-grc": "Pre-Greek",
+    "qfa-sub": "a substrate language", "xno": "Anglo-Norman", "fro-nor": "Old Northern French",
+    "gem": "Germanic", "gmq": "North Germanic", "gmw": "West Germanic", "lng": "Lombardic",
+    "sem": "Semitic", "hbo": "Biblical Hebrew", "fa-cls": "Classical Persian", "ira": "Iranian",
+    "cel": "Celtic", "gkm": "Byzantine Greek", "grc-koi": "Koine Greek", "grc-dor": "Doric Greek",
+    "ang-ang": "Anglian Old English", "enm-nor": "Northern Middle English", "dra": "Dravidian",
+    "inc-hnd": "Hindustani", "trk": "Turkic", "alg": "Algonquian", "mul-tax": "a scientific (taxonomic) name",
+    "ltc": "Late Middle Chinese", "och": "Old Chinese", "yue": "Cantonese", "sai-car": "Carib",
+    "ine-ana": "Anatolian", "roa-oit": "Old Italian", "sla": "Slavic", "zlw": "West Slavic",
+    "azc-nah": "Nahuan", "ber": "Berber", "tup": "Tupian", "egy-lat": "Late Egyptian",
+}
 SPECIAL = {"*mixed*": "Mixed", "obscure": "Obscure origin", "imitative": "Imitative"}
 
 
@@ -406,6 +421,15 @@ def language_names(conn, wikt_schema: str = "wikt") -> dict[str, str]:
     return names
 
 
+def lang_name(names: dict[str, str], code: str) -> str:
+    """A readable name; a regional variety falls back to its base language
+    (es-MX -> Spanish), anything unknown to its code."""
+    if code in names:
+        return names[code]
+    base = code.split("-")[0].split(",")[0]
+    return names.get(base, code)
+
+
 def compute(conn, schema: str, progress=print) -> dict:
     """`concordance word-origins`: resolve every active word and replace
     word_origin in one transaction. Deterministic and quick, so always a
@@ -426,7 +450,7 @@ def compute(conn, schema: str, progress=print) -> dict:
         o = resolver.resolve(lemma)
         if o:
             by_method[o.method] += 1
-            rows.append((wid, o.root, names.get(o.root, o.root) if o.root not in SPECIAL else SPECIAL[o.root],
+            rows.append((wid, o.root, SPECIAL[o.root] if o.root in SPECIAL else lang_name(names, o.root),
                          o.family, o.route, o.method))
     with conn.cursor() as cur:
         cur.execute(f"DELETE FROM {s}.word_origin")

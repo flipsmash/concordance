@@ -116,3 +116,10 @@ def test_compute_writes_word_origin():
         assert cur.fetchall() == [("amuze", "frm", "French", "direct", "pointer")]
         cur.execute(f"DROP SCHEMA {schema} CASCADE")
     conn.commit()
+
+
+def test_lang_name_varieties_fall_back_to_their_base():
+    names = {"es": "Spanish", "la": "Latin", "la-med": "Medieval Latin"}
+    assert origins.lang_name(names, "la-med") == "Medieval Latin"
+    assert origins.lang_name(names, "es-MX") == "Spanish"
+    assert origins.lang_name(names, "zz-qq") == "zz-qq"
