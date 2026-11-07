@@ -263,6 +263,56 @@ def compound_parts(obj: dict) -> list[str] | None:
     return None
 
 
+# --- etymology links: where a word came from ---------------------------------
+#
+# Every entry's own etymology markup, any language, reduced to (a) its ordered
+# source links -- inherited / derived / borrowed from <lang> <word>, nearest
+# first, as both the classic {{inh}}/{{der}}/{{bor}} templates and the newer
+# {{etymon}}/{{ety}} markup state them -- and (b) for a word formed within its
+# own language ("grease + -y"), its free parts. origins.py walks these back
+# to a word's earliest attested source language.
+
+_SOURCE_RELS = {"inh", "inherited", "inh+", "der", "derived", "der+", "uder", "undefined derivation",
+                "bor", "borrowed", "bor+", "lbor", "learned borrowing", "lbor+", "slbor",
+                "semi-learned borrowing", "ubor", "obor", "calque", "cal", "clq", "psm"}
+_FORMATION = {"affix", "af", "suffix", "suf", "prefix", "pre", "confix", "con", "compound", "com", "surf", "blend"}
+
+
+def etymology_links(obj: dict) -> tuple[list[str], list[str]]:
+    """(["lang:word", ...] source links nearest first, [free parts]) for one
+    dump entry. Affix templates give the affix WITHOUT its hyphen
+    ({{suffix|en|grease|y}}), so only the stem argument counts as a part, and
+    a {{confix}} has a stem only when it has a middle argument (ichthyology =
+    ichthyo- + -logy has none)."""
+    lc = obj.get("lang_code")
+    links: list[str] = []
+    parts: list[str] = []
+    for t in obj.get("etymology_templates") or []:
+        name = t.get("name")
+        a = t.get("args") or {}
+        if name in _SOURCE_RELS and a.get("2"):
+            links.append(f"{a['2']}:{(a.get('3') or '').split('<')[0]}")
+        elif name in ("ety", "etymon"):
+            vals = [a[k] for k in sorted((k for k in a if k.isdigit()), key=int)][1:]
+            for i, v in enumerate(vals):
+                if v.startswith(":") and i + 1 < len(vals):
+                    head = vals[i + 1].split("<")[0]
+                    if v[1:] in _SOURCE_RELS and ":" in head:
+                        links.append(head)
+                    break
+        elif name in _FORMATION and a.get("1") == lc:
+            keys = {"suffix": ["2"], "suf": ["2"], "prefix": ["3"], "pre": ["3"]}.get(name)
+            if name in ("confix", "con"):
+                keys = ["3"] if a.get("4") else []
+            if keys is None:
+                keys = sorted((k for k in a if k.isdigit() and k != "1"), key=int)
+            for k in keys:
+                part = (a.get(k) or "").split("<")[0].split("#")[0].strip()
+                if part and not part.startswith("-") and not part.endswith("-"):
+                    parts.append(part)
+    return links, parts
+
+
 def _swap_in(cur, g: str, name: str, select_sql: str) -> int:
     """Build <g>.<name> from select_sql under a temporary name, then swap it
     in for the old table (readers never see a half-built one)."""
@@ -297,7 +347,12 @@ def load_morphology(conn, dump_path: str | Path | None = None, wikt_schema: str 
                             seq bigint NOT NULL, term text NOT NULL, root text NOT NULL, etymology text)""")
         cur.execute(f"""CREATE UNLOGGED TABLE {g}.compound_raw (
                             seq bigint NOT NULL, term text NOT NULL, parts text[] NOT NULL, etymology text)""")
-        roots, compounds = [], []
+        cur.execute(f"DROP TABLE IF EXISTS {g}.etym_raw")
+        cur.execute(f"""CREATE UNLOGGED TABLE {g}.etym_raw (
+                            seq bigint NOT NULL, lang text NOT NULL, term text NOT NULL,
+                            links text[] NOT NULL, parts text[] NOT NULL)""")
+        roots, compounds, etym = [], [], []
+        lang_names: dict[str, str] = {}
         with gzip.open(path, "rt", encoding="utf-8") as f:
             for i, line in enumerate(f, 1):
                 if progress_cb and i % 2_000_000 == 0:
@@ -308,7 +363,13 @@ def load_morphology(conn, dump_path: str | Path | None = None, wikt_schema: str 
                     obj = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if obj.get("lang_code") != "en":
+                lc = obj.get("lang_code")
+                if lc and obj.get("lang"):
+                    lang_names.setdefault(lc, obj["lang"])
+                links, eparts = etymology_links(obj)
+                if lc and (links or eparts):
+                    etym.append((i, lc, obj.get("word") or "", links, eparts))
+                if lc != "en":
                     continue
                 term = (obj.get("word") or "").strip().lower()
                 ety = (obj.get("etymology_text") or "")[:300]
@@ -326,11 +387,31 @@ def load_morphology(conn, dump_path: str | Path | None = None, wikt_schema: str 
         with cur.copy(f"COPY {g}.compound_raw (seq, term, parts, etymology) FROM STDIN") as copy:
             for row in compounds:
                 copy.write_row(row)
+        with cur.copy(f"COPY {g}.etym_raw (seq, lang, term, links, parts) FROM STDIN") as copy:
+            for row in etym:
+                copy.write_row(row)
         terms = _swap_in(cur, g, "affix_root", f"""SELECT DISTINCT ON (term) term, root, etymology
                                                   FROM {g}.affix_root_raw ORDER BY term, seq""")
         comp_terms = _swap_in(cur, g, "compound", f"""SELECT DISTINCT ON (term) term, parts, etymology
                                                      FROM {g}.compound_raw ORDER BY term, seq""")
+        # (lang, term) is the key: the first entry for a word in a language wins
+        cur.execute(f"DROP TABLE IF EXISTS {g}.etym_new")
+        cur.execute(f"""CREATE TABLE {g}.etym_new AS SELECT DISTINCT ON (lang, term) lang, term, links, parts
+                        FROM {g}.etym_raw ORDER BY lang, term, seq""")
+        cur.execute(f"ALTER TABLE {g}.etym_new ADD PRIMARY KEY (lang, term)")
+        cur.execute(f"DROP TABLE IF EXISTS {g}.etym")
+        cur.execute(f"ALTER TABLE {g}.etym_new RENAME TO etym")
+        cur.execute(f"ALTER INDEX {g}.etym_new_pkey RENAME TO etym_pkey")
+        cur.execute(f"SELECT count(*) FROM {g}.etym")
+        etym_terms = cur.fetchone()[0]
+        cur.execute(f"DROP TABLE IF EXISTS {g}.lang_name")
+        cur.execute(f"CREATE TABLE {g}.lang_name (code text PRIMARY KEY, name text NOT NULL)")
+        with cur.copy(f"COPY {g}.lang_name (code, name) FROM STDIN") as copy:
+            for code, name in lang_names.items():
+                copy.write_row((code, name))
         cur.execute(f"DROP TABLE {g}.affix_root_raw")
         cur.execute(f"DROP TABLE {g}.compound_raw")
+        cur.execute(f"DROP TABLE {g}.etym_raw")
     conn.commit()
-    return {"entries": n, "terms": terms, "compound_entries": n_comp, "compound_terms": comp_terms}
+    return {"entries": n, "terms": terms, "compound_entries": n_comp, "compound_terms": comp_terms,
+            "etym_terms": etym_terms, "languages": len(lang_names)}

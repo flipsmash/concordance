@@ -105,3 +105,27 @@ def test_compound_parts_only_when_they_spell_the_word():
         {"name": "affix", "args": {"1": "en", "2": "serpent", "3": "-icide"}})) is None
     assert wiktextract.compound_parts(obj("downland",
         {"name": "compound", "args": {"1": "enm", "2": "down", "3": "land"}})) is None
+
+
+def test_etymology_links_classic_and_etymon_markup():
+    grease = {"lang_code": "en", "word": "grease", "etymology_templates": [
+        {"name": "inh", "args": {"1": "en", "2": "enm", "3": "grece"}},
+        {"name": "der", "args": {"1": "en", "2": "xno", "3": "craisse"}},
+        {"name": "der", "args": {"1": "en", "2": "la", "3": "crassus"}},
+        {"name": "cog", "args": {"1": "fr", "2": "graisse"}}]}             # a cognate is not a source
+    assert wiktextract.etymology_links(grease) == (["enm:grece", "xno:craisse", "la:crassus"], [])
+    free = {"lang_code": "en", "word": "free", "etymology_templates": [
+        {"name": "etymon", "args": {"1": "en", "id": "adjective", "2": ":inh", "3": "enm:fre<id:x>", "tree": "1"}}]}
+    assert wiktextract.etymology_links(free) == (["enm:fre"], [])
+
+
+def test_etymology_links_formation_parts():
+    def parts(name, *args):
+        a = {"1": "en", **{str(i + 2): v for i, v in enumerate(args)}}
+        return wiktextract.etymology_links({"lang_code": "en", "etymology_templates": [{"name": name, "args": a}]})[1]
+    assert parts("suffix", "grease", "y") == ["grease"]          # the affix comes without its hyphen
+    assert parts("prefix", "un", "smiling") == ["smiling"]
+    assert parts("confix", "ichthyo", "logy") == []              # no stem in the middle
+    assert parts("confix", "en", "light", "en") == ["light"]
+    assert parts("compound", "wood", "chopper") == ["wood", "chopper"]
+    assert parts("af", "dry", "gulch", "-er") == ["dry", "gulch"]

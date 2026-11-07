@@ -1116,10 +1116,28 @@ def _migration_0003_corpus_map(conn: psycopg.Connection, s: str) -> None:
             computed_at timestamptz NOT NULL DEFAULT now())""")
 
 
+def _migration_0004_word_origin(conn: psycopg.Connection, s: str) -> None:
+    """origins.py's answer per active word: its earliest attested source
+    language (root_lang, with the dump's own name for it), the display family,
+    and how it reached English (route: inherited | direct | via:<family> |
+    formed), plus which source decided it. Rewritten whole by
+    `concordance word-origins`; a word with no known origin has no row."""
+    with conn.cursor() as cur:
+        cur.execute(f"""CREATE TABLE IF NOT EXISTS {s}.word_origin (
+            word_id        integer PRIMARY KEY REFERENCES {s}.word(id) ON DELETE CASCADE,
+            root_lang      text NOT NULL,
+            root_lang_name text NOT NULL,
+            family         text NOT NULL,
+            route          text NOT NULL,
+            method         text NOT NULL)""")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS word_origin_family_idx ON {s}.word_origin (family, route)")
+
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, _migration_0001_baseline),
     (2, _migration_0002_compound_verdict),
     (3, _migration_0003_corpus_map),
+    (4, _migration_0004_word_origin),
 ]
 
 

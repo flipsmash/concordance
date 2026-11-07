@@ -1472,6 +1472,24 @@ def clean_dialect_spellings(
                   f"[bold]{stats['scanned']}[/bold] dialect respellings — {stats['counts']}")
 
 
+@app.command("word-origins")
+def word_origins_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Work out where each word comes from -- its earliest attested source
+    language and route into English -- from Wiktionary's etymology links,
+    the 0 Dict, variant pointers and derivations (see concordance/origins.py).
+    Run `wiktextract-morphology` first. A full recompute, a minute or two."""
+    from . import origins
+    conn = _connect(database_url)
+    db.apply_schema(conn, schema)
+    st = origins.compute(conn, schema, progress=console.print)
+    conn.close()
+    console.print(f"[green]✓[/green] word-origins: [bold]{st['resolved']:,}[/bold] of {st['words']:,} words "
+                  f"({st['resolved'] / max(1, st['words']):.0%}) in {st['seconds']}s -- {st['by_method']}")
+
+
 @app.command("corpus-map")
 def corpus_map_cmd(
     entity: str = typer.Option("both", "--entity", help="book, author, or both."),
@@ -1599,7 +1617,8 @@ def wiktextract_morphology(
     conn.close()
     console.print(f"[green]✓[/green] wiktextract-morphology: [bold]{stats['terms']:,}[/bold] terms "
                   f"with a single-root affix etymology, [bold]{stats['compound_terms']:,}[/bold] "
-                  f"with a compound etymology")
+                  f"with a compound etymology, [bold]{stats['etym_terms']:,}[/bold] etymology entries "
+                  f"across {stats['languages']:,} languages")
 
 
 @app.command("derive-definitions")
@@ -2303,6 +2322,7 @@ def maintain(
     skip_normalize_pos: bool = typer.Option(False, "--skip-normalize-pos"),
     skip_ngram: bool = typer.Option(False, "--skip-ngram"),
     skip_archaic: bool = typer.Option(False, "--skip-archaic"),
+    skip_origins: bool = typer.Option(False, "--skip-origins", help="Skip recomputing word origins."),
     skip_compounds: bool = typer.Option(False, "--skip-compounds",
                                          help="Skip judging new compound words' transparency (loads a local LLM)."),
     skip_difficulty: bool = typer.Option(False, "--skip-difficulty"),
@@ -2319,7 +2339,7 @@ def maintain(
 ) -> None:
     """Run the full post-ingest maintenance chain in dependency order:
     fill-definitions -> classify -> normalize-pos -> ngram -> archaic ->
-    compounds -> difficulty -> quizdef -> quizzable -> calibrate-difficulty ->
+    compounds -> word-origins -> difficulty -> quizdef -> quizzable -> calibrate-difficulty ->
     wordnik-pron -> ipa -> embed -> backfill-analogies.
     This is the whole documented sequence from the README's
     "Backfilling definitions" / "Enrichment & scoring" / "Definition-quality
@@ -2432,6 +2452,14 @@ def maintain(
                       f"{stats['unparsed']} unusable answers)")
     else:
         console.print("[dim]compounds skipped.[/dim]")
+
+    if not skip_origins:
+        from . import origins
+        console.print("[bold]Working out word origins…[/bold]")
+        st = origins.compute(conn, schema, progress=lambda *_: None)
+        console.print(f"[green]✓[/green] word-origins: [bold]{st['resolved']:,}[/bold] of {st['words']:,} words")
+    else:
+        console.print("[dim]word-origins skipped.[/dim]")
 
     if not skip_difficulty:
         console.print("[bold]Computing ex-ante difficulty scores…[/bold]")
