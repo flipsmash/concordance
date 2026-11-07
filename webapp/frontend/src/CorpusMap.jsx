@@ -3,6 +3,7 @@ import { colorForCluster } from './clusterColors'
 import { ZOOM_MS, cssVar } from './graphUtils'
 import SharedWordsPanel from './SharedWordsPanel'
 import './CorpusMap.css'
+import './GraphView.css' // .graph-maximize, shared with the other maps' fullscreen button
 
 const API_BASE = ''
 const WORLD = 1000 // corpus_map.COORD_SCALE: stored coordinates are 0..1000
@@ -31,6 +32,8 @@ function CorpusMap({ entity, onOpen, relatedUrl, sharedWordsUrl }) {
   const [shared, setShared] = useState(null) // {key, label}
   const [, setRedraw] = useState(0)
 
+  const rootRef = useRef(null)
+  const [isFullscreen, setIsFullscreen] = useState(false)
   const wrapRef = useRef(null)
   const canvasRef = useRef(null)
   const view = useRef({ k: 1, tx: 0, ty: 0, fitK: 1 }) // screen = world * k + t
@@ -51,6 +54,19 @@ function CorpusMap({ entity, onOpen, relatedUrl, sharedWordsUrl }) {
       .then(setData)
       .catch((err) => setError(err.message || 'failed to load the map'))
   }, [entity])
+
+  // Maximize = browser fullscreen on the whole map + panel, like the other
+  // visualizations; the canvas's ResizeObserver redraws at the new size.
+  useEffect(() => {
+    const onChange = () => setIsFullscreen(document.fullscreenElement === rootRef.current)
+    document.addEventListener('fullscreenchange', onChange)
+    return () => document.removeEventListener('fullscreenchange', onChange)
+  }, [])
+
+  function toggleFullscreen() {
+    if (document.fullscreenElement) document.exitFullscreen()
+    else rootRef.current?.requestFullscreen()
+  }
 
   const pts = data?.points
   const n = pts ? pts.key.length : 0
@@ -447,11 +463,16 @@ function CorpusMap({ entity, onOpen, relatedUrl, sharedWordsUrl }) {
   const selSub = selCluster?.subs.find((s) => s.subcluster === pts.subcluster[sel])
 
   return (
-    <div className="corpus-map">
-      <p className="muted corpus-map-note">
-        All {data.n.toLocaleString()} {noun}, mapped {new Date(data.computed_at).toLocaleDateString()}. Position is
-        approximate; the neighbour list is exact. {entity === 'book' && 'Books added since then aren’t on the map yet.'}
-      </p>
+    <div className="corpus-map" ref={rootRef}>
+      <div className="corpus-map-top">
+        <p className="muted corpus-map-note">
+          All {data.n.toLocaleString()} {noun}, mapped {new Date(data.computed_at).toLocaleDateString()}. Position is
+          approximate; the neighbour list is exact. {entity === 'book' && 'Books added since then aren’t on the map yet.'}
+        </p>
+        <button type="button" className="graph-maximize" onClick={toggleFullscreen}>
+          {isFullscreen ? 'Exit fullscreen' : 'Maximize'}
+        </button>
+      </div>
       <div className="corpus-map-body">
         <div className="corpus-map-canvas" ref={wrapRef}>
           <canvas

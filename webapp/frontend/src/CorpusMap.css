@@ -4,9 +4,32 @@
   gap: 8px;
 }
 
+.corpus-map-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.corpus-map-top .graph-maximize {
+  flex-shrink: 0;
+}
+
 .corpus-map-note {
   margin: 0;
   font-size: 13px;
+}
+
+/* Maximized: the map and panel fill the screen. */
+.corpus-map:fullscreen {
+  padding: 12px;
+  background: var(--bg);
+}
+
+.corpus-map:fullscreen .corpus-map-body {
+  flex: 1;
+  height: auto;
+  min-height: 0;
 }
 
 .corpus-map-empty code {
