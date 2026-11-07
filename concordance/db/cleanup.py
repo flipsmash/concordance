@@ -380,10 +380,21 @@ def clean_non_english_context(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool
 # the body ("This etext was produced by...", "ETEXT EDITOR'S BOOKMARKS",
 # "[Greek text deleted from etext]") -- checked over all 3,524 linked books
 # on 2026-11-03, not one authorial use -- so every link goes.
+#
+# Real words caught the same way keep the links of books that use them:
+# "detach" came from the licence's "Do not unlink or detach or remove the
+# full Project Gutenberg License terms" and was linked to 16,560 books, ~4 in
+# 5 of them wrongly (found 2026-11-07); its pattern has no leading \b so
+# "undetachable" still counts, as ingest folds un- words into their root.
+# "greif" is the volunteer Chuck Greif in "Produced by Chuck Greif and the
+# Online Distributed Proofreading Team" credit lines.
 _BOILERPLATE_TERMS: dict[str, str | None] = {
     "nonproprietary": r"\bnon-?proprietary\b",
     "etext": None,
     "unenforceability": r"\bunenforceabilit(?:y|ies)\b",
+    "detach": r"detach",
+    "unlink": r"\bunlink",
+    "greif": r"(?<!chuck )\bgreif",
 }
 
 
@@ -391,7 +402,7 @@ def clean_boilerplate_links(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool =
                             root: str | Path = ".") -> dict:
     """`concordance clean-boilerplate-links`: re-check each book link of the
     _BOILERPLATE_TERMS words against the book's own text with the Gutenberg
-    licence stripped; a link whose word isn't in that text is removed. A word
+    licence and producer credits stripped (as ingest now reads it); a link whose word isn't in that text is removed. A word
     left with no links is cast out (variant_flag_reason
     'gutenberg_boilerplate'), unless an admin added it. A book whose archive
     file is missing keeps its link -- it can't be checked."""
@@ -435,7 +446,7 @@ def clean_boilerplate_links(conn, schema: str = DEFAULT_SCHEMA, *, apply: bool =
                     keep.append(bid)
                 else:
                     drop.append(bid)
-            cast_out = not keep and not unchecked and not admin
+            cast_out = bool(drop) and not keep and not unchecked and not admin   # this run removes its last links
             report[lemma] = {"links": len(keep) + len(drop) + len(unchecked), "kept": len(keep),
                              "removed": len(drop), "unchecked": len(unchecked), "cast_out": cast_out}
             if apply:

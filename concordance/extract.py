@@ -7,6 +7,7 @@ image-only PDFs are detected and refused rather than half-processed with OCR
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,7 +37,7 @@ def extract(path: str | Path) -> list[Chapter]:
         return _extract_pdf(path)
     if suffix in {".txt", ".text", ".md"}:
         from .archive_metadata import strip_gutenberg_boilerplate
-        text = strip_gutenberg_boilerplate(path.read_text(encoding="utf-8", errors="replace"))
+        text = strip_producer_credits(strip_gutenberg_boilerplate(path.read_text(encoding="utf-8", errors="replace")))
         return [Chapter(title=path.stem, text=text)]
     raise UnsupportedFormatError(
         f"Concordance reads EPUB, text PDF, and .txt — not '{suffix}'."
@@ -62,9 +63,30 @@ def _extract_epub(path: Path) -> list[Chapter]:
         title = heading.get_text(" ", strip=True) if heading else f"Section {i}"
         chapters.append(Chapter(title=title[:80], text=text))
     chapters = strip_gutenberg_chapters(chapters)
+    if chapters:
+        chapters[0] = Chapter(title=chapters[0].title, text=strip_producer_credits(chapters[0].text))
     if not chapters:
         raise UnsupportedFormatError(f"No readable text found in {path.name}.")
     return chapters
+
+
+# Volunteer credit paragraphs Gutenberg puts just inside the START marker --
+# part of the "body" by the markers, but not the author's text: "Produced by
+# Chuck Greif and the Online Distributed Proofreading Team" linked "greif"
+# to 145 books. A paragraph is the line through the next blank line.
+_CREDIT_RE = re.compile(
+    r"^[ \t]*(?:\[?e-?book #\d+\]?|credits?:|produced by|e-?text (?:was )?(?:prepared|produced) by|"
+    r"this e-?(?:text|book) (?:was|has been) (?:produced|prepared)|transcribed (?:from .{0,80}? )?by)"
+    r"[^\n]*(?:\n(?![ \t]*\n)[^\n]*)*",
+    re.IGNORECASE | re.MULTILINE)
+_CREDIT_HEAD = 3000   # credits sit at the very start; never touch the rest
+
+
+def strip_producer_credits(text: str) -> str:
+    """Drop volunteer-credit paragraphs from the opening of a Gutenberg text
+    (see _CREDIT_RE); the rest of the text is left exactly as it is."""
+    head, rest = text[:_CREDIT_HEAD], text[_CREDIT_HEAD:]
+    return _CREDIT_RE.sub("", head) + rest
 
 
 def strip_gutenberg_chapters(chapters: list[Chapter]) -> list[Chapter]:
