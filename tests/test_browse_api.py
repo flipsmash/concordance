@@ -2397,3 +2397,36 @@ def test_corpus_map_endpoint_is_columnar_cached_and_compressed():
         assert client.get("/api/browse/corpus-map?entity=author").json()["computed_at"] is None
     finally:
         restore()
+
+
+@pg
+def test_origins_endpoints_count_by_family_route_and_genre():
+    schema = "cc_test_origins_api"
+    client, conn, restore = _setup(schema)
+    try:
+        _login(client)
+        assert client.get("/api/browse/origins").json()["known_words"] == 0
+        b1 = _insert_book(conn, schema, "Sea Book"); b2 = _insert_book(conn, schema, "Land Book")
+        with conn.cursor() as cur:
+            cur.execute(f"INSERT INTO {schema}.book_genre (book_id, genre, source) VALUES (%s, 'Nautical', 'test')", (b1,))
+        ids = {}
+        for lemma, fam, route, lang, book in [("benignity", "Latin", "via:French", "la", b1), ("oppugn", "Latin", "direct", "la", b1),
+                                              ("strong", "Old & Middle English", "inherited", "ang", b2), ("zzqx", None, None, None, b1)]:
+            ids[lemma] = _insert_word(conn, schema, lemma)
+            _link(conn, schema, ids[lemma], book)
+            if fam:
+                with conn.cursor() as cur:
+                    cur.execute(f"""INSERT INTO {schema}.word_origin (word_id, root_lang, root_lang_name, family, route, method)
+                                    VALUES (%s, %s, %s, %s, %s, 'wiktionary')""", (ids[lemma], lang, lang, fam, route))
+        conn.commit()
+        body = client.get("/api/browse/origins").json()
+        assert body["total_words"] == 4 and body["known_words"] == 3
+        latin = body["families"][0]
+        assert latin["family"] == "Latin" and latin["count"] == 2
+        assert {r["route"] for r in latin["routes"]} == {"via:French", "direct"}
+        sea = client.get("/api/browse/origins", params={"genre": "Nautical"}).json()
+        assert sea["total_words"] == 3 and [f["family"] for f in sea["families"]] == ["Latin"]
+        words = client.get("/api/browse/origins/words", params={"family": "Latin", "route": "via:French"}).json()
+        assert words["total"] == 1 and words["words"][0]["lemma"] == "benignity"
+    finally:
+        restore()

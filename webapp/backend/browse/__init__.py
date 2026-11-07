@@ -167,3 +167,4 @@ from .trends import (  # noqa: F401
     ngram_trend,
 )
 from . import corpus_map as _corpus_map  # noqa: F401,E402  (registers /api/browse/corpus-map)
+from . import origins as _origins  # noqa: F401,E402  (registers /api/browse/origins)
