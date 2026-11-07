@@ -174,8 +174,8 @@ function Visualizations() {
       <section className="browse-facets viz-section">
         <h2 className="viz-heading">Books by vocabulary overlap</h2>
         <p className="viz-description">
-          Pick a book to see the other books that share the most rare vocabulary with it, or
-          browse the top books at once.
+          Pick a book to see the other books that share the most rare vocabulary with it, browse
+          the top books at once, or explore a map of every book in the collection.
         </p>
         <div className="viz-author-row">
           <BookSelect
@@ -185,14 +185,17 @@ function Visualizations() {
           <Link to="/app/books/relatedness" className="browse-quiz-link">
             See the top books at once →
           </Link>
+          <Link to="/app/books/relatedness?tab=everything" className="browse-quiz-link">
+            Map every book →
+          </Link>
         </div>
       </section>
 
       <section className="browse-facets viz-section">
         <h2 className="viz-heading">Authors by vocabulary overlap</h2>
         <p className="viz-description">
-          Pick an author to see who shares the most rare vocabulary with them, or browse the top
-          authors at once.
+          Pick an author to see who shares the most rare vocabulary with them, browse the top
+          authors at once, or explore a map of every author.
         </p>
         <div className="viz-author-row">
           <AuthorSelect
@@ -201,6 +204,9 @@ function Visualizations() {
           />
           <Link to="/app/authors/relatedness" className="browse-quiz-link">
             See the top authors at once →
+          </Link>
+          <Link to="/app/authors/relatedness?tab=everything" className="browse-quiz-link">
+            Map every author →
           </Link>
         </div>
       </section>

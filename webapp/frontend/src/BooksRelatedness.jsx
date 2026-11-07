@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import BookClusterMap from './BookClusterMap'
 import BookDendrogram from './BookDendrogram'
 import BookMatrix from './BookMatrix'
@@ -48,7 +48,11 @@ const SCOPES = [
 // clustering run's precomputed grid, unlike the other three).
 function BooksRelatedness() {
   const navigate = useNavigate()
-  const [tab, setTab] = useState('map')
+  // The tab lives in the URL (?tab=everything) so a link can open straight
+  // onto it and a refresh stays put.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const tab = TABS.some((t) => t.id === searchParams.get('tab')) ? searchParams.get('tab') : 'map'
+  const setTab = (id) => setSearchParams(id === 'map' ? {} : { tab: id }, { replace: true })
   const [scope, setScope] = useState('volume')
   const [clusterNodes, setClusterNodes] = useState(null) // null = loading
   // Owned here, not per-tab -- same reasoning as AuthorsRelatedness's own
