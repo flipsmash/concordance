@@ -35,6 +35,13 @@ const ZOOM_DEFAULT = 1
 // wants a *distance*, so it's inverted explicitly below rather than reusing
 // GraphView's assumption that the API's own number is already the right
 // one to hand the simulation.
+// "#rrggbb" + alpha -> rgba(); canvas needs a real colour, not color-mix().
+function withAlpha(hex, a) {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex.trim())
+  if (!m) return hex
+  return `rgba(${parseInt(m[1], 16)}, ${parseInt(m[2], 16)}, ${parseInt(m[3], 16)}, ${a})`
+}
+
 function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNavigate, sharedWordsUrl, highlightId, scope }) {
   const [center, setCenter] = useState(null)
   const [rawGraph, setRawGraph] = useState({ nodes: [], edges: [] })
@@ -238,6 +245,23 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
     [rawGraph],
   )
 
+  // The centre's direct neighbours, strongest overlap first -- the exact
+  // answer beside the approximate layout (ego pages only, not the
+  // whole-corpus graph).
+  const neighbours = useMemo(() => {
+    if (!center || initialId === '__all__') return []
+    const byId = new Map(graphData.nodes.map((n) => [n.id, n]))
+    return graphData.links
+      .filter((l) => l.is_center_edge)
+      .map((l) => {
+        const a = endpointId(l.source), b = endpointId(l.target)
+        const other = a === center.id ? b : a
+        return { node: byId.get(other), score: l.score, shared: l.shared_word_count }
+      })
+      .filter((x) => x.node)
+      .sort((x, y) => y.score - x.score)
+  }, [graphData, center, initialId])
+
   const linkLabel = useCallback(
     (l) => `${l.shared_word_count} shared words · ${(l.score * 100).toFixed(0)}% overlap`,
     [],
@@ -315,6 +339,11 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
       ctx.font = `${fontSize}px sans-serif`
       ctx.textAlign = 'center'
       ctx.textBaseline = 'top'
+      // a surface-coloured halo keeps overlapping titles legible
+      ctx.lineJoin = 'round'
+      ctx.lineWidth = 3 / globalScale
+      ctx.strokeStyle = cssVar('--bg', '#fff')
+      ctx.strokeText(getLabel(node), node.x, node.y + r + 2 / globalScale)
       ctx.fillStyle = cssVar('--text-h', '#08060d')
       ctx.fillText(getLabel(node), node.x, node.y + r + 2 / globalScale)
       ctx.globalAlpha = 1
@@ -453,9 +482,11 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
             nodeCanvasObject={paintNode}
             nodeCanvasObjectMode={() => 'replace'}
             nodePointerAreaPaint={paintNodePointerArea}
-            linkColor={() => cssVar('--border', '#e5e4e7')}
+            // Solid hairlines, weighted by overlap: links to the centre in
+            // the text ink, links among its neighbours fainter (they were
+            // dashed, which read as noise, not as "secondary").
+            linkColor={(l) => withAlpha(cssVar('--text', '#5b6572'), l.is_center_edge ? 0.55 : 0.2)}
             linkWidth={(l) => 0.5 + l.score * 2.5}
-            linkLineDash={(l) => (l.is_center_edge ? null : [4, 3])}
             linkLabel={linkLabel}
             onNodeClick={handleNodeClick}
             onLinkClick={handleLinkClick}
@@ -467,6 +498,31 @@ function RelatednessGraph({ initialId, fetchUrl, getLabel, getSublabel, onNodeNa
           <div className="graph-empty">Not enough shared vocabulary yet to show relationships.</div>
         )}
       </div>
+
+      {neighbours.length > 0 && (
+        <section className="relatedness-neighbours">
+          <h3>Closest by shared vocabulary</h3>
+          <ol>
+            {neighbours.map((nb) => (
+              <li key={nb.node.id}>
+                <button type="button" className="relatedness-neighbour-name" onClick={() => onNodeNavigate?.(nb.node)}>
+                  {getLabel(nb.node)}
+                  {getSublabel?.(nb.node) && <span className="muted"> · {getSublabel(nb.node)}</span>}
+                </button>
+                {sharedWordsUrl ? (
+                  <button type="button" className="relatedness-neighbour-shared"
+                    onClick={() => setComparePair({ sourceId: center.id, targetId: nb.node.id,
+                      sourceLabel: getLabel(center), targetLabel: getLabel(nb.node) })}>
+                    {nb.shared.toLocaleString()} shared
+                  </button>
+                ) : (
+                  <span className="muted">{nb.shared.toLocaleString()} shared</span>
+                )}
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
 
       {comparePair && sharedWordsUrl && (
         <SharedWordsPanel

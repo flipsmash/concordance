@@ -55,3 +55,21 @@
   color: var(--text);
   white-space: nowrap;
 }
+
+.growth-chart-bar {
+  fill: var(--accent);
+}
+
+/* a full-height hover target per week, bigger than its bar */
+.growth-chart-hitbar {
+  fill: transparent;
+}
+
+.growth-chart-hitbar:hover {
+  fill: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.growth-chart-peak {
+  fill: var(--text);
+  font-size: 10px;
+}

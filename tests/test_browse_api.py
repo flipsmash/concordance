@@ -2431,3 +2431,34 @@ def test_origins_endpoints_count_by_family_route_and_genre():
         assert words["total"] == 1 and words["words"][0]["lemma"] == "benignity"
     finally:
         restore()
+
+
+@pg
+def test_clusters_are_named_by_their_distinctive_words():
+    schema = "cc_test_cluster_names"
+    client, conn, restore = _setup(schema)
+    try:
+        _login(client)
+        assert client.get("/api/browse/clusters?entity=book").json() == {"clusters": []}
+        common = _insert_word(conn, schema, "common")
+        sea = _insert_word(conn, schema, "bowsprit")
+        west = _insert_word(conn, schema, "cayuse")
+        books = []
+        for i in range(6):
+            bid = _insert_book(conn, schema, f"Book {i}", f"Author {i}")
+            books.append(bid)
+            _link(conn, schema, sea if i < 3 else west, bid)
+        for i in range(10):                      # "common" is everywhere: never a label
+            _link(conn, schema, common, _insert_book(conn, schema, f"Filler {i}"))
+        for bid in books:
+            _link(conn, schema, common, bid)
+        with conn.cursor() as cur:
+            for i, bid in enumerate(books):
+                cur.execute(f"""INSERT INTO {schema}.book_cluster (book_id, title, author, cluster_id, mds_x, mds_y, word_count, computed_at)
+                                VALUES (%s, %s, %s, %s, 0, 0, 2, now())""", (bid, f"Book {i}", f"Author {i}", 1 if i < 3 else 2))
+        conn.commit()
+        got = {c["cluster_id"]: c for c in client.get("/api/browse/clusters?entity=book").json()["clusters"]}
+        assert got[1]["label_words"] == ["bowsprit"] and got[2]["label_words"] == ["cayuse"]
+        assert got[1]["size"] == 3 and sorted(got[1]["members"]) == sorted(books[:3])
+    finally:
+        restore()

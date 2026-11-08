@@ -11,7 +11,7 @@ const PAD_Y = 16
  * in time, and a true time axis would leave huge dead gaps between bursts of
  * practice. y is a fixed 0-100 axis (score_pct). Precomputed/static data, so
  * plain SVG with onMouseEnter hit-testing (same rationale as
- * AuthorClusterMap.jsx) rather than canvas or a simulation. */
+ * ClusterMap.jsx) rather than canvas or a simulation. */
 function SparkTrendLine({ points }) {
   const [hoverIdx, setHoverIdx] = useState(null)
 

@@ -21,7 +21,10 @@ function formatShort(iso) {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
-function GrowthChart({ data, unit }) {
+// bars: one bar per point (the per-week view); otherwise a line + area (the
+// running total). Either way the peak value is printed, so the shape has a
+// scale, and every point has a hover title with its exact value.
+function GrowthChart({ data, unit, bars = false }) {
   // Sized to its container (not a fixed 10px per day, which overflowed on a
   // phone): x positions are computed from the measured width.
   const wrapRef = useRef(null)
@@ -54,7 +57,7 @@ function GrowthChart({ data, unit }) {
     return PADDING_X + i * step
   }
   function y(v) {
-    return PLOT_HEIGHT - (v / maxValue) * PLOT_HEIGHT
+    return PLOT_HEIGHT - (v / maxValue) * (PLOT_HEIGHT - 14) // headroom for the peak label
   }
 
   const points = data.map((d, i) => [x(i), y(d.value)])
@@ -69,14 +72,34 @@ function GrowthChart({ data, unit }) {
       {width > 0 && (
         <>
           <svg className="growth-chart-svg" width={w} height={PLOT_HEIGHT} viewBox={`0 0 ${w} ${PLOT_HEIGHT}`}>
+            <text x={w - 2} y={10} textAnchor="end" className="growth-chart-peak">
+              {bars ? 'busiest week' : 'total'} {maxValue.toLocaleString()} {unit}
+            </text>
+            {bars ? (
+              data.map((d, i) => {
+                const bw = Math.max(2, Math.min(28, step * 0.6)) // thin marks, not blocks
+                const h = d.value ? Math.max(2, PLOT_HEIGHT - y(d.value)) : 0
+                return (
+                  <g key={d.date}>
+                    <rect x={x(i) - bw / 2} y={PLOT_HEIGHT - h} width={bw} height={h} rx={Math.min(3, bw / 3)} className="growth-chart-bar" />
+                    <rect x={x(i) - step / 2} y={0} width={step} height={PLOT_HEIGHT} className="growth-chart-hitbar">
+                      <title>{`Week of ${formatShort(d.date)}: ${d.value.toLocaleString()} ${unit}`}</title>
+                    </rect>
+                  </g>
+                )
+              })
+            ) : (
+              <>
+                <path d={areaPath} className="growth-chart-area" />
+                <polyline points={linePoints} className="growth-chart-line" />
+                {data.map((d, i) => (
+                  <circle key={d.date} cx={x(i)} cy={y(d.value)} r={Math.max(3, Math.min(6, step / 2))} className="growth-chart-hit">
+                    <title>{`${formatShort(d.date)}: ${d.value.toLocaleString()} ${unit}`}</title>
+                  </circle>
+                ))}
+              </>
+            )}
             <line x1={0} y1={PLOT_HEIGHT} x2={w} y2={PLOT_HEIGHT} className="growth-chart-baseline" />
-            <path d={areaPath} className="growth-chart-area" />
-            <polyline points={linePoints} className="growth-chart-line" />
-            {data.map((d, i) => (
-              <circle key={d.date} cx={x(i)} cy={y(d.value)} r={Math.max(3, Math.min(6, step / 2))} className="growth-chart-hit">
-                <title>{`${formatShort(d.date)}: ${d.value.toLocaleString()} ${unit}`}</title>
-              </circle>
-            ))}
           </svg>
           <div className="growth-chart-labels">
             {data.map((d, i) => {

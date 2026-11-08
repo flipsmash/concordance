@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ForceGraph2D from 'react-force-graph-2d'
 import { useNavigate } from 'react-router-dom'
 import { cssVar, ZOOM_MS, ZOOM_PADDING } from './graphUtils'
-import { colorForCluster } from './clusterColors'
+import { isDark } from './domainColors'
 import './GraphView.css'
 import './Categories.css'
 
@@ -60,6 +60,11 @@ function GenreOverlapGraph() {
   const [focusId, setFocusId] = useState(null)
   const [indirectLevels, setIndirectLevels] = useState(0)
   const [minSharedWords, setMinSharedWords] = useState(MIN_SHARED_WORDS_DEFAULT)
+  // Each genre's strongest overlaps only (by ratio): with every genre sharing
+  // some words with every other, drawing all ~800 links was a solid hairball.
+  // A link stays if it's in the top N for EITHER of its genres, so no genre
+  // is left unconnected. 0 = every link.
+  const [linksPerGenre, setLinksPerGenre] = useState(5) // 5: one connected chain; 3 split off the big general genres
   const viewRef = useRef(null)
   const containerRef = useRef(null)
   const fgRef = useRef(null)
@@ -145,13 +150,24 @@ function GenreOverlapGraph() {
   // one graph already (genre has no "top N", see the module docstring)
   // means edge count is the only thing that can make this unreadable as
   // the corpus grows, so this is the knob for that, not a node filter.
-  const edgeFilteredGraphData = useMemo(
-    () => ({
-      nodes: fullGraphData.nodes,
-      links: fullGraphData.links.filter((l) => l.shared_words >= minSharedWords),
-    }),
-    [fullGraphData, minSharedWords],
-  )
+  const edgeFilteredGraphData = useMemo(() => {
+    let links = fullGraphData.links.filter((l) => l.shared_words >= minSharedWords)
+    if (linksPerGenre > 0) {
+      const byGenre = new Map()
+      for (const l of links) {
+        for (const g of [endpointId(l.source), endpointId(l.target)]) {
+          if (!byGenre.has(g)) byGenre.set(g, [])
+          byGenre.get(g).push(l)
+        }
+      }
+      const keep = new Set()
+      for (const ls of byGenre.values()) {
+        ls.sort((a, b) => b.ratio - a.ratio).slice(0, linksPerGenre).forEach((l) => keep.add(l))
+      }
+      links = links.filter((l) => keep.has(l))
+    }
+    return { nodes: fullGraphData.nodes, links }
+  }, [fullGraphData, minSharedWords, linksPerGenre])
   // Scoped to the cutoff but NOT to the current focus, so a link's width
   // stays stable as you focus/unfocus at the same cutoff -- only changing
   // the cutoff itself should redistribute the width scale.
@@ -160,10 +176,13 @@ function GenreOverlapGraph() {
   // Stable index into data.sizes (already alphabetically sorted by the
   // backend) so a genre keeps the same color across reloads/focus changes,
   // rather than a color depending on this render's node ordering.
+  // One validated hue (default categorical slot 1) for every genre: the old
+  // per-genre rainbow encoded nothing, and forty hues can't be told apart.
+  // Genres are identified by their labels; size still shows word count.
   const colorForGenre = useMemo(() => {
-    const map = new Map(fullGraphData.nodes.map((n, i) => [n.id, colorForCluster(i)]))
-    return (id) => map.get(id) || cssVar('--accent', '#1c6dbd')
-  }, [fullGraphData])
+    const hue = isDark() ? '#3987e5' : '#2a78d6'
+    return () => hue
+  }, [])
 
   // Clicking a LABEL (see handleNodeClick) ego-focuses the graph on that
   // genre: only nodes reachable within `indirectLevels + 1` hops (the
@@ -275,6 +294,10 @@ function GenreOverlapGraph() {
       ctx.font = `${fontSize}px sans-serif`
       ctx.textAlign = 'center'
       ctx.textBaseline = 'top'
+      ctx.lineJoin = 'round'
+      ctx.lineWidth = 3 / globalScale
+      ctx.strokeStyle = cssVar('--bg', '#fff')
+      ctx.strokeText(node.name, node.x, node.y + r + 3)
       ctx.fillStyle = cssVar('--text-h', '#08060d')
       ctx.fillText(node.name, node.x, node.y + r + 3)
     },
@@ -351,18 +374,30 @@ function GenreOverlapGraph() {
     doZoomToFit(ZOOM_MS, ZOOM_PADDING)
   }, [doZoomToFit])
 
-  // See RelatednessGraph.jsx's identical handler for the full reasoning:
-  // fires for every zoom-transform change, automatic or user-driven, and
-  // is the one place that tells the two apart (programmaticZoomRef is only
-  // set around our OWN doZoomToFit calls) so future auto-fits know whether
-  // to back off.
+  // Keeps the Zoom slider in step with the camera (automatic or user zoom).
   const handleZoom = useCallback((transform) => {
     setZoomLevel(Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, transform.k)))
-    if (!programmaticZoomRef.current) {
-      userAdjustedRef.current = true
-      if (chaseIntervalRef.current) clearInterval(chaseIntervalRef.current)
-    }
   }, [])
+
+  // "The user took over the camera" is decided from real input on the graph
+  // (wheel, drag, pinch) and the Zoom slider -- NOT from zoom events we didn't
+  // start: the force-graph emits one of those itself when its canvas is
+  // sized, which used to mark the view user-adjusted from the outset, so the
+  // final fit never ran and the graph sat half outside its frame.
+  const takeCamera = useCallback(() => {
+    userAdjustedRef.current = true
+    if (chaseIntervalRef.current) clearInterval(chaseIntervalRef.current)
+  }, [])
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return undefined
+    el.addEventListener('wheel', takeCamera, { passive: true })
+    el.addEventListener('pointerdown', takeCamera)
+    return () => {
+      el.removeEventListener('wheel', takeCamera)
+      el.removeEventListener('pointerdown', takeCamera)
+    }
+  }, [takeCamera])
 
   const showEmpty = data && data.sizes.length < 2
   const focusedNode = focusId ? fullGraphData.nodes.find((n) => n.id === focusId) : null
@@ -390,6 +425,14 @@ function GenreOverlapGraph() {
         ) : (
           <span className="graph-range-control">Click a genre's label to focus on it</span>
         )}
+        <div className="graph-signal-toggle" role="group" aria-label="Links per genre">
+          <span className="graph-range-control">Links per genre</span>
+          {[3, 5, 0].map((n) => (
+            <button key={n} type="button" className={linksPerGenre === n ? 'active' : ''} onClick={() => setLinksPerGenre(n)}>
+              {n === 0 ? 'All' : `Top ${n}`}
+            </button>
+          ))}
+        </div>
         <label className="graph-range-control">
           Min shared words
           <input
@@ -425,6 +468,7 @@ function GenreOverlapGraph() {
             onChange={(e) => {
               const k = Number(e.target.value)
               setZoomLevel(k)
+              takeCamera()
               fgRef.current?.zoom(k, 200)
             }}
             aria-label="Zoom level"

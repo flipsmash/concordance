@@ -194,3 +194,51 @@
   opacity: 1;
   background: var(--row-hover, var(--border));
 }
+
+/* RelatednessGraph's ranked neighbour list under an ego graph. */
+.relatedness-neighbours {
+  margin-top: 14px;
+}
+
+.relatedness-neighbours h3 {
+  margin: 0 0 6px;
+  color: var(--text-h);
+  font-size: 15px;
+}
+
+.relatedness-neighbours ol {
+  margin: 0;
+  padding-left: 22px;
+  columns: 2 320px;
+  column-gap: 28px;
+  font-size: 14px;
+}
+
+.relatedness-neighbours li {
+  break-inside: avoid;
+  padding: 2px 0;
+}
+
+.relatedness-neighbour-name,
+.relatedness-neighbour-shared {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+}
+
+.relatedness-neighbour-name {
+  color: var(--text-h);
+  text-align: left;
+}
+
+.relatedness-neighbour-name:hover {
+  text-decoration: underline;
+}
+
+.relatedness-neighbour-shared {
+  margin-left: 8px;
+  color: var(--accent);
+  font-size: 12px;
+}

@@ -1,0 +1,133 @@
+.cluster-map {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: 420px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.cluster-map:fullscreen {
+  padding: 12px;
+}
+
+.cluster-map-controls {
+  align-items: center;
+  padding: 8px 10px;
+}
+
+.cluster-map-hint {
+  font-size: 13px;
+}
+
+.cluster-map-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 260px;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
+  padding: 0 10px 10px;
+}
+
+.cluster-map-plot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+}
+
+.cluster-map-svg {
+  display: block;
+  width: 100%;
+  max-height: calc(100vh - 300px);
+}
+
+.cluster-map:fullscreen .cluster-map-svg {
+  max-height: calc(100vh - 90px);
+}
+
+/* A 2px surface ring on overlapping dots, not a border colour. */
+.cluster-map-dot {
+  stroke: var(--bg);
+  stroke-width: 2px;
+  cursor: pointer;
+  transition: opacity 120ms;
+}
+
+.cluster-map-dot.key {
+  stroke: var(--text-h);
+}
+
+.cluster-map-name,
+.cluster-map-item-label {
+  fill: var(--text-h);
+  paint-order: stroke;
+  stroke: var(--bg);
+  stroke-width: 3.5px;
+  stroke-linejoin: round;
+}
+
+.cluster-map-name {
+  font-size: 12px;
+  font-weight: 600;
+  cursor: default;
+  transition: opacity 120ms;
+}
+
+.cluster-map-name.off {
+  opacity: 0.25;
+}
+
+.cluster-map-item-label {
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.cluster-map-legend {
+  max-height: calc(100vh - 300px);
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  font-size: 13px;
+}
+
+.cluster-map-legend-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-h);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cluster-map-legend-row:hover,
+.cluster-map-legend-row.on {
+  background: var(--row-hover);
+}
+
+.cluster-map-legend-row[aria-pressed='true'] {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.cluster-map-legend-words {
+  min-width: 0;
+}
+
+@media (max-width: 760px) {
+  .cluster-map-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .cluster-map-legend {
+    max-height: 240px;
+  }
+}

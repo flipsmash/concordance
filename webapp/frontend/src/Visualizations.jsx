@@ -37,7 +37,8 @@ function toHistBands(buckets) {
 // (greyed-out) styling for an unscored column, which toHistBands' buckets
 // never have a use for since none of them carry an "unscored" concept.
 function toFameHistBands(buckets) {
-  return buckets.map((b) => ({
+  // an empty "Not yet scored" bar is noise (everything is scored), so it goes
+  return buckets.filter((b) => !(b.label === 'Not yet scored' && !b.count)).map((b) => ({
     band_min: b.label === 'Not yet scored' ? null : 0,
     band_max: 0,
     label: b.label,
@@ -75,12 +76,21 @@ function sharedDays(...series) {
 function toGrowthSeries(daily, mode, days) {
   if (daily === null) return null // still loading
   const byDate = new Map(daily.map((d) => [d.date, d.count]))
-  let running = 0
-  return days.map((date) => {
-    const count = byDate.get(date) || 0
-    running += count
-    return { date, value: mode === 'cumulative' ? running : count }
+  if (mode === 'cumulative') {
+    let running = 0
+    return days.map((date) => {
+      running += byDate.get(date) || 0
+      return { date, value: running }
+    })
+  }
+  // Weekly totals (7-day buckets from the first shared day): daily counts
+  // were all spikes, since ingests land in occasional batch passes.
+  const weeks = []
+  days.forEach((date, i) => {
+    if (i % 7 === 0) weeks.push({ date, value: 0 })
+    weeks[weeks.length - 1].value += byDate.get(date) || 0
   })
+  return weeks
 }
 
 function Visualizations() {
@@ -151,9 +161,8 @@ function Visualizations() {
       <section className="browse-facets viz-section">
         <h2 className="viz-heading">Corpus growth</h2>
         <p className="viz-description">
-          Books, authors, and words added per day, over the corpus's whole history. Ingestion runs
-          in occasional batch passes rather than a steady trickle, so a bursty daily line is real,
-          not a rendering artifact. "Authors" counts a real author's first book (aggregation labels
+          Books, authors, and words added each week (or the running total), over the corpus's whole history. Ingestion runs
+          in occasional batch passes rather than a steady trickle, so uneven weeks are real. "Authors" counts a real author's first book (aggregation labels
           like "Various" excluded); "words" counts each word's first-ever appearance, even across a
           later re-ingest of the same book.
         </p>
@@ -161,9 +170,10 @@ function Visualizations() {
           <button
             type="button"
             className={growthMode === 'daily' ? 'browse-pill active' : 'browse-pill'}
+            title="Added per week"
             onClick={() => setGrowthMode('daily')}
           >
-            Daily
+            Per week
           </button>
           <button
             type="button"
@@ -176,15 +186,15 @@ function Visualizations() {
         <div className="growth-chart-group">
           <div className="growth-chart-row">
             <span className="growth-chart-row-label">Books</span>
-            <GrowthChart data={toGrowthSeries(bookGrowth, growthMode, growthDays)} unit="books" />
+            <GrowthChart data={toGrowthSeries(bookGrowth, growthMode, growthDays)} unit="books" bars={growthMode !== 'cumulative'} />
           </div>
           <div className="growth-chart-row">
             <span className="growth-chart-row-label">Authors</span>
-            <GrowthChart data={toGrowthSeries(authorGrowth, growthMode, growthDays)} unit="authors" />
+            <GrowthChart data={toGrowthSeries(authorGrowth, growthMode, growthDays)} unit="authors" bars={growthMode !== 'cumulative'} />
           </div>
           <div className="growth-chart-row">
             <span className="growth-chart-row-label">Words</span>
-            <GrowthChart data={toGrowthSeries(wordGrowth, growthMode, growthDays)} unit="words" />
+            <GrowthChart data={toGrowthSeries(wordGrowth, growthMode, growthDays)} unit="words" bars={growthMode !== 'cumulative'} />
           </div>
         </div>
       </section>
@@ -253,6 +263,10 @@ function Visualizations() {
         <DifficultyHistogram
           bands={bookHist}
           selectedBand={null}
+          unit="books"
+          hint="Click a bar to list those books."
+          headline={(b, pct) =>
+            `${b.word_count.toLocaleString()} books (${pct}%) share every word with at least one other book. The rest:`}
           onSelect={(b) => navigate(`/app/books?unique_word_bucket=${encodeURIComponent(b.label)}`)}
         />
       </section>
@@ -267,6 +281,10 @@ function Visualizations() {
         <DifficultyHistogram
           bands={authorHist}
           selectedBand={null}
+          unit="authors"
+          hint="Click a bar to list those authors."
+          headline={(b, pct) =>
+            `${b.word_count.toLocaleString()} authors (${pct}%) share every word with another author. The rest:`}
           onSelect={(b) => navigate(`/app/authors?unique_word_bucket=${encodeURIComponent(b.label)}`)}
         />
       </section>
@@ -282,6 +300,8 @@ function Visualizations() {
         <DifficultyHistogram
           bands={bookFameHist}
           selectedBand={null}
+          unit="books"
+          hint="Click a bar to list those books."
           onSelect={(b) => navigate(`/app/books?${new URLSearchParams(fameHistQuery(b.label))}`)}
         />
       </section>
@@ -294,6 +314,8 @@ function Visualizations() {
         <DifficultyHistogram
           bands={authorFameHist}
           selectedBand={null}
+          unit="authors"
+          hint="Click a bar to list those authors."
           onSelect={(b) => navigate(`/app/authors?${new URLSearchParams(fameHistQuery(b.label))}`)}
         />
       </section>
@@ -309,6 +331,8 @@ function Visualizations() {
         <DifficultyHistogram
           bands={bookDifficultyHist}
           selectedBand={null}
+          unit="books"
+          hint="Click a bar to list those books."
           onSelect={(b) =>
             navigate(`/app/books?${new URLSearchParams({ overall_difficulty_band: b.label })}`)
           }
@@ -323,6 +347,8 @@ function Visualizations() {
         <DifficultyHistogram
           bands={authorDifficultyHist}
           selectedBand={null}
+          unit="authors"
+          hint="Click a bar to list those authors."
           onSelect={(b) =>
             navigate(`/app/authors?${new URLSearchParams({ overall_difficulty_band: b.label })}`)
           }

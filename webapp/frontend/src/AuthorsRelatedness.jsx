@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
-import AuthorClusterMap from './AuthorClusterMap'
-import AuthorDendrogram from './AuthorDendrogram'
+import ClusterDendrogram from './ClusterDendrogram'
+import ClusterMap from './ClusterMap'
 import AuthorMatrix from './AuthorMatrix'
 import ClusterHighlightSelect from './ClusterHighlightSelect'
 import CorpusMap from './CorpusMap'
@@ -126,9 +126,10 @@ function AuthorsRelatedness() {
       </div>
 
       {tab === 'map' && (
-        <AuthorClusterMap
-          highlightAuthor={highlighted}
-          onAuthorClick={(author) => navigate(`/app/authors/${encodeURIComponent(author)}/relatedness`)}
+        <ClusterMap
+          entity="author"
+          highlightKey={highlighted}
+          onItemClick={(author) => navigate(`/app/authors/${encodeURIComponent(author.author ?? author)}/relatedness`)}
           scope={scope}
         />
       )}
@@ -136,9 +137,10 @@ function AuthorsRelatedness() {
       {tab === 'matrix' && <AuthorMatrix highlightAuthor={highlighted} scope={scope} />}
 
       {tab === 'dendrogram' && (
-        <AuthorDendrogram
-          highlightAuthor={highlighted}
-          onAuthorClick={(author) => navigate(`/app/authors/${encodeURIComponent(author)}/relatedness`)}
+        <ClusterDendrogram
+          entity="author"
+          highlightKey={highlighted}
+          onItemClick={(author) => navigate(`/app/authors/${encodeURIComponent(author)}/relatedness`)}
           scope={scope}
         />
       )}

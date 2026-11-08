@@ -13,7 +13,7 @@ const TREE_PAD = 6
 // one-for-one with HTML rows on the right: code, name, word count, then the
 // category's words in book-count order, as many as fit on the row.
 //
-// Hand-rolled SVG like BookDendrogram.jsx -- elbow connectors, merge height
+// Hand-rolled SVG like the old BookDendrogram.jsx -- elbow connectors, merge height
 // on x (root at the left edge, leaves flush right against their rows).
 function layoutTree(tree, rowIndexByCode) {
   const maxDist = tree.distance || 1

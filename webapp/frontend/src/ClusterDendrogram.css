@@ -1,0 +1,131 @@
+.cluster-dendro {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.cluster-dendro:fullscreen {
+  padding: 12px;
+}
+
+.cluster-dendro-controls {
+  align-items: center;
+  padding: 8px 10px;
+}
+
+.cluster-dendro-hint {
+  font-size: 13px;
+}
+
+.cluster-dendro-scroll {
+  max-height: calc(100vh - 290px);
+  min-height: 360px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+}
+
+.cluster-dendro:fullscreen .cluster-dendro-scroll {
+  max-height: calc(100vh - 80px);
+}
+
+.cluster-dendro-grid {
+  position: relative;
+}
+
+/* One shaded band per named group, the name riding on its first row. */
+.cluster-dendro-band {
+  position: absolute;
+  right: 0;
+  left: 0;
+  border-top: 1px solid var(--border);
+  pointer-events: none;
+}
+
+.cluster-dendro-band.alt {
+  background: var(--row-alt);
+}
+
+.cluster-dendro-band-name {
+  position: absolute;
+  top: 3px;
+  right: 10px;
+  max-width: 34%;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  font-style: italic;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cluster-dendro-tree {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+.cluster-dendro-tree line {
+  stroke: var(--text);
+  stroke-width: 1;
+  opacity: 0.55;
+}
+
+.cluster-dendro-leaves {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 226px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cluster-dendro-leaves li {
+  display: flex;
+  align-items: center;
+}
+
+.cluster-dendro-leaf {
+  max-width: 62%;
+  padding: 0 4px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 3px;
+  background: none;
+  color: var(--text-h);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.cluster-dendro-leaf:hover,
+.cluster-dendro-leaf.on {
+  background: var(--row-hover);
+}
+
+.cluster-dendro-leaf.on {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+@media (max-width: 760px) {
+  /* Phones: the branches drop out (as on the category tree); the shaded
+     groups keep the order, and the titles get the width. */
+  .cluster-dendro-tree,
+  .cluster-dendro-band-name {
+    display: none;
+  }
+
+  .cluster-dendro-leaves {
+    left: 6px;
+  }
+
+  .cluster-dendro-leaf {
+    max-width: 100%;
+  }
+}

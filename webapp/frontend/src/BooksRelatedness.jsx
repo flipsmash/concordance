@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
-import BookClusterMap from './BookClusterMap'
-import BookDendrogram from './BookDendrogram'
+import ClusterDendrogram from './ClusterDendrogram'
+import ClusterMap from './ClusterMap'
 import BookMatrix from './BookMatrix'
 import ClusterHighlightSelect from './ClusterHighlightSelect'
 import CorpusMap from './CorpusMap'
@@ -124,11 +124,13 @@ function BooksRelatedness() {
         </div>}
       </div>
 
-      {tab === 'map' && <BookClusterMap highlightBookId={highlighted} onBookClick={goToBook} scope={scope} />}
+      {tab === 'map' && <ClusterMap entity="book" highlightKey={highlighted} onItemClick={goToBook} scope={scope} />}
 
       {tab === 'matrix' && <BookMatrix highlightBookId={highlighted} scope={scope} />}
 
-      {tab === 'dendrogram' && <BookDendrogram highlightBookId={highlighted} onBookClick={goToBook} scope={scope} />}
+      {tab === 'dendrogram' && (
+        <ClusterDendrogram entity="book" highlightKey={highlighted} onItemClick={goToBook} scope={scope} />
+      )}
 
       {tab === 'everything' && (
         <CorpusMap
