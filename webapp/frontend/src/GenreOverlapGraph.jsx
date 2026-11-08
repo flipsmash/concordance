@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ForceGraph2D from 'react-force-graph-2d'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { cssVar, ZOOM_MS, ZOOM_PADDING } from './graphUtils'
 import { isDark } from './domainColors'
 import './GraphView.css'
@@ -51,6 +51,21 @@ function endpointId(endpoint) {
 // new node set or just a Spread tweak on the same one" distinction.
 function GenreOverlapGraph() {
   const navigate = useNavigate()
+  // Families (the top level: genres rolled up, genre.py GENRE_FAMILIES) or
+  // specific genres; audience/form tags (Children's, Classics, Poetry...)
+  // cut across both and are only overlaid on request. In the URL so a view
+  // can be linked to.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const level = searchParams.get('level') === 'genre' ? 'genre' : 'family'
+  const cross = searchParams.get('cross') === '1'
+  function setView(next) {
+    const params = new URLSearchParams(searchParams)
+    for (const [k, v] of Object.entries(next)) {
+      if (v) params.set(k, v)
+      else params.delete(k)
+    }
+    setSearchParams(params, { replace: true })
+  }
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
   const [dims, setDims] = useState({ width: 0, height: 0 })
@@ -64,7 +79,10 @@ function GenreOverlapGraph() {
   // some words with every other, drawing all ~800 links was a solid hairball.
   // A link stays if it's in the top N for EITHER of its genres, so no genre
   // is left unconnected. 0 = every link.
-  const [linksPerGenre, setLinksPerGenre] = useState(5) // 5: one connected chain; 3 split off the big general genres
+  // 5 for genres (one connected chain; 3 split off the big general ones);
+  // 3 for the nine families, where 5 each is nearly every pair
+  const [linksPerGenre, setLinksPerGenre] = useState(level === 'family' ? 3 : 5)
+  useEffect(() => setLinksPerGenre(level === 'family' ? 3 : 5), [level])
   const viewRef = useRef(null)
   const containerRef = useRef(null)
   const fgRef = useRef(null)
@@ -116,14 +134,18 @@ function GenreOverlapGraph() {
   }
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/browse/genre-overlap`)
+    setData(null)
+    setError('')
+    setFocusId(null)
+    userAdjustedRef.current = false // a new set of nodes gets a fresh fit
+    fetch(`${API_BASE}/api/browse/genre-overlap?level=${level}${cross ? '&cross=true' : ''}`)
       .then((res) => {
         if (!res.ok) throw new Error(`request failed (${res.status})`)
         return res.json()
       })
       .then(setData)
       .catch((err) => setError(err.message || 'failed to load overlap'))
-  }, [])
+  }, [level, cross])
 
   // The full, unfiltered graph -- ego-focusing (below) narrows this down
   // for DISPLAY only; radius/color scales stay pinned to the full set so a
@@ -131,7 +153,7 @@ function GenreOverlapGraph() {
   const fullGraphData = useMemo(() => {
     if (!data) return { nodes: [], links: [] }
     return {
-      nodes: data.sizes.map((s) => ({ id: s.genre, name: s.genre, word_count: s.word_count })),
+      nodes: data.sizes.map((s) => ({ id: s.genre, name: s.genre, word_count: s.word_count, members: s.members })),
       links: data.cells.map((c) => ({
         source: c.genre_a, target: c.genre_b, ratio: c.ratio, shared_words: c.shared_words,
       })),
@@ -350,11 +372,17 @@ function GenreOverlapGraph() {
     if (isLabelClick) {
       setFocusId(node.id)
     } else {
-      navigate(`/app/books?genre=${encodeURIComponent(node.id)}`)
+      // a family opens the books of any of its genres
+      const params = new URLSearchParams((node.members?.length ? node.members : [node.id]).map((g) => ['genre', g]))
+      navigate(`/app/books?${params}`)
     }
   }
 
   function handleLinkClick(link) {
+    // words shared by two FAMILIES aren't expressible as the words page's
+    // all_genre filter (an AND over single genres), so family links are
+    // hover-only
+    if (level === 'family') return
     const params = new URLSearchParams()
     params.append('all_genre', endpointId(link.source))
     params.append('all_genre', endpointId(link.target))
@@ -425,6 +453,18 @@ function GenreOverlapGraph() {
         ) : (
           <span className="graph-range-control">Click a genre's label to focus on it</span>
         )}
+        <div className="graph-signal-toggle" role="group" aria-label="Group by">
+          {[['family', 'Families'], ['genre', 'Genres']].map(([id, label]) => (
+            <button key={id} type="button" className={level === id ? 'active' : ''}
+              onClick={() => setView({ level: id === 'genre' ? 'genre' : null })}>
+              {label}
+            </button>
+          ))}
+        </div>
+        <label className="graph-range-control" title="Children's, Young Adult, Classics, Poetry, Comics, Graphic Novels, Manga">
+          <input type="checkbox" checked={cross} onChange={(e) => setView({ cross: e.target.checked ? '1' : null })} />
+          Audience &amp; form tags
+        </label>
         <div className="graph-signal-toggle" role="group" aria-label="Links per genre">
           <span className="graph-range-control">Links per genre</span>
           {[3, 5, 0].map((n) => (

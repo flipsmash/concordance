@@ -12,6 +12,7 @@ from typing import Literal
 from fastapi import Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from concordance import genre as genre_mod
 from webapp.backend import main as _main
 
 from .common import _ARCHIVE_ROOT, _BOOK_SORT_COLUMNS, _NULLABLE_SORTS, _SORT_TITLE_EXPR, _build_word_filters, _overall_difficulty_band_filter, _unique_word_bucket_filter, _unique_word_bucket_range, router
@@ -81,6 +82,7 @@ def browse_genres(_: dict = Depends(_main.require_viewer)) -> list[str]:
 class GenreCount(BaseModel):
     genre: str
     word_count: int
+    members: list[str] = []   # the book genres a node stands for (a family's genres; else itself)
 
 
 class GenreOverlapCell(BaseModel):
@@ -99,7 +101,8 @@ class GenreOverlap(BaseModel):
 
 
 @router.get("/api/browse/genre-overlap", response_model=GenreOverlap)
-def browse_genre_overlap(_: dict = Depends(_main.require_viewer)) -> GenreOverlap:
+def browse_genre_overlap(level: str = Query("family", pattern="^(family|genre)$"), cross: bool = False,
+                         _: dict = Depends(_main.require_viewer)) -> GenreOverlap:
     """How much active-word vocabulary each pair of genres shares -- feeds
     GenreOverlapGraph on the Visualizations page. Unlike
     browse_category_overlap (three drilldown tiers, since USAS categories
@@ -119,16 +122,35 @@ def browse_genre_overlap(_: dict = Depends(_main.require_viewer)) -> GenreOverla
     copy-adapts rather than forcing one abstraction over genuinely
     different join shapes: category attaches to a word directly via
     word_category, genre only reaches a word by way of word_book)."""
+    # Which node each book genre counts toward (genre.py): `level=family`
+    # rolls genres up into families; `level=genre` keeps specific genres
+    # and drops the bare Fiction/Nonfiction fallbacks. Audience/form tags
+    # (Children's, Classics, Poetry...) cut across genres and only appear,
+    # as their own nodes, with `cross`.
+    node_of: dict[str, str] = {}
+    for g in genre_mod.GENRE_LIST:
+        if g in genre_mod.CROSS_CUTTING:
+            if cross:
+                node_of[g] = g
+        elif level == "family":
+            node_of[g] = genre_mod.FAMILY_OF[g]
+        elif g not in genre_mod.FALLBACK:
+            node_of[g] = g
+    members: dict[str, list[str]] = defaultdict(list)
+    for g, node in node_of.items():
+        members[node].append(g)
+
     with _main.get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             f"""SELECT DISTINCT wb.word_id, bg.genre
                 FROM {_main.SCHEMA}.word_book wb
                 JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id AND w.active
-                JOIN {_main.SCHEMA}.book_genre bg ON bg.book_id = wb.book_id"""
+                JOIN {_main.SCHEMA}.book_genre bg ON bg.book_id = wb.book_id
+                WHERE bg.genre = ANY(%s)""", (list(node_of),)
         )
         word_genres: dict[int, set[str]] = defaultdict(set)
         for word_id, genre in cur.fetchall():
-            word_genres[word_id].add(genre)
+            word_genres[word_id].add(node_of[genre])
 
     sizes: dict[str, int] = defaultdict(int)
     shared: dict[tuple[str, str], int] = defaultdict(int)
@@ -139,7 +161,7 @@ def browse_genre_overlap(_: dict = Depends(_main.require_viewer)) -> GenreOverla
             for a, b in itertools.combinations(sorted(genres), 2):
                 shared[(a, b)] += 1
 
-    size_rows = [GenreCount(genre=g, word_count=n) for g, n in sorted(sizes.items())]
+    size_rows = [GenreCount(genre=g, word_count=n, members=sorted(members[g])) for g, n in sorted(sizes.items())]
     cells = [
         GenreOverlapCell(
             genre_a=a, genre_b=b, shared_words=n,

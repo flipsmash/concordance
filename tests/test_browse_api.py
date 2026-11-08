@@ -992,7 +992,7 @@ def test_genre_overlap_and_all_genre_intersection_filter():
         _link(conn, schema, both, book_both)
         conn.commit()
 
-        data = client.get("/api/browse/genre-overlap").json()
+        data = client.get("/api/browse/genre-overlap?level=genre").json()
         sizes = {s["genre"]: s["word_count"] for s in data["sizes"]}
         assert sizes["Fantasy"] == 2   # onlyfantasy + bothgenres
         assert sizes["History"] == 2   # onlyhistory + bothgenres
@@ -1007,6 +1007,39 @@ def test_genre_overlap_and_all_genre_intersection_filter():
         # OR), same reasoning all_top_code differs from top_code.
         words = client.get("/api/browse/words?all_genre=Fantasy&all_genre=History").json()
         assert {w["lemma"] for w in words["items"]} == {"bothgenres"}
+    finally:
+        restore()
+
+
+@pg
+def test_genre_overlap_levels_families_and_cross_cutting_tags():
+    """Families roll genres up (the bare Fiction fallback joins General
+    fiction); the genre level drops that fallback; audience/form tags such
+    as Children's only appear with cross=true."""
+    schema = "cc_test_genre_overlap_levels"
+    client, conn, restore = _setup(schema)
+    try:
+        tags = {"Space": ["Science Fiction", "Children's"], "Ghosts": ["Horror"], "Plain": ["Fiction"]}
+        for title, genres in tags.items():
+            bid = _insert_book(conn, schema, title, author=f"Author {title}")
+            with conn.cursor() as cur:
+                for g in genres:
+                    cur.execute(f"INSERT INTO {schema}.book_genre (book_id, genre, source) VALUES (%s,%s,'llm')",
+                                (bid, g))
+            conn.commit()
+            wid = _insert_word(conn, schema, f"word{title.lower()}")
+            _link(conn, schema, wid, bid)
+        conn.commit()
+
+        fam = client.get("/api/browse/genre-overlap").json()
+        assert {s["genre"]: (s["word_count"], s["members"]) for s in fam["sizes"]} == {
+            "Speculative": (2, ["Fantasy", "Horror", "Paranormal", "Science Fiction"]),
+            "General fiction": (1, ["Contemporary", "Drama", "Fiction", "Historical Fiction", "Humor and Comedy"])}
+        leaf = client.get("/api/browse/genre-overlap?level=genre").json()
+        assert sorted(s["genre"] for s in leaf["sizes"]) == ["Horror", "Science Fiction"]   # no bare Fiction
+        crossed = client.get("/api/browse/genre-overlap?level=genre&cross=true").json()
+        assert sorted(s["genre"] for s in crossed["sizes"]) == ["Children's", "Horror", "Science Fiction"]
+        assert [(c["genre_a"], c["genre_b"]) for c in crossed["cells"]] == [("Children's", "Science Fiction")]
     finally:
         restore()
 

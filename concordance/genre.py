@@ -41,6 +41,32 @@ GENRE_LIST = (
 )
 _CANONICAL = {g.lower(): g for g in GENRE_LIST}
 
+# Two views of GENRE_LIST for the genres-by-vocabulary graph, which used to
+# set every label side by side as if they were siblings.
+#
+# Audience, form and canon-status tags describe a book along a different
+# axis from its genre and cut across all of them (a Children's Science
+# Fiction book carries both), so the graph leaves them out unless asked.
+CROSS_CUTTING = ("Children's", "Young Adult", "Classics", "Poetry", "Comics", "Graphic Novels", "Manga")
+# The bare fallbacks, given only when nothing specific fits -- an "unsorted"
+# bucket, not a genre beside Science Fiction. Left out of the genre-level
+# view; each joins its broad family in the family view.
+FALLBACK = ("Fiction", "Nonfiction")
+# Genre families, for the top-level view (Brian, 2026-11-08). Every genre
+# that isn't cross-cutting is in exactly one.
+GENRE_FAMILIES = {
+    "Speculative": ("Science Fiction", "Fantasy", "Horror", "Paranormal"),
+    "Crime & suspense": ("Mystery", "Crime", "Thriller", "Suspense"),
+    "Romance": ("Romance", "Chick Lit"),
+    "General fiction": ("Fiction", "Historical Fiction", "Contemporary", "Humor and Comedy", "Drama"),
+    "Life writing": ("Biography", "Memoir"),
+    "History & travel": ("History", "Travel"),
+    "Faith & thought": ("Religion", "Christian", "Spirituality", "Philosophy", "Psychology"),
+    "Science & practical": ("Science", "Business", "Self Help", "Cookbooks", "Sports", "Nonfiction"),
+    "Arts": ("Art", "Music", "Gay and Lesbian"),
+}
+FAMILY_OF = {g: fam for fam, members in GENRE_FAMILIES.items() for g in members}
+
 # The one axis the redundancy rule applies to. Christian/Gay and Lesbian/Music
 # are deliberately left out of both sets -- each spans fiction AND nonfiction
 # in practice (Christian fiction vs. Christian devotional; a memoir vs. a
