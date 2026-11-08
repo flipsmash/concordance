@@ -2,9 +2,12 @@
 // concordance/usas_domains.py's DOMAIN_BUCKETS keys exactly — the API returns
 // `color_bucket` strings that are looked up here directly, no re-mapping.
 //
-// A validated CVD-safe 6-hue subset (all-pairs check, since any two nodes in a
-// force-directed layout can end up adjacent) of the dataviz skill's default
-// categorical palette. Plain JS values, not CSS custom properties: canvas fill
+// Six hues from the dataviz skill's default categorical palette. NOT
+// all-pairs safe (re-checked 2026-11-08: orange vs red is normal-vision dE
+// 7.1, under the hard floor of 15; no six of the eight default hues pass
+// all-pairs), so a view where any two can sit side by side must not rely on
+// them alone: the domain map uses one at a time (emphasis), and the word
+// graph labels its nodes. Plain JS values, not CSS custom properties: canvas fill
 // styles need real color strings, and getComputedStyle/CSS vars don't flow
 // into ctx.fillStyle for free.
 export const DOMAIN_COLORS = {

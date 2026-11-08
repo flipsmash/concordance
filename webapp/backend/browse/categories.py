@@ -576,7 +576,33 @@ def browse_domain_map(
     gap between the two to worry about."""
     default_floor = 50 if entity == "book" else 100
     floor = max(min_words, default_floor)
+    key = (_main.SCHEMA, entity, floor)
+    hit = _domain_map_cache.get(key)
+    if hit and time.monotonic() - hit[0] < _DOMAIN_MAP_TTL:
+        return hit[1]
+    result = _domain_map_compute(entity, floor)
+    _domain_map_cache[key] = (time.monotonic(), result)
+    return result
 
+
+# The domain map is one big aggregate over word_book x word_category (~17s
+# at 29k books) and only changes after an ingest or `maintain`, so it is
+# cached (like the category tree) and warmed in the background at startup
+# (warm_domain_map_cache) -- otherwise the page sat on "Loading…" for 17s.
+_DOMAIN_MAP_TTL = 6 * 3600
+_domain_map_cache: dict[tuple, tuple[float, "DomainMapResponse"]] = {}
+
+
+def warm_domain_map_cache() -> None:
+    """Compute both default domain maps into the cache (startup thread)."""
+    for entity, floor in (("book", 50), ("author", 100)):
+        try:
+            _domain_map_cache[(_main.SCHEMA, entity, floor)] = (time.monotonic(), _domain_map_compute(entity, floor))
+        except Exception:      # a cold cache is only slower, never wrong
+            pass
+
+
+def _domain_map_compute(entity: str, floor: int) -> "DomainMapResponse":
     with _main.get_conn() as conn, conn.cursor() as cur:
         if entity == "book":
             cur.execute(

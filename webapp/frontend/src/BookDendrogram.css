@@ -41,3 +41,18 @@
   fill: var(--text-h);
   pointer-events: none;
 }
+
+/* Phones: 200 leaves can't be read squeezed into ~360px, so the tree keeps
+   a readable width and pans sideways inside its frame instead. */
+@media (max-width: 720px) {
+  .book-dendrogram {
+    overflow-x: auto;
+  }
+
+  .book-dendrogram-svg {
+    flex: none;
+    width: 900px;
+    min-width: 900px;
+    height: 100%;
+  }
+}

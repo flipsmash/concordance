@@ -103,6 +103,11 @@ def require_admin(request: Request, user: dict | None = Depends(get_current_user
 def on_startup() -> None:
     with get_conn() as conn:
         cdb.apply_schema(conn, SCHEMA)
+    # The domain map takes ~17s to compute; warm its cache in the background
+    # so the first visitor doesn't wait (see browse.categories).
+    import threading
+    from webapp.backend.browse.categories import warm_domain_map_cache
+    threading.Thread(target=warm_domain_map_cache, name="warm-domain-map", daemon=True).start()
 
 
 class UserOut(BaseModel):

@@ -1,5 +1,13 @@
 .growth-chart {
-  overflow-x: auto;
+  width: 100%;
+  min-width: 0;
+}
+
+.growth-chart-loading {
+  display: flex;
+  align-items: center;
+  height: 110px;
+  font-size: 13px;
 }
 
 .growth-chart-svg {

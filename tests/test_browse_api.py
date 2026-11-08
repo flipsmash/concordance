@@ -62,7 +62,8 @@ def _setup(schema: str):
         would have done after the test's inserts."""
 
         def get(self, url, *args, **kwargs):
-            if str(url).startswith(("/api/browse/books", "/api/browse/authors")):
+            if str(url).startswith(("/api/browse/books", "/api/browse/authors", "/api/browse/unique-word-histogram",
+                                    "/api/browse/overall-difficulty-histogram")):
                 db.compute_book_stats(conn, schema)
                 db.compute_author_stats(conn, schema)
             return super().get(url, *args, **kwargs)

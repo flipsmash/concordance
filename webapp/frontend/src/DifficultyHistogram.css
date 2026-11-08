@@ -67,3 +67,10 @@
   color: var(--text);
   white-space: nowrap;
 }
+
+.diff-hist-loading {
+  display: flex;
+  align-items: center;
+  height: 170px;
+  font-size: 13px;
+}

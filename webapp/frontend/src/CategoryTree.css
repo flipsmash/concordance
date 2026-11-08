@@ -20,6 +20,13 @@
   color: var(--rail-accent);
 }
 
+/* Stacked crumb / title / lede, like the Popularity page. Without this the
+   app-wide `header { display: flex }` put them side by side, which on a
+   phone squeezed the title into a column three words wide. */
+.cattree-header {
+  display: block;
+}
+
 .cattree-title {
   margin: 10px 0 6px;
   font-family: var(--font-display);

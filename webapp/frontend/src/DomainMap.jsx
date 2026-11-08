@@ -1,14 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
 import { colorForBucket } from './domainColors'
+import { cssVar } from './graphUtils'
 import './DomainMap.css'
 import './GraphView.css' // .graph-controls/.graph-maximize/.graph-signal-toggle/.graph-error/.graph-loading/.graph-empty
 
 const API_BASE = ''
-const VIEW = 600 // SVG viewBox is VIEW x VIEW, coordinates normalized into it
-const PADDING = 40
-const RADIUS_MIN = 3
-const RADIUS_MAX = 13
+const PADDING = 28
+const RADIUS_MIN = 1.6
+const RADIUS_MAX = 6
+const HIT_PX = 8
 
 const ENTITY_TABS = [
   { id: 'book', label: 'Works' },
@@ -24,26 +25,30 @@ const SPREAD_DEFAULT = 1
 // author_similarity/book_similarity's word overlap). Two works can sit close
 // here with no words in common, as long as their vocabulary leans on the
 // same mix of USAS discourse fields (e.g. both heavy in Nature & Science).
-// See browse.py's /api/browse/domain-map for the PCA + corpus-relative-lift
-// color computation. Plain SVG, same reasoning as AuthorClusterMap: these
-// points are precomputed server-side per request, no client-side simulation
-// to run.
+// See /api/browse/domain-map for the PCA + corpus-relative-lift computation.
+//
+// Canvas, not SVG: ~29k points (SVG re-rendered all of them on every hover).
+// Colour by EMPHASIS, not six hues at once: in a scatter any two dots can sit
+// side by side, and no six categorical colours stay distinguishable across
+// every pair (the dataviz validator fails all-pairs past three -- the old
+// palette had orange vs red at normal-vision dE 7.1). So every dot is a
+// neutral grey showing the overall shape, and picking a field draws that
+// field's dots on top in its own hue.
 function DomainMap() {
   const navigate = useNavigate()
   const [entity, setEntity] = useState('book')
   const [nodes, setNodes] = useState(null) // null = loading
   const [error, setError] = useState('')
-  const [hovered, setHovered] = useState(null)
+  const [hovered, setHovered] = useState(null) // {p, x, y}
   const [legend, setLegend] = useState([])
+  const [focus, setFocus] = useState(null) // a domain bucket, or null = none highlighted
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [spread, setSpread] = useState(SPREAD_DEFAULT)
-  // Buckets the user has clicked off in the legend -- kept as a set of
-  // domain-bucket keys (not entity ids), so it survives switching between
-  // the Works/Authors tabs (a filter like "hide Nature & Science" is a
-  // property of how you want to look at the map, not of which entity is
-  // currently shown).
-  const [hiddenBuckets, setHiddenBuckets] = useState(() => new Set())
+  const [size, setSize] = useState({ w: 0, h: 0 })
+  const [themeTick, setThemeTick] = useState(0)
   const containerRef = useRef(null)
+  const wrapRef = useRef(null)
+  const canvasRef = useRef(null)
 
   useEffect(() => {
     fetch(`${API_BASE}/api/graph/legend`).then((res) => res.json()).then(setLegend).catch(() => {})
@@ -70,170 +75,210 @@ function DomainMap() {
     return () => document.removeEventListener('fullscreenchange', handleFullscreenChange)
   }, [])
 
+  useEffect(() => {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)')
+    const onChange = () => setThemeTick((t) => t + 1)
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [])
+
+  useEffect(() => {
+    const el = wrapRef.current
+    if (!el) return undefined
+    const ro = new ResizeObserver(() => setSize({ w: el.clientWidth, h: el.clientHeight }))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [nodes])
+
   function toggleFullscreen() {
     if (document.fullscreenElement) document.exitFullscreen()
     else containerRef.current?.requestFullscreen()
   }
 
-  const { points, maxWordCount } = useMemo(() => {
-    if (!nodes || nodes.length === 0) return { points: [], maxWordCount: 1 }
-    const xs = nodes.map((n) => n.x)
-    const ys = nodes.map((n) => n.y)
-    const minX = Math.min(...xs)
-    const maxX = Math.max(...xs)
-    const minY = Math.min(...ys)
-    const maxY = Math.max(...ys)
-    const spanX = maxX - minX || 1
-    const spanY = maxY - minY || 1
-    const span = Math.max(spanX, spanY)
-    // The base scale fits the UNZOOMED extent to the viewBox -- fixed per
-    // dataset, independent of spread. spread then multiplies straight onto
-    // it as real magnification: a first attempt instead raised each point's
-    // distance from the center to a power, which sounded like "spread" but
-    // wasn't -- every point still got re-fit to the same box afterward, so
-    // a whole dense cluster near the center (which is most points, in a
-    // PCA/cosine layout) landed at nearly the same NEW radius once pushed
-    // outward, forming a ring around an empty middle instead of spreading
-    // out. Multiplying the fixed base scale directly is a true uniform zoom:
-    // every pairwise distance grows by the same factor, so a crowded
-    // cluster becomes individually visible without any point relative to
-    // any OTHER point moving the wrong way. The tradeoff, same as zooming
-    // any map, is that far-out points can scroll past the visible edge at
-    // high spread -- expected, not a bug.
-    const scale = ((VIEW - 2 * PADDING) / span) * spread
-    const centerX = (minX + maxX) / 2
-    const centerY = (minY + maxY) / 2
-    const maxWords = Math.max(...nodes.map((n) => n.word_count), 1)
-    return {
-      maxWordCount: maxWords,
-      points: nodes.map((n) => ({
-        ...n,
-        cx: VIEW / 2 + (n.x - centerX) * scale,
-        cy: VIEW / 2 - (n.y - centerY) * scale,
-      })),
+  // Layout: fit the full extent to the canvas, then `spread` magnifies
+  // uniformly about the centre (a true zoom -- every pairwise distance grows
+  // by the same factor, so a crowded middle becomes individually visible).
+  const points = useMemo(() => {
+    if (!nodes || !nodes.length || !size.w) return []
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, maxWords = 1
+    for (const n of nodes) {
+      minX = Math.min(minX, n.x); maxX = Math.max(maxX, n.x)
+      minY = Math.min(minY, n.y); maxY = Math.max(maxY, n.y)
+      maxWords = Math.max(maxWords, n.word_count)
     }
-  }, [nodes, spread])
+    const span = Math.max(maxX - minX, maxY - minY) || 1
+    const scale = (Math.min(size.w, size.h) - 2 * PADDING) / span * spread
+    const cx0 = (minX + maxX) / 2, cy0 = (minY + maxY) / 2
+    return nodes.map((n) => ({
+      ...n,
+      cx: size.w / 2 + (n.x - cx0) * scale,
+      cy: size.h / 2 - (n.y - cy0) * scale,
+      r: RADIUS_MIN + Math.sqrt(n.word_count / maxWords) * (RADIUS_MAX - RADIUS_MIN), // area-proportional
+    }))
+  }, [nodes, size, spread])
 
-  // Radius scale and the min/max layout above both stay keyed to the FULL
-  // node set regardless of hiddenBuckets, so toggling a category off never
-  // resizes or re-fits the points that remain -- only visiblePoints (below)
-  // changes what actually gets drawn.
-  const visiblePoints = useMemo(
-    () => points.filter((p) => !hiddenBuckets.has(p.dominant_bucket)),
-    [points, hiddenBuckets],
-  )
+  // Draw: everything in grey, then the focused field's dots on top in colour.
+  const draw = useCallback(() => {
+    const canvas = canvasRef.current
+    if (!canvas || !size.w) return
+    const dpr = window.devicePixelRatio || 1
+    canvas.width = Math.round(size.w * dpr)
+    canvas.height = Math.round(size.h * dpr)
+    canvas.style.width = `${size.w}px`
+    canvas.style.height = `${size.h}px`
+    const ctx = canvas.getContext('2d')
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.clearRect(0, 0, size.w, size.h)
+    const grey = cssVar('--text', '#5b6572')
+    const dot = (p) => {
+      ctx.beginPath()
+      ctx.arc(p.cx, p.cy, p.r, 0, Math.PI * 2)
+      ctx.fill()
+    }
+    ctx.fillStyle = grey
+    ctx.globalAlpha = focus ? 0.12 : 0.28
+    for (const p of points) if (p.dominant_bucket !== focus) dot(p)
+    if (focus) {
+      ctx.globalAlpha = 0.85
+      ctx.fillStyle = colorForBucket(focus)
+      for (const p of points) if (p.dominant_bucket === focus) dot(p)
+    }
+    ctx.globalAlpha = 1
+    if (hovered) {
+      ctx.lineWidth = 2
+      ctx.strokeStyle = cssVar('--text-h', '#10181f')
+      ctx.beginPath()
+      ctx.arc(hovered.p.cx, hovered.p.cy, hovered.p.r + 2, 0, Math.PI * 2)
+      ctx.stroke()
+    }
+    // themeTick: redraw with the other mode's colours
+  }, [points, size, focus, hovered, themeTick]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  function radiusFor(wordCount) {
-    const t = Math.sqrt(wordCount / maxWordCount) // area-proportional, not radius-proportional
-    return RADIUS_MIN + t * (RADIUS_MAX - RADIUS_MIN)
-  }
+  useEffect(() => {
+    const id = requestAnimationFrame(draw)
+    return () => cancelAnimationFrame(id)
+  }, [draw])
 
-  function toggleBucket(bucket) {
-    setHiddenBuckets((prev) => {
-      const next = new Set(prev)
-      if (next.has(bucket)) next.delete(bucket)
-      else next.add(bucket)
-      return next
+  // Hover: nearest dot within reach, via a coarse grid over screen space.
+  const grid = useMemo(() => {
+    const cell = 16
+    const cells = new Map()
+    points.forEach((p, i) => {
+      const k = `${Math.floor(p.cx / cell)},${Math.floor(p.cy / cell)}`
+      if (!cells.has(k)) cells.set(k, [])
+      cells.get(k).push(i)
     })
+    return { cell, cells }
+  }, [points])
+
+  function hit(x, y) {
+    const { cell, cells } = grid
+    let best = null, bestD = HIT_PX * HIT_PX
+    for (let cx = Math.floor((x - HIT_PX) / cell); cx <= Math.floor((x + HIT_PX) / cell); cx++)
+      for (let cy = Math.floor((y - HIT_PX) / cell); cy <= Math.floor((y + HIT_PX) / cell); cy++)
+        for (const i of cells.get(`${cx},${cy}`) || []) {
+          const p = points[i]
+          if (focus && p.dominant_bucket !== focus) continue
+          const d = (p.cx - x) ** 2 + (p.cy - y) ** 2
+          if (d <= bestD) { bestD = d; best = p }
+        }
+    return best
   }
 
-  function handleClick(p) {
+  function onMove(e) {
+    const r = canvasRef.current.getBoundingClientRect()
+    const x = e.clientX - r.left, y = e.clientY - r.top
+    const p = hit(x, y)
+    setHovered(p ? { p, x, y } : null)
+  }
+
+  function onClick() {
+    const p = hovered?.p
+    if (!p) return
     if (entity === 'book') navigate(`/app/authors/${encodeURIComponent(p.subtitle || '')}/${p.id}`)
     else navigate(`/app/authors/${encodeURIComponent(p.id)}`)
   }
 
+  const counts = useMemo(() => {
+    const c = {}
+    for (const n of nodes || []) c[n.dominant_bucket] = (c[n.dominant_bucket] || 0) + 1
+    return c
+  }, [nodes])
+  const noun = entity === 'book' ? 'works' : 'authors'
+
   return (
-    <div className="domain-map" ref={containerRef}>
-      <div className="graph-controls domain-map-controls">
-        <div className="graph-signal-toggle" role="group" aria-label="Entity">
-          {ENTITY_TABS.map((t) => (
-            <button key={t.id} type="button" className={entity === t.id ? 'active' : ''} onClick={() => setEntity(t.id)}>
-              {t.label}
+    <div className="domain-map-page">
+      <header className="domain-map-header">
+        <Link to="/app/visualizations" className="domain-map-crumb">← Visualizations</Link>
+        <h1>Works &amp; authors by discipline category</h1>
+        <p className="muted">
+          Each dot is a work (or author), placed by how its vocabulary spreads across subject fields
+          &mdash; science, law, the arts&hellip; Dots close together lean on the same mix of fields, even with
+          no words in common. Pick a field to see where its {noun} sit.
+        </p>
+      </header>
+
+      <div className="domain-map" ref={containerRef}>
+        <div className="graph-controls domain-map-controls">
+          <div className="graph-signal-toggle" role="group" aria-label="Entity">
+            {ENTITY_TABS.map((t) => (
+              <button key={t.id} type="button" className={entity === t.id ? 'active' : ''} onClick={() => setEntity(t.id)}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+          <label className="domain-map-spread">
+            Spread
+            <input type="range" min={SPREAD_MIN} max={SPREAD_MAX} step={0.1} value={spread}
+              onChange={(e) => setSpread(Number(e.target.value))} />
+          </label>
+          <button type="button" className="graph-maximize" onClick={toggleFullscreen}>
+            {isFullscreen ? 'Exit fullscreen' : 'Maximize'}
+          </button>
+        </div>
+
+        <div className="domain-map-fields" role="group" aria-label="Highlight a field">
+          <span className="muted">Highlight:</span>
+          {legend.map((e) => (
+            <button key={e.bucket} type="button" aria-pressed={focus === e.bucket}
+              className={`domain-map-field${focus === e.bucket ? ' active' : ''}`}
+              onClick={() => setFocus(focus === e.bucket ? null : e.bucket)}>
+              <span className="domain-map-legend-swatch" style={{ background: colorForBucket(e.bucket) }} />
+              {e.name}
+              {nodes && <span className="muted"> {(counts[e.bucket] || 0).toLocaleString()}</span>}
             </button>
           ))}
         </div>
-        <label className="domain-map-spread">
-          Spread
-          <input
-            type="range"
-            min={SPREAD_MIN}
-            max={SPREAD_MAX}
-            step={0.1}
-            value={spread}
-            onChange={(e) => setSpread(Number(e.target.value))}
-          />
-        </label>
-        <button type="button" className="graph-maximize" onClick={toggleFullscreen}>
-          {isFullscreen ? 'Exit fullscreen' : 'Maximize'}
-        </button>
+
+        {error && <div className="graph-error">{error}</div>}
+        {nodes === null && !error && <div className="graph-loading">Loading…</div>}
+        {nodes !== null && nodes.length === 0 && !error && (
+          <div className="graph-empty">No {noun} meet the minimum word count yet.</div>
+        )}
+
+        {nodes !== null && nodes.length > 0 && (
+          <div className="domain-map-canvas" ref={wrapRef}>
+            <canvas
+              ref={canvasRef}
+              role="img"
+              aria-label={`Map of ${nodes.length} ${noun} by discipline category`}
+              onMouseMove={onMove}
+              onMouseLeave={() => setHovered(null)}
+              onClick={onClick}
+              style={{ cursor: hovered ? 'pointer' : 'default' }}
+            />
+            {hovered && (
+              <div className="domain-map-tooltip" style={{ left: hovered.x + 12, top: hovered.y + 12 }}>
+                <strong>{hovered.p.label}</strong>
+                {hovered.p.subtitle && <span className="muted"> · {hovered.p.subtitle}</span>}
+                <span>
+                  {hovered.p.dominant_name} ({Math.round(hovered.p.dominant_fraction * 100)}%)
+                </span>
+              </div>
+            )}
+          </div>
+        )}
       </div>
-
-      {error && <div className="graph-error">{error}</div>}
-      {nodes === null && !error && <div className="graph-loading">Loading…</div>}
-      {nodes !== null && nodes.length === 0 && !error && (
-        <div className="graph-empty">
-          No {entity === 'book' ? 'works' : 'authors'} meet the minimum word count yet.
-        </div>
-      )}
-      {nodes !== null && nodes.length > 0 && visiblePoints.length === 0 && (
-        <div className="graph-empty">Every category is hidden -- click a legend color to bring it back.</div>
-      )}
-
-      {visiblePoints.length > 0 && (
-        <svg
-          viewBox={`0 0 ${VIEW} ${VIEW}`}
-          className="domain-map-svg"
-          role="img"
-          aria-label="Discipline-category relationship map"
-        >
-          {visiblePoints.map((p) => {
-            const isActive = p.id === hovered
-            return (
-              <g
-                key={p.id}
-                className="domain-map-point"
-                onClick={() => handleClick(p)}
-                onMouseEnter={() => setHovered(p.id)}
-                onMouseLeave={() => setHovered((h) => (h === p.id ? null : h))}
-              >
-                <circle
-                  cx={p.cx}
-                  cy={p.cy}
-                  r={radiusFor(p.word_count)}
-                  fill={colorForBucket(p.dominant_bucket)}
-                  opacity={hovered === null || isActive ? 1 : 0.35}
-                />
-                {isActive && (
-                  <text x={p.cx} y={p.cy - radiusFor(p.word_count) - 4} textAnchor="middle" className="domain-map-label">
-                    {p.label}
-                    {p.subtitle ? ` · ${p.subtitle}` : ''} — {p.dominant_name} ({Math.round(p.dominant_fraction * 100)}%)
-                  </text>
-                )}
-              </g>
-            )
-          })}
-        </svg>
-      )}
-
-      {legend.length > 0 && (
-        <div className="domain-map-legend">
-          {legend.map((e) => {
-            const isHidden = hiddenBuckets.has(e.bucket)
-            return (
-              <button
-                type="button"
-                key={e.bucket}
-                className={isHidden ? 'domain-map-legend-item off' : 'domain-map-legend-item'}
-                onClick={() => toggleBucket(e.bucket)}
-                title={isHidden ? `Show ${e.name}` : `Hide ${e.name}`}
-              >
-                <span className="domain-map-legend-swatch" style={{ background: colorForBucket(e.bucket) }} />
-                {e.name}
-              </button>
-            )
-          })}
-        </div>
-      )}
     </div>
   )
 }

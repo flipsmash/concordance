@@ -242,47 +242,26 @@ def browse_unique_word_histogram(
     from collections import Counter
     s = _main.SCHEMA
 
+    # Read from book_stats / author_stats' materialized unique_word_count
+    # (refreshed by `book-stats` / `author-stats`), the same numbers the
+    # unique_word_bucket click-through filters on. Computing it live meant a
+    # GROUP BY over all of word_book per request: 10s for authors, long enough
+    # that the hub showed an empty section. A book or author with no stats row
+    # (no active words at all) has 0 unique words, so it counts into "0".
+    placeholders = list(PLACEHOLDER_AUTHORS)
     with _main.get_conn() as conn, conn.cursor() as cur:
         if scope == "book":
-            cur.execute(
-                f"""WITH single_book_words AS (
-                        SELECT wb.word_id, min(wb.book_id) AS book_id
-                        FROM {s}.word_book wb
-                        JOIN {s}.word w ON w.id = wb.word_id AND w.active
-                        GROUP BY wb.word_id
-                        HAVING count(*) = 1
-                    )
-                    SELECT b.id, count(sbw.word_id)
-                    FROM {s}.book b
-                    LEFT JOIN single_book_words sbw ON sbw.book_id = b.id
-                    GROUP BY b.id"""
-            )
+            cur.execute(f"SELECT unique_word_count FROM {s}.book_stats")
+            rows = cur.fetchall()
+            cur.execute(f"SELECT count(*) FROM {s}.book")
         else:
-            # PLACEHOLDER_AUTHORS excluded on both sides -- from the "which
-            # authors get a row" list AND from counting as a co-occurrence
-            # that would disqualify some other real author's exclusivity --
-            # so this matches browse_authors, which already excludes them
-            # from its own listing (see _unique_word_bucket_filter's same
-            # exclusion for why the click-through count has to agree).
-            placeholders = list(PLACEHOLDER_AUTHORS)
-            cur.execute(
-                f"""WITH single_author_words AS (
-                        SELECT wb.word_id, min(b.author) AS author
-                        FROM {s}.word_book wb
-                        JOIN {s}.book b ON b.id = wb.book_id AND b.author IS NOT NULL
-                            AND b.author != '' AND b.author != ALL(%s)
-                        JOIN {s}.word w ON w.id = wb.word_id AND w.active
-                        GROUP BY wb.word_id
-                        HAVING count(DISTINCT b.author) = 1
-                    )
-                    SELECT a.author, count(saw.word_id)
-                    FROM (SELECT DISTINCT author FROM {s}.book
-                          WHERE author IS NOT NULL AND author != '' AND author != ALL(%s)) a
-                    LEFT JOIN single_author_words saw ON saw.author = a.author
-                    GROUP BY a.author""",
-                (placeholders, placeholders),
-            )
-        counts = Counter(_unique_word_bucket_label(row[1]) for row in cur.fetchall())
+            cur.execute(f"SELECT unique_word_count FROM {s}.author_stats WHERE author != ALL(%s)", (placeholders,))
+            rows = cur.fetchall()
+            cur.execute(f"""SELECT count(DISTINCT author) FROM {s}.book
+                            WHERE author IS NOT NULL AND author != '' AND author != ALL(%s)""", (placeholders,))
+        everyone = cur.fetchone()[0]
+        counts = Counter(_unique_word_bucket_label(n or 0) for (n,) in rows)
+        counts["0"] += max(0, everyone - len(rows))
 
     return [UniqueWordBucket(label=label, count=counts.get(label, 0)) for _, _, label in _UNIQUE_WORD_BUCKETS]
 
@@ -435,102 +414,16 @@ def browse_overall_difficulty_histogram(
     browse_books/browse_authors themselves would return with no filters
     active, not a subtly different one."""
     s = _main.SCHEMA
-    base_filters, base_params = _build_word_filters(None, [], [], None, None, [], [], False)
-    where = " AND ".join(base_filters)
-
+    # book_stats / author_stats already hold each row's overall_difficulty
+    # (same percent_rank blend, refreshed by `book-stats` / `author-stats`,
+    # and what the listings and their band filter read). Recomputing it here
+    # was a full word_book aggregate per request -- 8.5s for authors.
     with _main.get_conn() as conn, conn.cursor() as cur:
         if scope == "book":
-            cur.execute(
-                f"""WITH book_base AS (
-                        -- count(*): grouped by b.id, so word_book's PK
-                        -- (word_id, book_id) makes DISTINCT redundant here.
-                        SELECT b.id, b.distinct_nonstop_word_count,
-                               avg(wd.difficulty) AS mean_difficulty,
-                               CASE WHEN b.distinct_nonstop_word_count > 0
-                                    THEN count(w.id)::float / b.distinct_nonstop_word_count END AS density
-                        FROM {s}.book b
-                        JOIN {s}.word_book wb ON wb.book_id = b.id
-                        JOIN {s}.word w ON w.id = wb.word_id
-                        LEFT JOIN {s}.word_difficulty wd ON wd.word_id = w.id
-                        WHERE {where}
-                        GROUP BY b.id, b.distinct_nonstop_word_count
-                    ),
-                    diff_rank AS (
-                        SELECT id, percent_rank() OVER (ORDER BY mean_difficulty) AS diff_pct
-                        FROM book_base WHERE mean_difficulty IS NOT NULL
-                    ),
-                    dens_rank AS (
-                        SELECT id, percent_rank() OVER (ORDER BY density) AS dens_pct
-                        FROM book_base WHERE density IS NOT NULL
-                    )
-                    SELECT CASE WHEN dr.diff_pct IS NOT NULL AND de.dens_pct IS NOT NULL
-                                THEN round((((dr.diff_pct + de.dens_pct) / 2) * 100)::numeric, 1)
-                           END AS overall_difficulty
-                    FROM book_base bb
-                    LEFT JOIN diff_rank dr ON dr.id = bb.id
-                    LEFT JOIN dens_rank de ON de.id = bb.id""",
-                base_params,
-            )
+            cur.execute(f"SELECT overall_difficulty FROM {s}.book_stats")
         else:
-            placeholders = list(PLACEHOLDER_AUTHORS)
-            cur.execute(
-                f"""WITH author_word_ids AS (
-                        SELECT DISTINCT b.author, w.id AS word_id
-                        FROM {s}.book b
-                        JOIN {s}.word_book wb ON wb.book_id = b.id
-                        JOIN {s}.word w ON w.id = wb.word_id
-                        WHERE {where} AND b.author IS NOT NULL AND b.author != ALL(%s)
-                    ),
-                    author_word_stats AS (
-                        SELECT awi.author, avg(wd.difficulty) AS mean_difficulty
-                        FROM author_word_ids awi
-                        LEFT JOIN {s}.word_difficulty wd ON wd.word_id = awi.word_id
-                        GROUP BY awi.author
-                    ),
-                    book_word_counts AS (
-                        -- count(*): see the book-scope branch's matching
-                        -- comment above -- grouped by b.id, DISTINCT is a no-op.
-                        SELECT b.author, b.id AS book_id, b.distinct_nonstop_word_count,
-                               count(w.id) AS book_word_count
-                        FROM {s}.book b
-                        JOIN {s}.word_book wb ON wb.book_id = b.id
-                        JOIN {s}.word w ON w.id = wb.word_id
-                        LEFT JOIN {s}.word_difficulty wd ON wd.word_id = w.id
-                        WHERE {where} AND b.author IS NOT NULL AND b.author != ALL(%s)
-                        GROUP BY b.author, b.id, b.distinct_nonstop_word_count
-                    ),
-                    author_density AS (
-                        SELECT author, avg(density) AS density
-                        FROM (
-                            SELECT author,
-                                   CASE WHEN distinct_nonstop_word_count > 0
-                                        THEN book_word_count::float / distinct_nonstop_word_count END AS density
-                            FROM book_word_counts
-                        ) bd
-                        WHERE density IS NOT NULL
-                        GROUP BY author
-                    ),
-                    author_base AS (
-                        SELECT aws.author, aws.mean_difficulty, ad.density
-                        FROM author_word_stats aws
-                        LEFT JOIN author_density ad ON ad.author = aws.author
-                    ),
-                    diff_rank AS (
-                        SELECT author, percent_rank() OVER (ORDER BY mean_difficulty) AS diff_pct
-                        FROM author_base WHERE mean_difficulty IS NOT NULL
-                    ),
-                    dens_rank AS (
-                        SELECT author, percent_rank() OVER (ORDER BY density) AS dens_pct
-                        FROM author_base WHERE density IS NOT NULL
-                    )
-                    SELECT CASE WHEN dr.diff_pct IS NOT NULL AND de.dens_pct IS NOT NULL
-                                THEN round((((dr.diff_pct + de.dens_pct) / 2) * 100)::numeric, 1)
-                           END AS overall_difficulty
-                    FROM author_base ab
-                    LEFT JOIN diff_rank dr ON dr.author = ab.author
-                    LEFT JOIN dens_rank de ON de.author = ab.author""",
-                (*base_params, placeholders, *base_params, placeholders),
-            )
+            cur.execute(f"SELECT overall_difficulty FROM {s}.author_stats WHERE author != ALL(%s)",
+                        (list(PLACEHOLDER_AUTHORS),))
         scores = [row[0] for row in cur.fetchall()]
 
     scored = [float(sc) for sc in scores if sc is not None]

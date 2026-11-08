@@ -1,0 +1,19 @@
+/* Colour key under the book and author matrices (MatrixKey.jsx). */
+.matrix-key {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.matrix-key-steps {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.matrix-key-steps span {
+  width: 18px;
+  height: 10px;
+  border-radius: 2px;
+}

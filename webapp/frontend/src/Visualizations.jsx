@@ -58,58 +58,76 @@ function fameHistQuery(label) {
 // GrowthChart's own {date, count} -> {date, value} (a running total in
 // cumulative mode, the raw count otherwise) -- named generically since the
 // chart itself doesn't know or care which mode produced its numbers.
-function toGrowthSeries(daily, mode) {
-  if (mode !== 'cumulative') return daily.map((d) => ({ date: d.date, value: d.count }))
+// Every calendar day from the earliest to the latest date across ALL the
+// series, so Books / Authors / Words share one timeline (each used to span
+// only its own dates, so their axes didn't line up).
+function sharedDays(...series) {
+  const dates = series.flatMap((s) => (s || []).map((d) => d.date)).sort()
+  if (!dates.length) return []
+  const out = []
+  const end = new Date(`${dates[dates.length - 1]}T00:00:00Z`)
+  for (let d = new Date(`${dates[0]}T00:00:00Z`); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
+    out.push(d.toISOString().slice(0, 10))
+  }
+  return out
+}
+
+function toGrowthSeries(daily, mode, days) {
+  if (daily === null) return null // still loading
+  const byDate = new Map(daily.map((d) => [d.date, d.count]))
   let running = 0
-  return daily.map((d) => {
-    running += d.count
-    return { date: d.date, value: running }
+  return days.map((date) => {
+    const count = byDate.get(date) || 0
+    running += count
+    return { date, value: mode === 'cumulative' ? running : count }
   })
 }
 
 function Visualizations() {
   const navigate = useNavigate()
-  const [bookHist, setBookHist] = useState([])
-  const [authorHist, setAuthorHist] = useState([])
-  const [bookFameHist, setBookFameHist] = useState([])
-  const [authorFameHist, setAuthorFameHist] = useState([])
-  const [bookDifficultyHist, setBookDifficultyHist] = useState([])
-  const [authorDifficultyHist, setAuthorDifficultyHist] = useState([])
-  const [bookGrowth, setBookGrowth] = useState([])
-  const [authorGrowth, setAuthorGrowth] = useState([])
-  const [wordGrowth, setWordGrowth] = useState([])
+  // null = still loading (the chart says so), [] = loaded but empty / failed
+  const [bookHist, setBookHist] = useState(null)
+  const [authorHist, setAuthorHist] = useState(null)
+  const [bookFameHist, setBookFameHist] = useState(null)
+  const [authorFameHist, setAuthorFameHist] = useState(null)
+  const [bookDifficultyHist, setBookDifficultyHist] = useState(null)
+  const [authorDifficultyHist, setAuthorDifficultyHist] = useState(null)
+  const [bookGrowth, setBookGrowth] = useState(null)
+  const [authorGrowth, setAuthorGrowth] = useState(null)
+  const [wordGrowth, setWordGrowth] = useState(null)
   const [growthMode, setGrowthMode] = useState('daily')
+  const growthDays = sharedDays(bookGrowth, authorGrowth, wordGrowth)
   const [popularityInput, setPopularityInput] = useState('')
 
   useEffect(() => {
     fetch(`${API_BASE}/api/browse/growth?metric=books`)
       .then((res) => res.json())
       .then(setBookGrowth)
-      .catch(() => {})
+      .catch(() => setBookGrowth([]))
     fetch(`${API_BASE}/api/browse/growth?metric=authors`)
       .then((res) => res.json())
       .then(setAuthorGrowth)
-      .catch(() => {})
+      .catch(() => setAuthorGrowth([]))
     fetch(`${API_BASE}/api/browse/growth?metric=words`)
       .then((res) => res.json())
       .then(setWordGrowth)
-      .catch(() => {})
+      .catch(() => setWordGrowth([]))
     fetch(`${API_BASE}/api/browse/unique-word-histogram?scope=book`)
       .then((res) => res.json())
       .then((data) => setBookHist(toHistBands(data)))
-      .catch(() => {})
+      .catch(() => setBookHist([]))
     fetch(`${API_BASE}/api/browse/unique-word-histogram?scope=author`)
       .then((res) => res.json())
       .then((data) => setAuthorHist(toHistBands(data)))
-      .catch(() => {})
+      .catch(() => setAuthorHist([]))
     fetch(`${API_BASE}/api/browse/fame-histogram?scope=book`)
       .then((res) => res.json())
       .then((data) => setBookFameHist(toFameHistBands(data)))
-      .catch(() => {})
+      .catch(() => setBookFameHist([]))
     fetch(`${API_BASE}/api/browse/fame-histogram?scope=author`)
       .then((res) => res.json())
       .then((data) => setAuthorFameHist(toFameHistBands(data)))
-      .catch(() => {})
+      .catch(() => setAuthorFameHist([]))
     // overall-difficulty-histogram already returns DifficultyHistogram's own
     // {band_min, band_max, label, word_count} shape (it buckets a real 0-100
     // percentile, same as word-level difficulty-bands) -- no toHistBands/
@@ -117,11 +135,11 @@ function Visualizations() {
     fetch(`${API_BASE}/api/browse/overall-difficulty-histogram?scope=book`)
       .then((res) => res.json())
       .then(setBookDifficultyHist)
-      .catch(() => {})
+      .catch(() => setBookDifficultyHist([]))
     fetch(`${API_BASE}/api/browse/overall-difficulty-histogram?scope=author`)
       .then((res) => res.json())
       .then(setAuthorDifficultyHist)
-      .catch(() => {})
+      .catch(() => setAuthorDifficultyHist([]))
   }, [])
 
   return (
@@ -158,15 +176,15 @@ function Visualizations() {
         <div className="growth-chart-group">
           <div className="growth-chart-row">
             <span className="growth-chart-row-label">Books</span>
-            <GrowthChart data={toGrowthSeries(bookGrowth, growthMode)} unit="books" />
+            <GrowthChart data={toGrowthSeries(bookGrowth, growthMode, growthDays)} unit="books" />
           </div>
           <div className="growth-chart-row">
             <span className="growth-chart-row-label">Authors</span>
-            <GrowthChart data={toGrowthSeries(authorGrowth, growthMode)} unit="authors" />
+            <GrowthChart data={toGrowthSeries(authorGrowth, growthMode, growthDays)} unit="authors" />
           </div>
           <div className="growth-chart-row">
             <span className="growth-chart-row-label">Words</span>
-            <GrowthChart data={toGrowthSeries(wordGrowth, growthMode)} unit="words" />
+            <GrowthChart data={toGrowthSeries(wordGrowth, growthMode, growthDays)} unit="words" />
           </div>
         </div>
       </section>

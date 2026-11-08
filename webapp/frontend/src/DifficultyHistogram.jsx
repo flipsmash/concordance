@@ -15,6 +15,9 @@ const BAR_AREA_HEIGHT = 120 // px
 // express "unscored" as a difficulty_min/max range), this one's parent can
 // pass the backend's `unscored_only` filter instead.
 function DifficultyHistogram({ bands, selectedBand, onSelect }) {
+  // null = still loading: hold the chart's height and say so, rather than
+  // render nothing (a slow request used to look like a missing chart)
+  if (bands === null) return <div className="diff-hist diff-hist-loading muted">Loading…</div>
   if (bands.length === 0) return null
   const maxCount = Math.max(...bands.map((b) => b.word_count), 1)
 

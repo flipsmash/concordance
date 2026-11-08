@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import SharedWordsPanel from './SharedWordsPanel'
 import { cssVar } from './graphUtils'
+import { cellColor, matrixRamp, scoreDomain, selfColor } from './matrixColors'
+import MatrixKey from './MatrixKey'
 import './BookMatrix.css'
 import './GraphView.css' // .graph-maximize -- reused here for the fullscreen button
 
@@ -61,6 +63,15 @@ function BookMatrix({ highlightBookId, scope = 'volume' }) {
     return () => observer.disconnect()
   }, [])
 
+  // Redraw with the other mode's ramp when light/dark switches.
+  const [themeTick, setThemeTick] = useState(0)
+  useEffect(() => {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)')
+    const onChange = () => setThemeTick((t) => t + 1)
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [])
+
   const n = data?.books.length ?? 0
   const cellPx = n > 0 ? size / n : 0
 
@@ -74,15 +85,15 @@ function BookMatrix({ highlightBookId, scope = 'volume' }) {
     ctx.scale(dpr, dpr)
     ctx.clearRect(0, 0, size, size)
     const accent = cssVar('--accent', '#1c6dbd')
-    ctx.fillStyle = accent
+    const ramp = matrixRamp()
+    const domain = scoreDomain(data.grid)
+    const self = selfColor()
     for (let i = 0; i < n; i++) {
       for (let j = 0; j < n; j++) {
-        const cell = data.grid[i][j]
-        ctx.globalAlpha = i === j ? 0.08 : Math.max(0, Math.min(1, cell.score))
+        ctx.fillStyle = i === j ? self : cellColor(data.grid[i][j].score, domain, ramp)
         ctx.fillRect(j * cellPx, i * cellPx, Math.ceil(cellPx), Math.ceil(cellPx))
       }
     }
-    ctx.globalAlpha = 1
 
     // Highlight-a-book-of-interest: outline its whole row + column band,
     // same reasoning as AuthorMatrix's own highlight (a single cell would
@@ -94,7 +105,7 @@ function BookMatrix({ highlightBookId, scope = 'volume' }) {
       ctx.strokeRect(0, highlightIndex * cellPx, size, cellPx)
       ctx.strokeRect(highlightIndex * cellPx, 0, cellPx, size)
     }
-  }, [data, size, n, cellPx, highlightBookId])
+  }, [data, size, n, cellPx, highlightBookId, themeTick])
 
   const hoverInfo = useMemo(() => {
     if (!hoverCell || !data) return null
@@ -148,6 +159,7 @@ function BookMatrix({ highlightBookId, scope = 'volume' }) {
         )}
       </div>
       {ready && (
+        <>
         <p className="book-matrix-tooltip muted">
           {hoverInfo && hoverInfo.a.id !== hoverInfo.b.id ? (
             <>
@@ -165,6 +177,8 @@ function BookMatrix({ highlightBookId, scope = 'volume' }) {
             'Hover a cell to see the pair; click to compare their shared vocabulary.'
           )}
         </p>
+        <MatrixKey />
+        </>
       )}
 
       {comparePair && (
