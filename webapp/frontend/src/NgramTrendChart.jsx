@@ -16,10 +16,24 @@ const PLOT_H = H - M.top - M.bottom
 const LABEL_GAP = 15
 const MIN_X_LABEL_PX = 44       // decade labels are thinned until they're at least this far apart
 
-function niceMax(v) {
-  if (v <= 0) return 1
-  const p = 10 ** Math.floor(Math.log10(v))
-  return [1, 2, 2.5, 5, 10].map((m) => m * p).find((c) => c >= v)
+// A round tick step giving about four intervals up to v.
+function niceStep(v) {
+  if (v <= 0) return 0.25
+  const raw = v / 4
+  const p = 10 ** Math.floor(Math.log10(raw))
+  return [1, 2, 2.5, 5, 10].map((m) => m * p).find((c) => c >= raw)
+}
+
+// Decimal places a value needs to print exactly (0.25 -> 2, 50 -> 0).
+function decimalsOf(v) {
+  for (let d = 0; d < 8; d++) if (Math.abs(v * 10 ** d - Math.round(v * 10 ** d)) < 1e-6) return d
+  return 8
+}
+
+// Axis ticks share one format -- the decimals their step needs -- so the
+// axis never mixes "100" with "75.0".
+function formatTick(v, decimals) {
+  return v.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals })
 }
 
 function formatRate(v) {
@@ -57,10 +71,14 @@ function NgramTrendChart({ data, logScale = false }) {
       const ticks = []
       for (let t = lo; t <= hi * 1.0001; t *= 10) ticks.push(t)
       const y = (v) => (v > 0 ? M.top + PLOT_H * (1 - Math.log10(v / lo) / Math.log10(hi / lo || 10)) : null)
-      return { y, ticks }
+      return { y, ticks, decimals: (t) => decimalsOf(t) }
     }
-    const max = niceMax(Math.max(0, ...values))
-    return { y: (v) => M.top + PLOT_H * (1 - v / max), ticks: [0, max / 4, max / 2, (3 * max) / 4, max] }
+    const step = niceStep(Math.max(0, ...values))
+    const n = Math.max(1, Math.ceil(Math.max(0, ...values) / step - 1e-9))
+    const max = step * n
+    const ticks = Array.from({ length: n + 1 }, (_, i) => i * step)
+    const d = decimalsOf(step)
+    return { y: (v) => M.top + PLOT_H * (1 - v / max), ticks, decimals: () => d }
   }, [shown, logScale])
 
   // Label every Nth decade (20 years on a wide chart), always ending clear of
@@ -122,7 +140,7 @@ function NgramTrendChart({ data, logScale = false }) {
             <g key={t}>
               <line className="trend-grid" x1={M.left} x2={M.left + PLOT_W} y1={scale.y(t)} y2={scale.y(t)} />
               <text className="trend-axis" x={M.left - 8} y={scale.y(t)} dy="0.32em" textAnchor="end">
-                {formatRate(t)}
+                {formatTick(t, scale.decimals(t))}
               </text>
             </g>
           ))}

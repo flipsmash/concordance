@@ -4,6 +4,7 @@ import OriginSunburst from './OriginSunburst'
 import OriginTreemap from './OriginTreemap'
 import { FAMILY_ORDER, ROUTE_MIX, familyColor, routeLabel } from './originColors'
 import './GraphView.css' // .graph-maximize / .graph-signal-toggle
+import { VizPageHeader } from './VizPage'
 import './Origins.css'
 
 const API_BASE = ''
@@ -132,16 +133,10 @@ function Origins() {
 
   return (
     <div className="origins-page" ref={rootRef}>
-      <header className="origins-header">
-        <div>
-          <h1>Where the words come from</h1>
-          <p className="muted">
-            Each word&rsquo;s earliest recorded source language and how it reached English, from Wiktionary,
-            the 0 Dict and word formation.
-          </p>
-        </div>
-        <Link to="/app/visualizations" className="authors-back-link">← Visualizations</Link>
-      </header>
+      <VizPageHeader title="Where the words come from">
+        Each word&rsquo;s earliest recorded source language and how it reached English, from Wiktionary,
+        the 0 Dict and word formation.
+      </VizPageHeader>
 
       <div className="origins-filters">
         <label className="origins-filter">

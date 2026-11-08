@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { colorForBucket } from './domainColors'
+import { VizPageHeader } from './VizPage'
 import './CategoryTree.css'
 
 const API_BASE = ''
@@ -138,11 +139,7 @@ export const CATEGORY_TREE_BLURB =
 function CategoryTree() {
   return (
     <div className="cattree-page">
-      <header className="cattree-header">
-        <Link to="/app/visualizations" className="cattree-crumb">← Visualizations</Link>
-        <h1 className="cattree-title">Categories by meaning</h1>
-        <p className="cattree-lede">{CATEGORY_TREE_BLURB}</p>
-      </header>
+      <VizPageHeader title="Categories by meaning">{CATEGORY_TREE_BLURB}</VizPageHeader>
       <CategoryTreeView />
     </div>
   )

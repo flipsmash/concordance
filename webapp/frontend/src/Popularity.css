@@ -1,36 +1,4 @@
 /* Tokens from AppShell.css's :root (light/dark handled there). */
-.pop-page {
-  max-width: 900px;
-  margin: 0 auto;
-  padding: 28px 24px 64px;
-}
-
-.pop-crumb {
-  font-family: var(--font-ui);
-  font-size: 13px;
-  color: var(--ink-soft);
-  text-decoration: none;
-}
-
-.pop-crumb:hover { color: var(--rail-accent); }
-
-.pop-title {
-  margin: 10px 0 6px;
-  font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 30px;
-  color: var(--ink);
-}
-
-.pop-lede {
-  margin: 0 0 18px;
-  max-width: 640px;
-  font-family: var(--font-ui);
-  font-size: 14.5px;
-  line-height: 1.55;
-  color: var(--ink-soft);
-}
-
 .pop-form {
   display: flex;
   flex-wrap: wrap;
@@ -140,8 +108,4 @@
   font-family: var(--font-ui);
   font-size: 12px;
   color: var(--ink-soft);
-}
-
-@media (max-width: 500px) {
-  .pop-page { padding: 20px 16px 48px; }
 }

@@ -1,429 +1,102 @@
-import { Suspense, lazy, useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import AuthorSelect from './AuthorSelect'
 import BookSelect from './BookSelect'
-import DifficultyHistogram from './DifficultyHistogram'
-import GrowthChart from './GrowthChart'
-import './Browse.css'
+import { VizPage, VizPageHeader } from './VizPage'
+import VizThumb from './VizThumb'
+import './Browse.css' // .author-select* for the pickers
 import './Visualizations.css'
 
-const API_BASE = ''
-
-// Lazy for the same reason App.jsx already lazy-loads GraphView: pulls in
-// react-force-graph-2d's canvas/d3-force bundle only once this page is
-// actually opened.
-const GraphView = lazy(() => import('./GraphView'))
-const GenreOverlapGraph = lazy(() => import('./GenreOverlapGraph'))
-
-// A hub for every relatedness/graph view the app has, all of which
-// otherwise only exist as links buried behind a specific word/book/author's
-// own page (or, for the global authors graph, no link at all until this
-// page). Three ways in, one per granularity: words by meaning (embedded,
-// full search), books by vocabulary overlap (pick one, land on its ego
-// graph), authors by vocabulary overlap (pick one OR see all of them at
-// once).
-// UniqueWordBucket ({label, count}) -> DifficultyHistogram's generic
-// {band_min, band_max, label, word_count} bar shape. band_min/max only
-// matter for DifficultyHistogram's click-to-filter highlighting and its
-// "unscored" styling special-case (band_min === null) -- neither applies
-// here (these bars aren't clickable filters), so any non-null placeholder
-// works.
-function toHistBands(buckets) {
-  return buckets.map((b) => ({ band_min: 0, band_max: 0, label: b.label, word_count: b.count }))
+// The Visualizations hub: a gallery of cards, grouped by what they're about,
+// each opening its own page. It used to embed every chart in one ~5,000px
+// scroll (growth, six histograms, two force graphs, a word graph), mixed
+// with plain links; the charts now live on their own pages.
+function Card({ to, thumb, title, children, extra = null }) {
+  return (
+    <article className="viz-card">
+      <Link to={to} className="viz-card-main">
+        <VizThumb kind={thumb} />
+        <h3 className="viz-card-title">{title}</h3>
+        <p className="viz-card-text">{children}</p>
+      </Link>
+      {extra && <div className="viz-card-extra">{extra}</div>}
+    </article>
+  )
 }
 
-// Same adapter as toHistBands, except the "Not yet scored" bucket keeps
-// band_min === null -- that's what triggers DifficultyHistogram's distinct
-// (greyed-out) styling for an unscored column, which toHistBands' buckets
-// never have a use for since none of them carry an "unscored" concept.
-function toFameHistBands(buckets) {
-  // an empty "Not yet scored" bar is noise (everything is scored), so it goes
-  return buckets.filter((b) => !(b.label === 'Not yet scored' && !b.count)).map((b) => ({
-    band_min: b.label === 'Not yet scored' ? null : 0,
-    band_max: 0,
-    label: b.label,
-    word_count: b.count,
-  }))
-}
-
-// A fame bar's own label ("1".."10", or "Not yet scored") is enough to
-// build the deep-link query on its own -- unlike band_min/band_max (both
-// forced to 0/null above purely for DifficultyHistogram's styling hook),
-// the label is the one field that still carries the real score.
-function fameHistQuery(label) {
-  return label === 'Not yet scored'
-    ? { fame_unscored_only: 'true' }
-    : { fame_min: label, fame_max: label }
-}
-
-// GrowthChart's own {date, count} -> {date, value} (a running total in
-// cumulative mode, the raw count otherwise) -- named generically since the
-// chart itself doesn't know or care which mode produced its numbers.
-// Every calendar day from the earliest to the latest date across ALL the
-// series, so Books / Authors / Words share one timeline (each used to span
-// only its own dates, so their axes didn't line up).
-function sharedDays(...series) {
-  const dates = series.flatMap((s) => (s || []).map((d) => d.date)).sort()
-  if (!dates.length) return []
-  const out = []
-  const end = new Date(`${dates[dates.length - 1]}T00:00:00Z`)
-  for (let d = new Date(`${dates[0]}T00:00:00Z`); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
-    out.push(d.toISOString().slice(0, 10))
-  }
-  return out
-}
-
-function toGrowthSeries(daily, mode, days) {
-  if (daily === null) return null // still loading
-  const byDate = new Map(daily.map((d) => [d.date, d.count]))
-  if (mode === 'cumulative') {
-    let running = 0
-    return days.map((date) => {
-      running += byDate.get(date) || 0
-      return { date, value: running }
-    })
-  }
-  // Weekly totals (7-day buckets from the first shared day): daily counts
-  // were all spikes, since ingests land in occasional batch passes.
-  const weeks = []
-  days.forEach((date, i) => {
-    if (i % 7 === 0) weeks.push({ date, value: 0 })
-    weeks[weeks.length - 1].value += byDate.get(date) || 0
-  })
-  return weeks
+function Group({ title, children }) {
+  return (
+    <section className="viz-group">
+      <h2 className="viz-group-title">{title}</h2>
+      <div className="viz-grid">{children}</div>
+    </section>
+  )
 }
 
 function Visualizations() {
   const navigate = useNavigate()
-  // null = still loading (the chart says so), [] = loaded but empty / failed
-  const [bookHist, setBookHist] = useState(null)
-  const [authorHist, setAuthorHist] = useState(null)
-  const [bookFameHist, setBookFameHist] = useState(null)
-  const [authorFameHist, setAuthorFameHist] = useState(null)
-  const [bookDifficultyHist, setBookDifficultyHist] = useState(null)
-  const [authorDifficultyHist, setAuthorDifficultyHist] = useState(null)
-  const [bookGrowth, setBookGrowth] = useState(null)
-  const [authorGrowth, setAuthorGrowth] = useState(null)
-  const [wordGrowth, setWordGrowth] = useState(null)
-  const [growthMode, setGrowthMode] = useState('daily')
-  const growthDays = sharedDays(bookGrowth, authorGrowth, wordGrowth)
-  const [popularityInput, setPopularityInput] = useState('')
-
-  useEffect(() => {
-    fetch(`${API_BASE}/api/browse/growth?metric=books`)
-      .then((res) => res.json())
-      .then(setBookGrowth)
-      .catch(() => setBookGrowth([]))
-    fetch(`${API_BASE}/api/browse/growth?metric=authors`)
-      .then((res) => res.json())
-      .then(setAuthorGrowth)
-      .catch(() => setAuthorGrowth([]))
-    fetch(`${API_BASE}/api/browse/growth?metric=words`)
-      .then((res) => res.json())
-      .then(setWordGrowth)
-      .catch(() => setWordGrowth([]))
-    fetch(`${API_BASE}/api/browse/unique-word-histogram?scope=book`)
-      .then((res) => res.json())
-      .then((data) => setBookHist(toHistBands(data)))
-      .catch(() => setBookHist([]))
-    fetch(`${API_BASE}/api/browse/unique-word-histogram?scope=author`)
-      .then((res) => res.json())
-      .then((data) => setAuthorHist(toHistBands(data)))
-      .catch(() => setAuthorHist([]))
-    fetch(`${API_BASE}/api/browse/fame-histogram?scope=book`)
-      .then((res) => res.json())
-      .then((data) => setBookFameHist(toFameHistBands(data)))
-      .catch(() => setBookFameHist([]))
-    fetch(`${API_BASE}/api/browse/fame-histogram?scope=author`)
-      .then((res) => res.json())
-      .then((data) => setAuthorFameHist(toFameHistBands(data)))
-      .catch(() => setAuthorFameHist([]))
-    // overall-difficulty-histogram already returns DifficultyHistogram's own
-    // {band_min, band_max, label, word_count} shape (it buckets a real 0-100
-    // percentile, same as word-level difficulty-bands) -- no toHistBands/
-    // toFameHistBands adapter needed, unlike the two above.
-    fetch(`${API_BASE}/api/browse/overall-difficulty-histogram?scope=book`)
-      .then((res) => res.json())
-      .then(setBookDifficultyHist)
-      .catch(() => setBookDifficultyHist([]))
-    fetch(`${API_BASE}/api/browse/overall-difficulty-histogram?scope=author`)
-      .then((res) => res.json())
-      .then(setAuthorDifficultyHist)
-      .catch(() => setAuthorDifficultyHist([]))
-  }, [])
-
   return (
-    <div className="browse-page">
-      <header className="browse-header">
-        <h1>Visualizations</h1>
-      </header>
+    <VizPage wide>
+      <VizPageHeader title="Visualizations" back={false}>
+        Pictures of the collection: how its books and authors relate, where its words come from, and how it grew.
+      </VizPageHeader>
 
-      <section className="browse-facets viz-section">
-        <h2 className="viz-heading">Corpus growth</h2>
-        <p className="viz-description">
-          Books, authors, and words added each week (or the running total), over the corpus's whole history. Ingestion runs
-          in occasional batch passes rather than a steady trickle, so uneven weeks are real. "Authors" counts a real author's first book (aggregation labels
-          like "Various" excluded); "words" counts each word's first-ever appearance, even across a
-          later re-ingest of the same book.
-        </p>
-        <div className="growth-chart-toggle">
-          <button
-            type="button"
-            className={growthMode === 'daily' ? 'browse-pill active' : 'browse-pill'}
-            title="Added per week"
-            onClick={() => setGrowthMode('daily')}
-          >
-            Per week
-          </button>
-          <button
-            type="button"
-            className={growthMode === 'cumulative' ? 'browse-pill active' : 'browse-pill'}
-            onClick={() => setGrowthMode('cumulative')}
-          >
-            Cumulative
-          </button>
-        </div>
-        <div className="growth-chart-group">
-          <div className="growth-chart-row">
-            <span className="growth-chart-row-label">Books</span>
-            <GrowthChart data={toGrowthSeries(bookGrowth, growthMode, growthDays)} unit="books" bars={growthMode !== 'cumulative'} />
-          </div>
-          <div className="growth-chart-row">
-            <span className="growth-chart-row-label">Authors</span>
-            <GrowthChart data={toGrowthSeries(authorGrowth, growthMode, growthDays)} unit="authors" bars={growthMode !== 'cumulative'} />
-          </div>
-          <div className="growth-chart-row">
-            <span className="growth-chart-row-label">Words</span>
-            <GrowthChart data={toGrowthSeries(wordGrowth, growthMode, growthDays)} unit="words" bars={growthMode !== 'cumulative'} />
-          </div>
-        </div>
-      </section>
+      <Group title="How books and authors relate">
+        <Card to="/app/books/relatedness" thumb="network" title="Books by shared vocabulary"
+          extra={
+            <>
+              <BookSelect placeholder="Find a book…"
+                onPick={(book) => navigate(`/app/authors/${encodeURIComponent(book.author || '')}/${book.id}/relatedness`)} />
+              <Link to="/app/books/relatedness?tab=everything" className="viz-card-link">Map every book →</Link>
+            </>
+          }>
+          Pick a book to see the books that share the most rare words with it, or see the top 200 at once.
+        </Card>
+        <Card to="/app/authors/relatedness" thumb="network" title="Authors by shared vocabulary"
+          extra={
+            <>
+              <AuthorSelect value={null}
+                onChange={(author) => author && navigate(`/app/authors/${encodeURIComponent(author)}/relatedness`)} />
+              <Link to="/app/authors/relatedness?tab=everything" className="viz-card-link">Map every author →</Link>
+            </>
+          }>
+          Pick an author to see who writes with the most similar rare vocabulary, or see the top 200 at once.
+        </Card>
+        <Card to="/app/books/relatedness?tab=everything" thumb="scatter" title="Every book on one map">
+          The whole collection in one zoomable map, grouped and named by the words that set each group apart.
+        </Card>
+        <Card to="/app/visualizations/genres" thumb="network" title="Genres by shared vocabulary">
+          Which genres share the most rare words &mdash; from niche genres to genre fiction to the classics.
+        </Card>
+        <Card to="/app/visualizations/domain-map" thumb="field" title="Works by subject field">
+          Works and authors placed by how their words spread across science, law, the arts and more.
+        </Card>
+      </Group>
 
-      <section className="browse-facets viz-section">
-        <h2 className="viz-heading">Books by vocabulary overlap</h2>
-        <p className="viz-description">
-          Pick a book to see the other books that share the most rare vocabulary with it, browse
-          the top books at once, or explore a map of every book in the collection.
-        </p>
-        <div className="viz-author-row">
-          <BookSelect
-            placeholder="Search for a book…"
-            onPick={(book) => navigate(`/app/authors/${encodeURIComponent(book.author || '')}/${book.id}/relatedness`)}
-          />
-          <Link to="/app/books/relatedness" className="browse-quiz-link">
-            See the top books at once →
-          </Link>
-          <Link to="/app/books/relatedness?tab=everything" className="browse-quiz-link">
-            Map every book →
-          </Link>
-        </div>
-      </section>
+      <Group title="Words and meaning">
+        <Card to="/app/visualizations/origins" thumb="sunburst" title="Where the words come from">
+          Latin, Old English, Greek, French, Norse&hellip; each word&rsquo;s source language and the route it took
+          into English.
+        </Card>
+        <Card to="/app/visualizations/category-tree" thumb="tree" title="Categories by meaning">
+          Every subject category, clustered by what its words mean, with its words listed alongside.
+        </Card>
+        <Card to="/app/visualizations/word-graph" thumb="network" title="Words by meaning">
+          Search a word to see its nearest neighbours by definition or by spelling.
+        </Card>
+        <Card to="/app/visualizations/popularity" thumb="line" title="Popularity over time">
+          How often words appeared in English books, decade by decade since 1800 &mdash; compare up to four.
+        </Card>
+      </Group>
 
-      <section className="browse-facets viz-section">
-        <h2 className="viz-heading">Authors by vocabulary overlap</h2>
-        <p className="viz-description">
-          Pick an author to see who shares the most rare vocabulary with them, browse the top
-          authors at once, or explore a map of every author.
-        </p>
-        <div className="viz-author-row">
-          <AuthorSelect
-            value={null}
-            onChange={(author) => author && navigate(`/app/authors/${encodeURIComponent(author)}/relatedness`)}
-          />
-          <Link to="/app/authors/relatedness" className="browse-quiz-link">
-            See the top authors at once →
-          </Link>
-          <Link to="/app/authors/relatedness?tab=everything" className="browse-quiz-link">
-            Map every author →
-          </Link>
-        </div>
-      </section>
-
-      <section className="browse-facets viz-section">
-        <h2 className="viz-heading">Genres by vocabulary overlap</h2>
-        <p className="viz-description">
-          How much rare vocabulary each genre shares with every other genre -- unlike books and
-          authors, there's no "top N" here: with concordance/genre.py's fixed genre list, every
-          genre that's been tagged at all fits in one graph.
-        </p>
-        <div className="viz-graph-embed">
-          <Suspense fallback={<div className="page-loading">Loading…</div>}>
-            <GenreOverlapGraph />
-          </Suspense>
-        </div>
-      </section>
-
-      <section className="browse-facets viz-section">
-        <h2 className="viz-heading">Words unique to each book</h2>
-        <p className="viz-description">
-          How many books contribute vocabulary nothing else in the corpus does, and how many of
-          their words that amounts to -- most books share nearly everything they use with at
-          least one other book, but a few contribute dozens or more words all their own.
-        </p>
-        <DifficultyHistogram
-          bands={bookHist}
-          selectedBand={null}
-          unit="books"
-          hint="Click a bar to list those books."
-          headline={(b, pct) =>
-            `${b.word_count.toLocaleString()} books (${pct}%) share every word with at least one other book. The rest:`}
-          onSelect={(b) => navigate(`/app/books?unique_word_bucket=${encodeURIComponent(b.label)}`)}
-        />
-      </section>
-
-      <section className="browse-facets viz-section">
-        <h2 className="viz-heading">Words unique to each author</h2>
-        <p className="viz-description">
-          Same question, aggregated across an author's whole body of work -- a word counts as
-          theirs alone even if it appears in two of their own books, as long as no other author's
-          book uses it.
-        </p>
-        <DifficultyHistogram
-          bands={authorHist}
-          selectedBand={null}
-          unit="authors"
-          hint="Click a bar to list those authors."
-          headline={(b, pct) =>
-            `${b.word_count.toLocaleString()} authors (${pct}%) share every word with another author. The rest:`}
-          onSelect={(b) => navigate(`/app/authors?unique_word_bucket=${encodeURIComponent(b.label)}`)}
-        />
-      </section>
-
-      <section className="browse-facets viz-section">
-        <h2 className="viz-heading">Book fame distribution</h2>
-        <p className="viz-description">
-          Historical/cultural importance, an absolute 1–10 scale (not a percentile) where most
-          scores sit low by design — only genuinely famous books score high, so a tall bar at 8–10
-          means something. Fame is scored by a separate, manually-run process, not part of routine
-          maintenance, so a large "Not yet scored" bar reflects that backlog, not missing data.
-        </p>
-        <DifficultyHistogram
-          bands={bookFameHist}
-          selectedBand={null}
-          unit="books"
-          hint="Click a bar to list those books."
-          onSelect={(b) => navigate(`/app/books?${new URLSearchParams(fameHistQuery(b.label))}`)}
-        />
-      </section>
-
-      <section className="browse-facets viz-section">
-        <h2 className="viz-heading">Author fame distribution</h2>
-        <p className="viz-description">
-          Same absolute 1–10 scale, aggregated per author rather than per book.
-        </p>
-        <DifficultyHistogram
-          bands={authorFameHist}
-          selectedBand={null}
-          unit="authors"
-          hint="Click a bar to list those authors."
-          onSelect={(b) => navigate(`/app/authors?${new URLSearchParams(fameHistQuery(b.label))}`)}
-        />
-      </section>
-
-      <section className="browse-facets viz-section">
-        <h2 className="viz-heading">Book difficulty distribution</h2>
-        <p className="viz-description">
-          Overall difficulty is a corpus-relative percentile (not an absolute score) blending a
-          book's average word difficulty with how dense its rare vocabulary is -- a bar near 100
-          means harder than nearly the whole corpus. "Not enough data" covers books missing either
-          input (no scored words, or no distinct-word-count baseline to measure density against).
-        </p>
-        <DifficultyHistogram
-          bands={bookDifficultyHist}
-          selectedBand={null}
-          unit="books"
-          hint="Click a bar to list those books."
-          onSelect={(b) =>
-            navigate(`/app/books?${new URLSearchParams({ overall_difficulty_band: b.label })}`)
-          }
-        />
-      </section>
-
-      <section className="browse-facets viz-section">
-        <h2 className="viz-heading">Author difficulty distribution</h2>
-        <p className="viz-description">
-          Same percentile, aggregated per author rather than per book.
-        </p>
-        <DifficultyHistogram
-          bands={authorDifficultyHist}
-          selectedBand={null}
-          unit="authors"
-          hint="Click a bar to list those authors."
-          onSelect={(b) =>
-            navigate(`/app/authors?${new URLSearchParams({ overall_difficulty_band: b.label })}`)
-          }
-        />
-      </section>
-
-      <section className="browse-facets viz-section">
-        <h2 className="viz-heading">Popularity over time</h2>
-        <p className="viz-description">
-          How often any word appeared in English books, decade by decade since 1800 (Google Books).
-          Compare up to four, separated by commas.
-        </p>
-        <form
-          className="viz-popularity-form"
-          onSubmit={(e) => {
-            e.preventDefault()
-            const terms = popularityInput.split(',').map((t) => t.trim()).filter(Boolean)
-            if (terms.length) navigate(`/app/visualizations/popularity?${new URLSearchParams({ terms: terms.join(',') })}`)
-          }}
-        >
-          <input
-            value={popularityInput}
-            onChange={(e) => setPopularityInput(e.target.value)}
-            placeholder="e.g. telegraph, wireless, radio"
-            aria-label="Terms to chart"
-          />
-          <button type="submit">Chart it →</button>
-        </form>
-      </section>
-
-      <section className="browse-facets viz-section">
-        <h2 className="viz-heading">Categories by meaning</h2>
-        <p className="viz-description">
-          Every finest-grained subject category in a dendrogram, clustered by what its words
-          mean, with each category&rsquo;s words listed alongside, most-used first.
-        </p>
-        <Link to="/app/visualizations/category-tree" className="browse-quiz-link">
-          Open the tree →
-        </Link>
-      </section>
-
-      <section className="browse-facets viz-section">
-        <h2 className="viz-heading">Where the words come from</h2>
-        <p className="viz-description">
-          Each word&rsquo;s earliest source language &mdash; Latin, Old English, Greek, French, Norse&hellip; &mdash;
-          and the route it took into English, for the whole collection or one genre, and two side by side.
-        </p>
-        <Link to="/app/visualizations/origins" className="browse-quiz-link">
-          Open origins →
-        </Link>
-      </section>
-
-      <section className="browse-facets viz-section">
-        <h2 className="viz-heading">Works &amp; authors by discipline category</h2>
-        <p className="viz-description">
-          See how vocabulary distributes across subject-matter fields (science, law, arts…) --
-          works and authors with a similar mix sit close together, even with no words in common.
-        </p>
-        <Link to="/app/visualizations/domain-map" className="browse-quiz-link">
-          Open the map →
-        </Link>
-      </section>
-
-      <section className="browse-facets viz-section">
-        <h2 className="viz-heading">Words by meaning</h2>
-        <p className="viz-description">
-          Search for a word to see its nearest neighbors by definition or spelling.
-        </p>
-        <div className="viz-graph-embed">
-          <Suspense fallback={<div className="page-loading">Loading…</div>}>
-            <GraphView onNodeNavigate={(node) => navigate(`/app/words/${node.id}`)} />
-          </Suspense>
-        </div>
-      </section>
-    </div>
+      <Group title="The collection">
+        <Card to="/app/visualizations/growth" thumb="bars" title="Corpus growth">
+          Books, authors and words added week by week, or as a running total.
+        </Card>
+        <Card to="/app/visualizations/distributions" thumb="bars" title="Uniqueness, fame and difficulty">
+          How many words each book or author has to itself, how famous they are, and how hard their words are.
+        </Card>
+      </Group>
+    </VizPage>
   )
 }
 

@@ -4,50 +4,17 @@
    the SVG share --row-h so every leaf lands exactly on its row. */
 
 .cattree-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
   max-width: 1200px;
   margin: 0 auto;
-  padding: 28px 24px 64px;
-}
-
-.cattree-crumb {
-  font-family: var(--font-ui);
-  font-size: 13px;
-  color: var(--ink-soft);
-  text-decoration: none;
-}
-
-.cattree-crumb:hover {
-  color: var(--rail-accent);
-}
-
-/* Stacked crumb / title / lede, like the Popularity page. Without this the
-   app-wide `header { display: flex }` put them side by side, which on a
-   phone squeezed the title into a column three words wide. */
-.cattree-header {
-  display: block;
-}
-
-.cattree-title {
-  margin: 10px 0 6px;
-  font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 30px;
-  color: var(--ink);
-}
-
-.cattree-lede {
-  margin: 0 0 22px;
-  max-width: 680px;
-  font-family: var(--font-ui);
-  font-size: 14.5px;
-  line-height: 1.55;
-  color: var(--ink-soft);
+  padding: 24px 16px 48px;
 }
 
 .cattree-body {
   display: flex;
   align-items: flex-start;
-  border-top: 1px solid var(--rule);
 }
 
 .cattree-svg {
@@ -168,7 +135,7 @@
 /* Phones: the tree can't share a 30px row with the text, so it drops out
    (the rows keep dendrogram order) and each row becomes two lines. */
 @media (max-width: 720px) {
-  .cattree-page { padding: 20px 16px 48px; }
+  .cattree-page { padding: 16px 16px 40px; }
   .cattree-svg { display: none; }
   .cattree-row {
     grid-template-columns: 4px 52px minmax(0, 1fr) auto;

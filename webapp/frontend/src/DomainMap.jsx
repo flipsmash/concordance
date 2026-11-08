@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { colorForBucket } from './domainColors'
 import { cssVar } from './graphUtils'
+import { VizPageHeader } from './VizPage'
 import './DomainMap.css'
 import './GraphView.css' // .graph-controls/.graph-maximize/.graph-signal-toggle/.graph-error/.graph-loading/.graph-empty
 
@@ -208,15 +209,11 @@ function DomainMap() {
 
   return (
     <div className="domain-map-page">
-      <header className="domain-map-header">
-        <Link to="/app/visualizations" className="domain-map-crumb">← Visualizations</Link>
-        <h1>Works &amp; authors by discipline category</h1>
-        <p className="muted">
+      <VizPageHeader title="Works and authors by subject field">
           Each dot is a work (or author), placed by how its vocabulary spreads across subject fields
           &mdash; science, law, the arts&hellip; Dots close together lean on the same mix of fields, even with
           no words in common. Pick a field to see where its {noun} sit.
-        </p>
-      </header>
+      </VizPageHeader>
 
       <div className="domain-map" ref={containerRef}>
         <div className="graph-controls domain-map-controls">

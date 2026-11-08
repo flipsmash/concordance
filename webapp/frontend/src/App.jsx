@@ -40,6 +40,10 @@ const CategorySubsubsubfieldDetail = lazy(() => import('./CategorySubsubsubfield
 const Visualizations = lazy(() => import('./Visualizations'))
 const DomainMap = lazy(() => import('./DomainMap'))
 const Origins = lazy(() => import('./Origins'))
+const VizGrowth = lazy(() => import('./VizGrowth'))
+const VizDistributions = lazy(() => import('./VizDistributions'))
+const VizGenres = lazy(() => import('./VizGenres'))
+const VizWordGraph = lazy(() => import('./VizWordGraph'))
 const CategoryTree = lazy(() => import('./CategoryTree'))
 const Popularity = lazy(() => import('./Popularity'))
 const Sets = lazy(() => import('./Sets'))
@@ -163,6 +167,38 @@ function App() {
               element={
                 <Suspense fallback={<div className="page-loading">Loading…</div>}>
                   <CategoryTree />
+                </Suspense>
+              }
+            />
+            <Route
+              path="visualizations/growth"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <VizGrowth />
+                </Suspense>
+              }
+            />
+            <Route
+              path="visualizations/distributions"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <VizDistributions />
+                </Suspense>
+              }
+            />
+            <Route
+              path="visualizations/genres"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <VizGenres />
+                </Suspense>
+              }
+            />
+            <Route
+              path="visualizations/word-graph"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <VizWordGraph />
                 </Suspense>
               }
             />

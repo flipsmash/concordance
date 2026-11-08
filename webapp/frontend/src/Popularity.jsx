@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { useSearchParams } from 'react-router-dom'
 import NgramTrendChart from './NgramTrendChart'
+import { VizPage, VizPageHeader } from './VizPage'
 import './Popularity.css'
 
 const API_BASE = ''
@@ -34,6 +35,11 @@ function Popularity() {
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
 
+  // Arriving with no terms shows the first example rather than an empty page.
+  useEffect(() => {
+    if (!termsKey) setSearchParams({ terms: EXAMPLES[0].join(',') }, { replace: true })
+  }, [termsKey, setSearchParams])
+
   useEffect(() => {
     setInput(termsKey.split(',').filter(Boolean).join(', '))
     if (!termsKey) { setData(null); return }
@@ -54,13 +60,11 @@ function Popularity() {
   const found = data ? data.series.filter((s) => s.found) : []
 
   return (
-    <div className="pop-page">
-      <Link to="/app/visualizations" className="pop-crumb">← Visualizations</Link>
-      <h1 className="pop-title">Popularity over time</h1>
-      <p className="pop-lede">
+    <VizPage>
+      <VizPageHeader title="Popularity over time">
         How often a word appeared in English books, decade by decade from the 1800s to the 2010s,
         in occurrences per million words. Compare up to {MAX_TERMS}.
-      </p>
+      </VizPageHeader>
 
       <form
         className="pop-form"
@@ -122,7 +126,7 @@ function Popularity() {
         Source: Google Books Ngram, English 2019 corpus, lowercase exact match, per decade
         (the 2010s cover 2010–2019).
       </p>
-    </div>
+    </VizPage>
   )
 }
 
