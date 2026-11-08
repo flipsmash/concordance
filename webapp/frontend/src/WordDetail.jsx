@@ -4,6 +4,7 @@ import AddToSetMenu from './AddToSetMenu'
 import { useAuth } from './AuthContext'
 import GraphView from './GraphView'
 import LinkedDefinition from './LinkedDefinition'
+import WordOrigin from './WordOrigin'
 import { colorForBucket } from './domainColors'
 import { googleSearchUrl } from './externalLinks'
 import './WordDetail.css'
@@ -327,6 +328,8 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
           <span className="word-detail-ipa">/{word.ipa}/</span>
         </section>
       )}
+
+      <WordOrigin origin={word.origin} />
 
       <section className="word-detail-section">
         <h2>Categorization</h2>

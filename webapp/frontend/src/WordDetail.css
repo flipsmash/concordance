@@ -241,6 +241,28 @@
   font-style: normal;
 }
 
+.word-origin-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 6px;
+  margin: 0;
+  color: var(--text-h);
+}
+
+.word-origin-swatch {
+  flex: none;
+  align-self: center;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.word-origin-source {
+  margin: 4px 0 0;
+  font-size: 13px;
+}
+
 .word-detail-ipa {
   font-family: var(--mono);
   font-size: 15px;

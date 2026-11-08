@@ -729,6 +729,17 @@ class DefinitionLink(BaseModel):
     surface: str  # the literal inflected form found in THIS word's definition text
 
 
+class WordOrigin(BaseModel):
+    """origins.py's answer for one word (word_origin, `concordance
+    word-origins`): the earliest source language, its display family, how it
+    reached English (inherited | direct | via:<family> | formed) and which
+    source decided it."""
+    root_lang_name: str
+    family: str
+    route: str
+    method: str
+
+
 class WordDetail(BaseModel):
     id: int
     lemma: str
@@ -775,6 +786,7 @@ class WordDetail(BaseModel):
     categories: list[WordCategory]
     books: list[BookRef]
     definition_links: list[DefinitionLink]
+    origin: WordOrigin | None = None   # None: no dictionary source records one
 
 
 @app.get("/api/words/{word_id}", response_model=WordDetail)
@@ -782,7 +794,7 @@ def word_detail(word_id: int, _: dict = Depends(require_viewer)) -> WordDetail:
     """Everything known about one accepted word: definition/IPA/etymology from
     `word`, the composite difficulty + its factor breakdown from
     `word_difficulty`, raw Ngram history from `word_ngram`, which audio source
-    (if any) `word_audio` has, every USAS category it carries (not just the
+    (if any) `word_audio` has, its origin from `word_origin`, every USAS category it carries (not just the
     one /graph picks for a node color), which book(s) it came from, and which
     OTHER active words its own definition text mentions (word_definition_link,
     populated by `concordance link-definitions`). Four round trips rather than
@@ -799,11 +811,13 @@ def word_detail(word_id: int, _: dict = Depends(require_viewer)) -> WordDetail:
                        d.difficulty, d.difficulty_factors, d.quizzable, d.quizzable_reason,
                        w.quiz_definition, w.quiz_def_source,
                        n.peak, n.recent, n.recency_ratio, n.peak_year,
-                       a.source, w.validity_label, w.validity_notes, w.suggested_correction
+                       a.source, w.validity_label, w.validity_notes, w.suggested_correction,
+                       o.root_lang_name, o.family, o.route, o.method
                 FROM {SCHEMA}.word w
                 LEFT JOIN {SCHEMA}.word_difficulty d ON d.word_id = w.id
                 LEFT JOIN {SCHEMA}.word_ngram n ON n.word_id = w.id
                 LEFT JOIN {SCHEMA}.word_audio a ON a.word_id = w.id
+                LEFT JOIN {SCHEMA}.word_origin o ON o.word_id = w.id
                 WHERE w.id = %s AND w.active""",
             (word_id,),
         )
@@ -814,7 +828,8 @@ def word_detail(word_id: int, _: dict = Depends(require_viewer)) -> WordDetail:
          first_added, archaic, archaic_evidence, archaic_confidence, difficulty, difficulty_factors,
          quizzable, quizzable_reason, quiz_definition, quiz_def_source,
          ngram_peak, ngram_recent, ngram_recency_ratio, ngram_peak_year,
-         audio_source, validity_label, validity_notes, suggested_correction) = row
+         audio_source, validity_label, validity_notes, suggested_correction,
+         origin_lang, origin_family, origin_route, origin_method) = row
 
         cur.execute(
             f"""SELECT c.code, c.name, wc.is_primary, wc.confidence, top.name
@@ -873,6 +888,8 @@ def word_detail(word_id: int, _: dict = Depends(require_viewer)) -> WordDetail:
         validity_label=validity_label, validity_notes=validity_notes,
         suggested_correction=suggested_correction,
         categories=categories, books=books, definition_links=definition_links,
+        origin=WordOrigin(root_lang_name=origin_lang, family=origin_family, route=origin_route,
+                          method=origin_method) if origin_lang else None,
     )
 
 

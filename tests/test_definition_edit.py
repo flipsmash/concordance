@@ -341,3 +341,37 @@ def test_word_detail_exposes_quiz_definition_and_source():
         assert detail["quizzable"] is True
     finally:
         main.SCHEMA = old_schema
+
+
+@pg
+def test_word_detail_carries_its_origin():
+    """The word page shows origins.py's answer (word_origin); a word with no
+    known origin gets null rather than a guess."""
+    from starlette.testclient import TestClient
+
+    from webapp.backend import main
+
+    schema = "cc_test_word_detail_origin"
+    word_id = _fresh_schema(schema)
+
+    old_schema = main.SCHEMA
+    main.SCHEMA = schema
+    try:
+        client = TestClient(main.app, base_url="https://testserver")
+        client.post("/api/auth/login", json={"username": "adminuser", "password": "password123"})
+        assert client.get(f"/api/words/{word_id}").json()["origin"] is None
+
+        conn = db.connect(_URL)
+        with conn.cursor() as cur:
+            cur.execute(f"""INSERT INTO {schema}.word_origin
+                            (word_id, root_lang, root_lang_name, family, route, method)
+                            VALUES (%s, 'es', 'Spanish', 'Spanish & Portuguese', 'direct', 'wiktionary')""",
+                        (word_id,))
+        conn.commit()
+        conn.close()
+
+        assert client.get(f"/api/words/{word_id}").json()["origin"] == {
+            "root_lang_name": "Spanish", "family": "Spanish & Portuguese",
+            "route": "direct", "method": "wiktionary"}
+    finally:
+        main.SCHEMA = old_schema
