@@ -1220,11 +1220,22 @@ class SPAStaticFiles(StaticFiles):
 
     async def get_response(self, path: str, scope: Scope) -> Response:
         try:
-            return await super().get_response(path, scope)
+            response = await super().get_response(path, scope)
         except StarletteHTTPException as exc:
-            if exc.status_code == 404:
-                return await super().get_response("index.html", scope)
-            raise
+            if exc.status_code != 404:
+                raise
+            path = "index.html"
+            response = await super().get_response(path, scope)
+        # Caching, so a deploy never strands an open browser on files that are
+        # gone: the page itself is always revalidated (it had no header, so
+        # browsers guessed and kept a pre-deploy index.html pointing at
+        # deleted chunks -- a blank page until a hard refresh), while
+        # content-hashed assets never change and can be cached for good.
+        if path.startswith("assets/"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 # Quiz routes live in their own router (quiz.py) rather than growing this

@@ -4,6 +4,13 @@ import react from '@vitejs/plugin-react'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  // Keep the previous build's hashed chunks: a tab opened before a deploy
+  // still lazy-loads the chunk names it knows. Emptying dist on every build
+  // 404'd them (a blank page until a hard refresh). Old chunks are tiny;
+  // clear dist/assets by hand now and then if it grows.
+  build: {
+    emptyOutDir: false,
+  },
   // WSL: this project lives on the /mnt/c Windows-drive mount, where native
   // fs-change notifications don't reliably reach chokidar — without polling,
   // edits never trigger HMR and the dev server just keeps serving what it
