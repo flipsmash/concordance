@@ -1224,6 +1224,12 @@ class SPAStaticFiles(StaticFiles):
         except StarletteHTTPException as exc:
             if exc.status_code != 404:
                 raise
+            # A missing build file is a real 404, never the SPA fallback, and
+            # never cached: Chrome cached the 404 it got for a chunk requested
+            # mid-deploy and then broke on that page until its site data was
+            # cleared.
+            if path.startswith("assets/"):
+                return Response(status_code=404, headers={"Cache-Control": "no-store"})
             path = "index.html"
             response = await super().get_response(path, scope)
         # Caching, so a deploy never strands an open browser on files that are

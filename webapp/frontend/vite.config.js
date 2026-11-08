@@ -10,6 +10,15 @@ export default defineConfig({
   // clear dist/assets by hand now and then if it grows.
   build: {
     emptyOutDir: false,
+    // ".v2" in every built file name (2026-11-08): a one-time change so all
+    // asset URLs differ from any a browser cached as a 404 during a deploy.
+    rollupOptions: {
+      output: {
+        entryFileNames: 'assets/[name]-[hash].v2.js',
+        chunkFileNames: 'assets/[name]-[hash].v2.js',
+        assetFileNames: 'assets/[name]-[hash].v2[extname]',
+      },
+    },
   },
   // WSL: this project lives on the /mnt/c Windows-drive mount, where native
   // fs-change notifications don't reliably reach chokidar — without polling,
