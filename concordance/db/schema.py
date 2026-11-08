@@ -1133,11 +1133,33 @@ def _migration_0004_word_origin(conn: psycopg.Connection, s: str) -> None:
         cur.execute(f"CREATE INDEX IF NOT EXISTS word_origin_family_idx ON {s}.word_origin (family, route)")
 
 
+def _migration_0005_pointer_target(conn: psycopg.Connection, s: str) -> None:
+    """Where a word added by `add-pointer-targets` came from: the word whose
+    definition points at it ("soubadar" for subadar), and when, so it can be
+    found (and undone) later."""
+    with conn.cursor() as cur:
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS pointer_target_of text")
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS pointer_target_added_at timestamptz")
+
+
+def _migration_0006_pointer_target_rejection(conn: psycopg.Connection, s: str) -> None:
+    """Targets add-pointer-targets considered and left out (the judge said
+    no, no definition, a cast-out), keyed by lemma like the other verdict
+    caches, so maintain doesn't re-judge them on every run."""
+    with conn.cursor() as cur:
+        cur.execute(f"""CREATE TABLE IF NOT EXISTS {s}.pointer_target_rejection (
+            lemma_lc     text PRIMARY KEY,
+            reason       text NOT NULL,
+            rejected_at  timestamptz NOT NULL DEFAULT now())""")
+
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, _migration_0001_baseline),
     (2, _migration_0002_compound_verdict),
     (3, _migration_0003_corpus_map),
     (4, _migration_0004_word_origin),
+    (5, _migration_0005_pointer_target),
+    (6, _migration_0006_pointer_target_rejection),
 ]
 
 

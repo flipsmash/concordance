@@ -2027,6 +2027,131 @@ def test_compute_definition_links_matches_lemma_and_excludes_self_and_inactive()
 
 
 @pg
+def test_compute_definition_links_links_a_pointer_target():
+    """"Alternative spelling of subadar" links subadar: following the
+    pointer is its whole point (classification still ignores the target)."""
+    from concordance.model import Candidate
+
+    schema = "cc_test_definition_links_pointer"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    subadar = Candidate(lemma="subadar", pos="NOUN")
+    subadar.definition = "The chief native officer of a company of sepoys."
+    soubadar = Candidate(lemma="soubadar", pos="NOUN")
+    soubadar.definition = "Alternative spelling of subadar."
+    db.sync_book_results(conn, "Book One", kept=[subadar, soubadar], rejected=[], schema=schema)
+
+    db.compute_definition_links(conn, schema)
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT w2.lemma, wdl.surface FROM {schema}.word_definition_link wdl
+                        JOIN {schema}.word w1 ON w1.id = wdl.source_word_id
+                        JOIN {schema}.word w2 ON w2.id = wdl.target_word_id
+                        WHERE w1.lemma = 'soubadar'""")
+        assert cur.fetchall() == [("subadar", "subadar")]
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
+def test_add_pointer_targets_holds_targets_to_ingest_standards(monkeypatch):
+    """Adds a rare, judged-interesting, defined target (a proper-noun
+    rejection doesn't count against it, and stays); leaves out a common
+    target, one the judge rejected in an earlier book, a pruned one, and one
+    the judge rejects now."""
+    from concordance import pipeline, pointer_targets
+    from concordance.config import Config
+    from concordance.model import Candidate, RejectReason, Verdict
+
+    schema = "cc_test_pointer_targets"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, schema)
+
+    def word(lemma, definition):
+        c = Candidate(lemma=lemma, pos="NOUN")
+        c.definition = definition
+        return c
+
+    def rejected(lemma, reason):
+        c = Candidate(lemma=lemma, pos="NOUN", verdict=Verdict.DROP, reject_reason=reason)
+        return c
+
+    kept = [word("soubadar", "Alternative spelling of subadar."),
+            word("windore", "Obsolete form of window."),                 # common target
+            word("jaghir", "Alternative form of jagir."),                 # judge rejected it in a book
+            word("sapsuckar", "Alternative spelling of sapsucker."),      # judge rejects it now
+            word("gytrashe", "Alternative form of gytrash."),             # pruned
+            word("zeppole", "Alternative form of zeppola."),              # a book capitalized it
+            word("kissel", "Alternative form of kisel.")]                 # already active
+    kept += [word("gytrash", "A spectral black dog."), word("kisel", "A fruit dessert.")]
+    db.sync_book_results(conn, "Book One", kept=kept, schema=schema,
+                         rejected=[rejected("jagir", RejectReason.NOT_INTERESTING),
+                                   rejected("zeppola", RejectReason.PROPER_NOUN)])
+    with conn.cursor() as cur:
+        cur.execute(f"UPDATE {schema}.word SET active = false WHERE lemma = 'gytrash'")
+    conn.commit()
+
+    definitions = {"subadar": "The chief native officer of a company of sepoys.",
+                   "zeppola": "A fried pastry from southern Italy.",
+                   "sapsucker": "A woodpecker."}
+
+    def fake_enrich(cand, **_):
+        cand.definition = definitions.get(cand.lemma, "")
+        cand.part_of_speech = "noun"
+        cand.definition_source = "Local Wiktionary (DB)"
+        return False
+
+    class FakeJudge:
+        def judge(self, cands):
+            self.seen = sorted(c.lemma for c in cands)
+            for c in cands:
+                if c.lemma == "sapsucker":
+                    c.verdict, c.reject_reason = Verdict.DROP, RejectReason.NOT_INTERESTING
+
+    monkeypatch.setattr(pipeline, "_enrich_one", fake_enrich)
+    judge = FakeJudge()
+    stats = pointer_targets.add_pointer_targets(conn, schema, Config(), judge_obj=judge)
+
+    assert judge.seen == ["sapsucker", "subadar", "zeppola"]
+    assert sorted(stats["added"]) == ["subadar", "zeppola"]
+    assert stats["too_common"] == 1          # window
+    assert stats["prior_verdict"] == 2       # jagir (judge), gytrash (pruned)
+    assert stats["judge_rejected"] == 1      # sapsucker
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT lemma, active, pointer_target_of, definition FROM {schema}.word
+                        WHERE pointer_target_added_at IS NOT NULL ORDER BY lemma""")
+        assert cur.fetchall() == [
+            ("subadar", True, "soubadar", "The chief native officer of a company of sepoys."),
+            ("zeppola", True, "zeppole", "A fried pastry from southern Italy.")]
+        cur.execute(f"SELECT count(*) FROM {schema}.rejected_word WHERE lemma_lc = 'zeppola'")
+        assert cur.fetchone() == (1,)        # the book's proper-noun call stands
+        cur.execute(f"""SELECT count(*) FROM {schema}.word_book wb JOIN {schema}.word w ON w.id = wb.word_id
+                        WHERE w.lemma = 'zeppola'""")
+        assert cur.fetchone() == (0,)
+        cur.execute(f"SELECT active FROM {schema}.word WHERE lemma = 'gytrash'")
+        assert cur.fetchone() == (False,)    # a prune stands
+
+    # a second run has nothing to judge: sapsucker's rejection was recorded
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT lemma_lc, reason FROM {schema}.pointer_target_rejection")
+        assert cur.fetchall() == [("sapsucker", "not_interesting")]
+    judge.seen = None
+    again = pointer_targets.add_pointer_targets(conn, schema, Config(), judge_obj=judge)
+    assert again["added"] == [] and judge.seen is None
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {schema} CASCADE")
+    conn.commit()
+    conn.close()
+
+
+@pg
 def test_compute_definition_links_is_idempotent_after_definition_change():
     from concordance.model import Candidate
 

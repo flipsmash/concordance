@@ -200,10 +200,10 @@ def bare_pointer_target(definition: str | None) -> str | None:
     return None
 
 
-def pointer_targets(definition: str | None) -> set[str]:
-    """Every word a definition's cross-reference clauses point at, lowercased
-    ("Variant spelling of faggot — A bundle of sticks" -> {"faggot"}),
-    whether or not the clause also has a gloss of its own."""
+def pointer_target_phrases(definition: str | None) -> set[str]:
+    """The whole target of each cross-reference clause, lowercased
+    ("Alternative form of thorn apple." -> {"thorn apple"}), whether or not
+    the clause also has a gloss of its own."""
     out = set()
     for clause in _clauses((definition or "").strip()):
         m = _POINTER_RE.match(clause)
@@ -212,7 +212,17 @@ def pointer_targets(definition: str | None) -> set[str]:
             target = t.group(1).strip().strip("'\"\u201c\u201d").lower() if t else ""
             if target:
                 out.add(target)
-                out.update(target.split())
+    return out
+
+
+def pointer_targets(definition: str | None) -> set[str]:
+    """Every word a definition's cross-reference clauses point at, lowercased
+    ("Variant spelling of faggot — A bundle of sticks" -> {"faggot"}): each
+    whole target plus the words of a multi-word one."""
+    out = set()
+    for target in pointer_target_phrases(definition):
+        out.add(target)
+        out.update(target.split())
     return out
 
 

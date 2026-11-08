@@ -21,7 +21,7 @@ from .core import DEFAULT_SCHEMA, _safe_schema
 # undefined and cast out; quizdef/quizzable are similar) -- that's not a
 # stalled step, just a step whose target was never "every active word."
 MAINTAIN_STEPS = [
-    "fill-definitions", "classify", "normalize-pos", "ngram", "archaic",
+    "fill-definitions", "add-pointer-targets", "link-definitions", "classify", "normalize-pos", "ngram", "archaic",
     "difficulty", "quizdef", "quizzable", "calibrate-difficulty",
     "wordnik-pron", "ipa", "embed", "backfill-analogies",
 ]
@@ -46,6 +46,11 @@ def maintain_status(conn, schema: str = DEFAULT_SCHEMA) -> list[dict]:
         cur.execute(f"SELECT count(*) FROM {s}.word WHERE active AND coalesce(definition,'') <> ''")
         steps.append({"name": "fill-definitions", "done": cur.fetchone()[0], "total": active_total,
                       "note": "some words are permanently undefined (cast out) -- won't reach 100%"})
+
+        steps.append({"name": "add-pointer-targets", "done": None, "total": None,
+                      "note": "adds only targets not tried before -- no meaningful fraction"})
+        steps.append({"name": "link-definitions", "done": None, "total": None,
+                      "note": "recomputes fully each run -- no meaningful fraction"})
 
         cur.execute(f"""SELECT count(DISTINCT wc.word_id) FROM {s}.word_category wc
                         JOIN {s}.word w ON w.id = wc.word_id WHERE w.active""")

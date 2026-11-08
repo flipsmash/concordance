@@ -935,13 +935,18 @@ def compute_definition_links(conn, schema: str = DEFAULT_SCHEMA, *, limit: int =
     rare/interesting vocabulary, so there's no meaningful over-linking risk
     the way there would be linking against ordinary-word coverage.
 
+    A cross-reference's target IS linked ("Alternative spelling of subadar"
+    links subadar): following it is the point of the pointer. Classification
+    and embeddings still ignore the target (crossref.classification_gloss);
+    add-pointer-targets gives a rare target its own entry to link to.
+
     Full recompute every run, no watermark column: a word's definition can
     be rewritten later by refill/deepen/mw-backfill/expand-synonyms, and
     with ~67k short definitions a full spaCy pass is cheap, so "just rerun
     this command" is the staleness fix, same manual-backfill convention
     already used everywhere else in this codebase (mw-backfill, dedupe-
     plurals, expand-synonyms) rather than a new automatic-invalidation hook."""
-    from .. import crossref, tokenize
+    from .. import tokenize
 
     s = _safe_schema(schema)
     nlp = tokenize.load_nlp()
@@ -963,10 +968,6 @@ def compute_definition_links(conn, schema: str = DEFAULT_SCHEMA, *, limit: int =
 
     with conn.cursor() as cur:
         for i, ((word_id, lemma_lc, definition), doc) in enumerate(zip(rows, docs), 1):
-            # Never link the spelling a cross-reference points at ("Variant
-            # spelling of faggot" must not link "faggot" from fagot's page) --
-            # same rule as classification and embeddings.
-            pointed_at = crossref.pointer_targets(definition)
             # target lemma -> first surface form seen for it in this definition
             matches: dict[str, str] = {}
             for tok in doc:
@@ -974,8 +975,6 @@ def compute_definition_links(conn, schema: str = DEFAULT_SCHEMA, *, limit: int =
                     continue
                 target_lemma = tokenize._resolve_lemma(tok)
                 if target_lemma == lemma_lc or target_lemma not in lemma_to_id:
-                    continue
-                if tok.text.lower() in pointed_at or target_lemma in pointed_at:
                     continue
                 matches.setdefault(target_lemma, tok.text)
 

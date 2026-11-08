@@ -91,6 +91,75 @@ def _enrich_one(cand: Candidate, *, lexicon: dict, oed_lexicon: dict, session, m
     return cand.verdict is Verdict.DROP
 
 
+def post_enrichment_checks(conn, shortlist: list[Candidate], cfg: Config) -> tuple[int, int]:
+    """Checks that need a word's resolved definition, run on every enriched
+    candidate: cast out foreign words, respellings of common words and junk-
+    POS resolutions (verdict DROP + reason); flag possible variants for human
+    review. Returns (cast_out, flagged). Shared by ingest and
+    add-pointer-targets, so a word added either way passes the same gate."""
+    cast_out = 0
+    flagged = 0
+    # Foreign-only per Wiktionary and absent from the English references
+    # (one query for the whole shortlist); foreign_cast_out_reason below
+    # adds the per-word English-usage checks. Latin/Greek never qualify.
+    foreign = db.foreign_only_langs(conn, [c.lemma for c in shortlist])
+    english_ref = db.english_reference_terms(conn, [c.lemma for c in shortlist])
+    curated_ref = db.english_reference_terms(conn, [c.lemma for c in shortlist],
+                                             exclude_misspelling_glosses=True)
+    for cand in shortlist:
+        if cand.verdict is Verdict.DROP:
+            # Already cast out above (e.g. _enrich_one's MW foreign-
+            # language signal) -- skip, so it doesn't also pay for a
+            # variant_reject_reason computation and pick up a confusing
+            # "flagged for human review" mark on a word already dropped.
+            continue
+        if note := validity_score.foreign_cast_out_reason(
+                cand.lemma, foreign.get(cand.lemma.lower()), cand.definition_source):
+            cand.verdict = Verdict.DROP
+            cand.reject_reason = RejectReason.FOREIGN_LANGUAGE
+            cand.interesting_reason = note
+            cast_out += 1
+            continue
+        target = kind = None
+        if t := crossref.dialect_respelling_target(cand.definition):
+            target, kind = t, "dialect/eye-dialect spelling"
+        elif t := (crossref.archaic_inflection_target(cand.lemma, cand.definition)
+                   or crossref.obsolete_spelling_target(cand.definition)
+                   or validity_score.early_modern_uv_target(cand.lemma, cfg.min_zipf)):
+            target, kind = t, "archaic inflection/spelling"
+        if target and zipf_frequency(target, "en") >= cfg.min_zipf:
+            # Design rule 3: a respelling/archaic form of a common word
+            # (bettah, thinketh, reuelation) isn't vocabulary. One of a
+            # RARE word is left to the clean-*-spellings review flag.
+            cand.verdict = Verdict.DROP
+            cand.reject_reason = RejectReason.MISSPELLING
+            cand.interesting_reason = f"{kind} of common '{target}'"
+            cast_out += 1
+            continue
+        reason = junk_pos_reason(cand.part_of_speech)
+        if reason:
+            cand.verdict = Verdict.DROP
+            cand.reject_reason = reason
+            cand.interesting_reason = (
+                f"dictionary lookup resolved this as {cand.part_of_speech!r} — cast out")
+            cast_out += 1
+            continue
+        variant = validity_score.variant_reject_reason(cand.lemma)
+        if (variant and variant[0] is RejectReason.FOREIGN_LANGUAGE
+                and validity_score.english_evidence(cand.lemma, cand.definition_source,
+                                                    cand.lemma.lower() in english_ref)):
+            variant = None   # the zipf-only foreign hint is outweighed by any English evidence
+        if (variant and variant[0] is RejectReason.MISSPELLING
+                and validity_score.english_evidence(
+                    cand.lemma, cand.definition_source, cand.lemma.lower() in curated_ref,
+                    use_wordfreq=False, definition=cand.definition)):
+            variant = None   # a curated source vouches for it -- not a typo of its neighbor
+        if variant:
+            cand.variant_flag_reason, cand.variant_flag_note = variant[0].value, variant[1]
+            flagged += 1
+    return cast_out, flagged
+
+
 def process(book: str | Path, cfg: Config, console: Console | None = None,
             schema: str = db.DEFAULT_SCHEMA, *, nlp=None, gate=None, judge_obj=None,
             oed_schema: str = "oed",
@@ -230,66 +299,7 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
         # here, never a hard cast-out: on real data it flagged ~21% of the
         # vocabulary, mostly genuine rare words (haft, glaive, thurible).
         # Evidence: docs/decisions/0005-variant-detector-flags-only.md
-        cast_out = 0
-        flagged = 0
-        # Foreign-only per Wiktionary and absent from the English references
-        # (one query for the whole shortlist); foreign_cast_out_reason below
-        # adds the per-word English-usage checks. Latin/Greek never qualify.
-        foreign = db.foreign_only_langs(conn, [c.lemma for c in shortlist])
-        english_ref = db.english_reference_terms(conn, [c.lemma for c in shortlist])
-        curated_ref = db.english_reference_terms(conn, [c.lemma for c in shortlist],
-                                                 exclude_misspelling_glosses=True)
-        for cand in shortlist:
-            if cand.verdict is Verdict.DROP:
-                # Already cast out above (e.g. _enrich_one's MW foreign-
-                # language signal) -- skip, so it doesn't also pay for a
-                # variant_reject_reason computation and pick up a confusing
-                # "flagged for human review" mark on a word already dropped.
-                continue
-            if note := validity_score.foreign_cast_out_reason(
-                    cand.lemma, foreign.get(cand.lemma.lower()), cand.definition_source):
-                cand.verdict = Verdict.DROP
-                cand.reject_reason = RejectReason.FOREIGN_LANGUAGE
-                cand.interesting_reason = note
-                cast_out += 1
-                continue
-            target = kind = None
-            if t := crossref.dialect_respelling_target(cand.definition):
-                target, kind = t, "dialect/eye-dialect spelling"
-            elif t := (crossref.archaic_inflection_target(cand.lemma, cand.definition)
-                       or crossref.obsolete_spelling_target(cand.definition)
-                       or validity_score.early_modern_uv_target(cand.lemma, cfg.min_zipf)):
-                target, kind = t, "archaic inflection/spelling"
-            if target and zipf_frequency(target, "en") >= cfg.min_zipf:
-                # Design rule 3: a respelling/archaic form of a common word
-                # (bettah, thinketh, reuelation) isn't vocabulary. One of a
-                # RARE word is left to the clean-*-spellings review flag.
-                cand.verdict = Verdict.DROP
-                cand.reject_reason = RejectReason.MISSPELLING
-                cand.interesting_reason = f"{kind} of common '{target}'"
-                cast_out += 1
-                continue
-            reason = junk_pos_reason(cand.part_of_speech)
-            if reason:
-                cand.verdict = Verdict.DROP
-                cand.reject_reason = reason
-                cand.interesting_reason = (
-                    f"dictionary lookup resolved this as {cand.part_of_speech!r} — cast out")
-                cast_out += 1
-                continue
-            variant = validity_score.variant_reject_reason(cand.lemma)
-            if (variant and variant[0] is RejectReason.FOREIGN_LANGUAGE
-                    and validity_score.english_evidence(cand.lemma, cand.definition_source,
-                                                        cand.lemma.lower() in english_ref)):
-                variant = None   # the zipf-only foreign hint is outweighed by any English evidence
-            if (variant and variant[0] is RejectReason.MISSPELLING
-                    and validity_score.english_evidence(
-                        cand.lemma, cand.definition_source, cand.lemma.lower() in curated_ref,
-                        use_wordfreq=False, definition=cand.definition)):
-                variant = None   # a curated source vouches for it -- not a typo of its neighbor
-            if variant:
-                cand.variant_flag_reason, cand.variant_flag_note = variant[0].value, variant[1]
-                flagged += 1
+        cast_out, flagged = post_enrichment_checks(conn, shortlist, cfg)
         if cast_out:
             console.print(f"[dim]{cast_out} more cast out post-enrichment "
                            "(symbol/proper-noun-only sense, foreign word, or dialect/archaic respelling).[/dim]")

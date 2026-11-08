@@ -1885,6 +1885,42 @@ def link_definitions(
                   f"[bold]{stats['links_created']}[/bold] links total")
 
 
+@app.command("add-pointer-targets")
+def add_pointer_targets_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    min_zipf: float = typer.Option(3.5, "--min-zipf", help="Frequency floor, as for ingest: a target this "
+                                   "common isn't added."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report what would be added; change nothing."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap rare targets considered (0 = all)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Give the word a definition points at ("Alternative spelling of
+    subadar") its own entry, held to ingest's standards: the frequency
+    floor, earlier verdicts, the judge, a real definition. Run
+    link-definitions afterwards (maintain does both) so the pointer links to
+    it. See concordance/pointer_targets.py."""
+    from . import pointer_targets
+
+    conn = _connect(database_url)
+    db.apply_schema(conn, schema)
+    cfg = Config(min_zipf=min_zipf)
+    with console.status("[bold]Adding pointer targets…") as status:
+        stats = pointer_targets.add_pointer_targets(
+            conn, schema, cfg, dry_run=dry_run, limit=limit,
+            progress=lambda i, n: status.update(f"[bold]Looking up pointer targets… {i}/{n}"))
+    conn.close()
+    _print_pointer_target_stats(stats, dry_run)
+
+
+def _print_pointer_target_stats(stats: dict, dry_run: bool = False) -> None:
+    console.print(f"[green]✓[/green] add-pointer-targets: {stats['targets']} targets missing — "
+                  f"{'would add' if dry_run else 'added'} [bold]{len(stats['added'])}[/bold] "
+                  f"({stats['too_common']} too common, {stats['prior_verdict']} already rejected or pruned, "
+                  f"{stats['judge_rejected']}/{stats['judged']} rejected by the judge, "
+                  f"{stats['undefined']} undefined, {stats['oed_only']} only a 0 Dict scan definition, "
+                  f"{stats['cast_out']} cast out; {stats['flagged']} flagged for review)")
+
+
 @app.command()
 def refill(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
@@ -2318,6 +2354,9 @@ def maintain(
     skip_deepen: bool = typer.Option(False, "--skip-deepen",
                                       help="Deprecated alias for --skip-fill-definitions (refill and deepen "
                                            "are now one step; either flag skips it)."),
+    skip_pointer_targets: bool = typer.Option(False, "--skip-pointer-targets",
+                                              help="Skip adding the words pointer definitions point at."),
+    skip_link_definitions: bool = typer.Option(False, "--skip-link-definitions"),
     skip_classify: bool = typer.Option(False, "--skip-classify"),
     skip_normalize_pos: bool = typer.Option(False, "--skip-normalize-pos"),
     skip_ngram: bool = typer.Option(False, "--skip-ngram"),
@@ -2398,6 +2437,22 @@ def maintain(
                       f"{stats.get('cast_out', 0)} cast out as symbol/proper-noun-only)")
     else:
         console.print("[dim]fill-definitions skipped.[/dim]")
+
+    if not skip_pointer_targets:
+        from . import pointer_targets
+        with console.status("[bold]Adding pointer targets…"):
+            stats = pointer_targets.add_pointer_targets(conn, schema, cfg, limit=limit)
+        _print_pointer_target_stats(stats)
+    else:
+        console.print("[dim]add-pointer-targets skipped.[/dim]")
+
+    if not skip_link_definitions:
+        with console.status("[bold]Cross-linking definitions…"):
+            stats = db.compute_definition_links(conn, schema, limit=limit)
+        console.print(f"[green]✓[/green] link-definitions: [bold]{stats['links_created']}[/bold] links in "
+                      f"{stats['words_with_links']} definitions")
+    else:
+        console.print("[dim]link-definitions skipped.[/dim]")
 
     if not skip_classify:
         from .classify import classify_and_store

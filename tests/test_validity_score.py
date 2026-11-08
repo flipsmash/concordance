@@ -363,6 +363,14 @@ def test_bare_pointer_target_only_for_gloss_less_pointers():
     assert t("A real definition.") is None
 
 
+def test_pointer_target_phrases_keeps_each_target_whole():
+    from concordance.crossref import pointer_target_phrases as t
+    assert t("Alternative spelling of subadar.") == {"subadar"}
+    assert t("Alternative form of thorn apple.") == {"thorn apple"}
+    assert t("Variant spelling of faggot — A bundle of sticks.") == {"faggot"}
+    assert t("A bundle of sticks for fuel.") == set()
+
+
 def test_pointer_targets_lists_every_pointed_at_spelling():
     from concordance.crossref import pointer_targets as t
     assert t("Variant spelling of faggot — A bundle of sticks.") == {"faggot"}
