@@ -417,3 +417,57 @@
 .word-detail-graph {
   margin-top: 4px;
 }
+
+/* Admin respelling (WordRespell.jsx) */
+.word-respell {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.word-respell-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.word-respell-form input {
+  min-width: 0;
+  flex: 1 1 200px;
+  max-width: 320px;
+  padding: 4px 8px;
+  font: inherit;
+}
+
+.word-respell-hint {
+  margin: 0;
+  font-size: 13px;
+}
+
+.word-respell-merge {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+}
+
+.word-respell-merge p {
+  margin: 0 0 8px;
+}
+
+.word-detail-aliases {
+  margin: -4px 0 8px;
+  font-size: 14px;
+  font-style: italic;
+}
+
+.word-detail-refreshing {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--row-alt);
+  color: var(--text-h);
+  font-size: 14px;
+}

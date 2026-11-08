@@ -263,7 +263,9 @@ def search_suggest_word(lemma: str, _: dict = Depends(_main.require_admin)) -> S
     with _main.get_conn() as conn, conn.cursor() as cur:
         cur.execute(f"""SELECT id, active, definition, variant_flag_reason,
                                coalesce(variant_flag_note, validity_notes)
-                        FROM {_main.SCHEMA}.word WHERE lemma_lc = lower(%s)""", (lemma,))
+                        FROM {_main.SCHEMA}.word WHERE lemma_lc = lower(%s)
+                           OR id = (SELECT word_id FROM {_main.SCHEMA}.word_alias WHERE alias_lc = lower(%s))
+                        ORDER BY lemma_lc = lower(%s) DESC LIMIT 1""", (lemma, lemma, lemma))
         row = cur.fetchone()
         if row is not None:
             wid, active, definition, reason, note = row
@@ -308,7 +310,9 @@ def finalize_suggest_word(
     lemma = _clean_lemma(body.lemma)
 
     with _main.get_conn() as conn, conn.cursor() as cur:
-        cur.execute(f"SELECT id FROM {_main.SCHEMA}.word WHERE lemma_lc = lower(%s)", (lemma,))
+        cur.execute(f"""SELECT id FROM {_main.SCHEMA}.word WHERE lemma_lc = lower(%s)
+                        UNION SELECT word_id FROM {_main.SCHEMA}.word_alias WHERE alias_lc = lower(%s)""",
+                    (lemma, lemma))
         if cur.fetchone() is not None:
             raise HTTPException(status_code=409, detail=f"{lemma!r} was already added, possibly by another admin")
 

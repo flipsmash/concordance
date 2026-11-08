@@ -109,7 +109,8 @@ def compute_difficulty(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> di
 
 
 def compute_quiz_definitions(conn, schema: str = DEFAULT_SCHEMA, cfg=None,
-                             only_missing: bool = True, limit: int = 0) -> dict:
+                             only_missing: bool = True, limit: int = 0,
+                             word_ids: list[int] | None = None) -> dict:
     """Set quiz_definition/quiz_def_source. Clean defs pass through free; leakers are
     LLM-rewritten (validated) or redacted. Resumable via only_missing (scale-ready)."""
     from collections import Counter
@@ -117,8 +118,11 @@ def compute_quiz_definitions(conn, schema: str = DEFAULT_SCHEMA, cfg=None,
     s = _safe_schema(schema)
     where = "quiz_definition IS NULL AND " if only_missing else ""
     with conn.cursor() as cur:
+        if word_ids is not None:
+            where += "id = ANY(%(ids)s) AND "
         cur.execute(f"SELECT id, lemma, definition FROM {s}.word "
-                    f"WHERE {where}coalesce(definition,'') <> ''" + (f" LIMIT {int(limit)}" if limit else ""))
+                    f"WHERE {where}coalesce(definition,'') <> ''" + (f" LIMIT {int(limit)}" if limit else ""),
+                    {"ids": word_ids} if word_ids is not None else None)
         rows = cur.fetchall()
 
     clean = [(i, l, d) for i, l, d in rows if not quizdef.has_leak(l, d)]

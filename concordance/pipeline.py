@@ -9,7 +9,7 @@ from pathlib import Path
 from rich.console import Console
 from wordfreq import zipf_frequency
 
-from . import clean, crossref, db, extract, floor, judge, localdict, master, mw, output, propernouns, resolve, tokenize, validity, validity_score
+from . import clean, crossref, db, extract, floor, judge, localdict, master, mw, output, propernouns, resolve, respell, tokenize, validity, validity_score
 from .dictionary import make_session
 from .config import Config
 from .model import Candidate, RejectReason, Verdict, junk_pos_reason
@@ -89,6 +89,27 @@ def _enrich_one(cand: Candidate, *, lexicon: dict, oed_lexicon: dict, session, m
     resolve.resolve_definition(cand, max_tier=resolve.Tier.MW, lexicon=lexicon, oed_lexicon=oed_lexicon,
                                 session=session, mw_api_key=mw_api_key)
     return cand.verdict is Verdict.DROP
+
+
+def lookup_definitions(conn, cands: list[Candidate], cfg: Config, progress=None) -> None:
+    """Look up every candidate's definition outside a book's ingest, exactly
+    as ingest does (LOCAL -> FREE -> 0 Dict -> MW, _enrich_one): for words
+    added another way (add-pointer-targets, an admin's respelling)."""
+    if not cands:
+        return
+    lexicon = localdict.build_lexicon(conn, {c.lemma for c in cands})
+    localdict.expand_lexicon_for_stubs(conn, lexicon)
+    oed_lexicon = oed_definitions.definition_lexicon(conn, {c.lemma.lower() for c in cands})
+    session = make_session()
+    mw_api_key = mw.mw_api_key() if cfg.mw_enrichment else ""
+    if mw_api_key and mw.quota_exhausted():
+        mw_api_key = ""
+    with ThreadPoolExecutor(max_workers=max(1, cfg.enrichment_workers)) as pool:
+        for i, _ in enumerate(pool.map(
+                lambda c: _enrich_one(c, lexicon=lexicon, oed_lexicon=oed_lexicon,
+                                      session=session, mw_api_key=mw_api_key), cands), 1):
+            if progress and i % 100 == 0:
+                progress(i, len(cands))
 
 
 def post_enrichment_checks(conn, shortlist: list[Candidate], cfg: Config) -> tuple[int, int]:
@@ -198,6 +219,10 @@ def process(book: str | Path, cfg: Config, console: Console | None = None,
     with console.status("[bold]Tokenizing & lemmatizing…"):
         candidates = tokenize.tokenize(chapters, nlp=nlp)
     console.print(f"Found [bold]{len(candidates)}[/bold] distinct lemmas.")
+
+    # An admin's respelling (respell.py) left the old spelling as an alias:
+    # this book's zirbájeh is the vocabulary's zirbaja.
+    respell.apply_aliases(candidates, respell.alias_map(conn, schema))
 
     lexicon = localdict.build_lexicon(conn, set(candidates.keys()))
     localdict.expand_lexicon_for_stubs(conn, lexicon)

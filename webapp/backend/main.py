@@ -787,6 +787,8 @@ class WordDetail(BaseModel):
     books: list[BookRef]
     definition_links: list[DefinitionLink]
     origin: WordOrigin | None = None   # None: no dictionary source records one
+    aliases: list[str] = []            # earlier spellings an admin respelled (word_alias)
+    refreshing: bool = False           # a respelling's background upkeep hasn't finished
 
 
 @app.get("/api/words/{word_id}", response_model=WordDetail)
@@ -874,6 +876,14 @@ def word_detail(word_id: int, _: dict = Depends(require_viewer)) -> WordDetail:
             for target_id, lemma2, surface in cur.fetchall()
         ]
 
+        cur.execute(f"SELECT alias_lc FROM {SCHEMA}.word_alias WHERE word_id = %s ORDER BY alias_lc", (word_id,))
+        aliases = [r[0] for r in cur.fetchall()]
+        # a job stuck 'running' for hours crashed; maintain will have caught up
+        cur.execute(f"""SELECT EXISTS (SELECT 1 FROM {SCHEMA}.word_refresh_job WHERE word_id = %s
+                            AND (status = 'pending' OR (status = 'running'
+                                 AND started_at > now() - interval '3 hours')))""", (word_id,))
+        refreshing = cur.fetchone()[0]
+
     return WordDetail(
         id=word_id, lemma=lemma, part_of_speech=pos, definition=definition, ipa=ipa,
         sentence=sentence, chapter=chapter, synonyms=synonyms, etymology=etymology,
@@ -890,6 +900,7 @@ def word_detail(word_id: int, _: dict = Depends(require_viewer)) -> WordDetail:
         categories=categories, books=books, definition_links=definition_links,
         origin=WordOrigin(root_lang_name=origin_lang, family=origin_family, route=origin_route,
                           method=origin_method) if origin_lang else None,
+        aliases=aliases, refreshing=refreshing,
     )
 
 
@@ -1296,6 +1307,9 @@ app.include_router(_oed.router)
 # Same ordering requirement, same reason.
 from webapp.backend import suggest_word as _suggest_word  # noqa: E402
 app.include_router(_suggest_word.router)
+
+from webapp.backend import respell_api as _respell_api  # noqa: E402
+app.include_router(_respell_api.router)
 
 # Serves the built frontend (webapp/frontend/dist, from `npm run build`) so a
 # single port can be exposed publicly. Registered last so it never shadows an

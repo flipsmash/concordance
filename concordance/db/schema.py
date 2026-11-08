@@ -1153,6 +1153,40 @@ def _migration_0006_pointer_target_rejection(conn: psycopg.Connection, s: str) -
             rejected_at  timestamptz NOT NULL DEFAULT now())""")
 
 
+def _migration_0007_respell(conn: psycopg.Connection, s: str) -> None:
+    """An admin's respelling of a word (respell.py).
+
+    word_alias: an old spelling and the word it now belongs to (zirbájeh ->
+    zirbaja). Ingest maps an alias onto its word, so a later book using the
+    old spelling attaches to the respelled word instead of re-creating it.
+
+    word_refresh_job: the per-word upkeep a respelling queues (categories,
+    quiz definition, difficulty, embeddings, links...), run in the background
+    by `concordance refresh-words`. status: pending | running | done | failed.
+    old_lemma/new_lemma let the job relink definitions mentioning either."""
+    with conn.cursor() as cur:
+        cur.execute(f"""CREATE TABLE IF NOT EXISTS {s}.word_alias (
+            alias_lc    text PRIMARY KEY,
+            word_id     integer NOT NULL REFERENCES {s}.word(id) ON DELETE CASCADE,
+            created_by  text,
+            created_at  timestamptz NOT NULL DEFAULT now())""")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS word_alias_word_idx ON {s}.word_alias (word_id)")
+        cur.execute(f"""CREATE TABLE IF NOT EXISTS {s}.word_refresh_job (
+            id            serial PRIMARY KEY,
+            word_id       integer NOT NULL REFERENCES {s}.word(id) ON DELETE CASCADE,
+            old_lemma     text NOT NULL,
+            new_lemma     text NOT NULL,
+            status        text NOT NULL DEFAULT 'pending'
+                          CHECK (status IN ('pending', 'running', 'done', 'failed')),
+            requested_by  text,
+            requested_at  timestamptz NOT NULL DEFAULT now(),
+            started_at    timestamptz,
+            finished_at   timestamptz,
+            error         text)""")
+        cur.execute(f"""CREATE INDEX IF NOT EXISTS word_refresh_job_open_idx ON {s}.word_refresh_job (word_id)
+                        WHERE status IN ('pending', 'running')""")
+
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, _migration_0001_baseline),
     (2, _migration_0002_compound_verdict),
@@ -1160,6 +1194,7 @@ MIGRATIONS: list[tuple[int, object]] = [
     (4, _migration_0004_word_origin),
     (5, _migration_0005_pointer_target),
     (6, _migration_0006_pointer_target_rejection),
+    (7, _migration_0007_respell),
 ]
 
 

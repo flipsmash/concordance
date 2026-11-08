@@ -922,7 +922,7 @@ def expand_synonym_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int
 
 
 def compute_definition_links(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
-                              chunk_size: int = 500) -> dict:
+                              chunk_size: int = 500, source_ids: list[int] | None = None) -> dict:
     """`concordance link-definitions`: find every case where an active word's
     OWN definition text uses another word that's ALSO active in this app's
     vocabulary, so the webapp can render a real clickable link
@@ -958,12 +958,20 @@ def compute_definition_links(conn, schema: str = DEFAULT_SCHEMA, *, limit: int =
                 ORDER BY id""" + (f" LIMIT {int(limit)}" if limit else "")
         )
         rows = cur.fetchall()
+        if source_ids is not None:
+            # relink just these definitions (a respelling), against every word
+            lemma_to_id = {lemma_lc: wid for wid, lemma_lc, _ in rows}
+            wanted = set(source_ids)
+            rows = [r for r in rows if r[0] in wanted]
+            cur.execute(f"DELETE FROM {s}.word_definition_link WHERE source_word_id = ANY(%s)", (list(wanted),))
 
     stats = {"words_examined": len(rows), "words_with_links": 0, "links_created": 0}
     if not rows:
+        conn.commit()
         return stats
 
-    lemma_to_id = {lemma_lc: wid for wid, lemma_lc, _ in rows}
+    if source_ids is None:
+        lemma_to_id = {lemma_lc: wid for wid, lemma_lc, _ in rows}
     docs = nlp.pipe((definition for _, _, definition in rows), batch_size=200)
 
     with conn.cursor() as cur:

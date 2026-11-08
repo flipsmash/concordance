@@ -5,6 +5,7 @@ import { useAuth } from './AuthContext'
 import GraphView from './GraphView'
 import LinkedDefinition from './LinkedDefinition'
 import WordOrigin from './WordOrigin'
+import WordRespell from './WordRespell'
 import { colorForBucket } from './domainColors'
 import { googleSearchUrl } from './externalLinks'
 import './WordDetail.css'
@@ -66,6 +67,7 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
   const [definitionDraft, setDefinitionDraft] = useState('')
   const [savingDefinition, setSavingDefinition] = useState(false)
   const [definitionError, setDefinitionError] = useState('')
+  const [reloadKey, setReloadKey] = useState(0) // bump to refetch this word in place
 
   // Same host-route family as this page's own -- /app/words/:id keeps
   // navigating within /app (so `backTo="/app"` keeps working after repeat
@@ -182,7 +184,26 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => setNeighbors(data?.neighbors ?? []))
       .catch(() => setNeighbors([]))
-  }, [id])
+  }, [id, reloadKey])
+
+  // While a respelling's background upkeep runs, check back now and then so
+  // categories, difficulty and the rest appear without a manual reload.
+  const refreshing = !!word?.refreshing
+  useEffect(() => {
+    if (!refreshing) return undefined
+    const timer = setInterval(() => {
+      fetch(`${API_BASE}/api/words/${id}`)
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => data && setWord(data))
+        .catch(() => {})
+    }, 20000)
+    return () => clearInterval(timer)
+  }, [refreshing, id])
+
+  function respelled(result) {
+    if (String(result.word_id) === String(id)) setReloadKey((k) => k + 1)
+    else navigate(`${wordsBase}/${result.word_id}`)
+  }
 
   if (loading) return <div className="word-detail-loading">Loading…</div>
 
@@ -222,6 +243,7 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
 
       <div className="word-detail-header">
         <h1>{word.lemma}</h1>
+        {user?.is_admin && <WordRespell word={word} onDone={respelled} />}
         {word.part_of_speech && <span className="word-detail-pos">{word.part_of_speech}</span>}
         {hasAudio && (
           <audio controls src={`${API_BASE}/api/words/${id}/audio`} className="word-detail-audio" />
@@ -266,6 +288,15 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
           </button>
         )}
       </div>
+
+      {word.aliases?.length > 0 && (
+        <p className="muted word-detail-aliases">Also spelled {word.aliases.join(', ')}</p>
+      )}
+      {word.refreshing && (
+        <p className="word-detail-refreshing" role="status">
+          Updating after a spelling change — categories, difficulty and the quiz definition will appear shortly.
+        </p>
+      )}
 
       <section className="word-detail-section">
         {editingDefinition ? (

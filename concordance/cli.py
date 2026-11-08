@@ -164,6 +164,7 @@ def ingest(
 
     conn = _connect(database_url, hint=True)
     db.apply_schema(conn, schema)
+    _hold_gpu(database_url)
 
     # Build the heavy, book-independent resources ONCE and reuse them across
     # every book — the ~9GB judge model (~49s to load), the spaCy model, and
@@ -1885,6 +1886,41 @@ def link_definitions(
                   f"[bold]{stats['links_created']}[/bold] links total")
 
 
+def _hold_gpu(database_url: Optional[str]) -> None:
+    """Hold the GPU lock for the rest of this command (see gpu_lock.py), so
+    a respelling's refresh job never loads a model alongside this one."""
+    from .gpu_lock import hold_for_process
+    hold_for_process(database_url, on_wait=lambda: console.print(
+        "[yellow]Waiting for the GPU — another job (a respelling's refresh, ingest or maintain) "
+        "is using it…[/yellow]"))
+
+
+@app.command("refresh-words")
+def refresh_words_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Run the upkeep queued by an admin's respelling (word_refresh_job) for
+    just those words: categories, quiz definition, frequency, pronunciation,
+    origin, difficulty, embeddings, definition links. The web app starts this
+    in the background after a respelling; the GPU steps wait for any running
+    ingest or maintain. Repeats until no job is pending, so respellings made
+    while it runs are picked up too."""
+    from . import respell
+
+    conn = _connect(database_url)
+    db.apply_schema(conn, schema)
+    total = 0
+    while True:
+        stats = respell.refresh_words(conn, schema, database_url=database_url,
+                                      log=lambda m: console.print(f"[dim]{m}[/dim]"))
+        if not stats["jobs"]:
+            break
+        total += stats["words"]
+    conn.close()
+    console.print(f"[green]✓[/green] refresh-words: {total} word(s) refreshed")
+
+
 @app.command("add-pointer-targets")
 def add_pointer_targets_cmd(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
@@ -2422,6 +2458,7 @@ def maintain(
     the slow steps to run separately/overnight instead."""
     conn = _connect(database_url)
     db.apply_schema(conn, schema)
+    _hold_gpu(database_url)
     cfg = Config()
     if model:
         cfg.model_path = str(model)

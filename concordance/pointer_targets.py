@@ -37,14 +37,11 @@ Tartuffe the play, Heth the biblical figure, Sewel the surname.
 from __future__ import annotations
 
 import re
-from concurrent.futures import ThreadPoolExecutor
 
-from . import crossref, judge, localdict, mw
+from . import crossref, judge
 from .config import Config
 from .db import _safe_schema
-from .dictionary import make_session
 from .model import Candidate, Verdict
-from .oed import definitions as oed_definitions
 from .validity_score import effective_zipf
 
 _SINGLE_WORD = re.compile(r"[^\W\d_]+")
@@ -105,7 +102,7 @@ def add_pointer_targets(conn, schema: str = "concordance", cfg: Config | None = 
                         dry_run: bool = False, limit: int = 0, judge_obj=None, progress=None) -> dict:
     """Add every eligible pointer target; see the module docstring. Returns
     counts plus the "added" lemmas (and, on a dry run, what would be)."""
-    from .pipeline import _enrich_one, post_enrichment_checks
+    from .pipeline import lookup_definitions, post_enrichment_checks
 
     cfg = cfg or Config()
     s = _safe_schema(schema)
@@ -136,19 +133,7 @@ def add_pointer_targets(conn, schema: str = "concordance", cfg: Config | None = 
 
     # --- definitions, exactly as ingest looks them up ---------------------
     if cands:
-        lexicon = localdict.build_lexicon(conn, {c.lemma for c in cands})
-        localdict.expand_lexicon_for_stubs(conn, lexicon)
-        oed_lexicon = oed_definitions.definition_lexicon(conn, {c.lemma for c in cands})
-        session = make_session()
-        mw_api_key = mw.mw_api_key() if cfg.mw_enrichment else ""
-        if mw_api_key and mw.quota_exhausted():
-            mw_api_key = ""
-        with ThreadPoolExecutor(max_workers=max(1, cfg.enrichment_workers)) as pool:
-            for i, _ in enumerate(pool.map(
-                    lambda c: _enrich_one(c, lexicon=lexicon, oed_lexicon=oed_lexicon,
-                                          session=session, mw_api_key=mw_api_key), cands), 1):
-                if progress and i % 100 == 0:
-                    progress(i, len(cands))
+        lookup_definitions(conn, cands, cfg, progress)
         lookup_cast_out = sum(c.verdict is Verdict.DROP for c in cands)   # MW's foreign signal
         for c in cands:
             if c.verdict is Verdict.DROP:
