@@ -1667,6 +1667,8 @@ def apply_reviewed_cmd(
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Apply the rows marked 'y' in a reviewed CSV:
+      - repair-wiktionary-gaps: replace the damaged definition with the
+        (possibly hand-edited) proposed one, if it hasn't changed since;
       - derive-definitions proposals: store the derived definition (only if
         the word is still undefined);
       - imported mix-ups: replace the wrong definition with the word's own
@@ -1681,7 +1683,24 @@ def apply_reviewed_cmd(
     ids = {int(r["word_id"]) for r in rows if (r[approve_col] or "").strip().lower() in ("y", "yes")}
     conn = _connect(database_url)
     s = db._safe_schema(schema)
-    if "kind" in rows[0]:                                   # derive-definitions proposals
+    if "damaged_definition" in rows[0]:                      # repair-wiktionary-gaps review list
+        from .db.sync import _invalidate_definition_dependents
+        done = 0
+        with conn.cursor() as cur:
+            for r in rows:
+                new = (r["proposed_definition"] or "").strip()
+                if int(r["word_id"]) not in ids or not new:
+                    continue
+                cur.execute(f"""UPDATE {s}.word SET previous_definition = definition, definition = %s,
+                                    updated_at = now() WHERE id = %s AND definition = %s""",
+                            (new, int(r["word_id"]), r["damaged_definition"]))
+                if cur.rowcount:
+                    _invalidate_definition_dependents(cur, s, int(r["word_id"]))
+                    done += 1
+        conn.commit()
+        console.print(f"[green]✓[/green] apply-reviewed: {done} of {len(ids)} approved definitions replaced "
+                      "(categories, quiz definition and embedding redo on the next maintain)")
+    elif "kind" in rows[0]:                                   # derive-definitions proposals
         from . import derived_definitions as dd
         chosen = [p for p in dd.propose(conn, schema) if p.word_id in ids]
         dd.apply(conn, chosen, schema)
@@ -1893,6 +1912,71 @@ def _hold_gpu(database_url: Optional[str]) -> None:
     hold_for_process(database_url, on_wait=lambda: console.print(
         "[yellow]Waiting for the GPU — another job (a respelling's refresh, ingest or maintain) "
         "is using it…[/yellow]"))
+
+
+@app.command("repair-wiktionary-gaps")
+def repair_wiktionary_gaps_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    apply: bool = typer.Option(False, "--apply", help="Write the repairs (default: dry run, report only)."),
+    dump_path: Path = typer.Option(Path("data/wiktextract-en.jsonl.gz"), "--dump-path",
+                                   help="The current Wiktionary dump (kaikki wiktextract, English)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Put back the words the old local Wiktionary table dropped from its
+    definitions ("Pertaining to a of the American Union" -> "...a state of
+    the American Union"), from the current Wiktionary dump: in the table
+    itself, so future lookups are whole, and in active words' definitions.
+    Changed words then get their categories, quiz definition, embedding and
+    definition links redone. Old values are saved to db_backups/. See
+    concordance/wiktgaps.py."""
+    import datetime
+
+    from . import wiktgaps
+    from .classify import classify_and_store
+    from .gpu_lock import gpu_lock
+
+    conn = _connect(database_url)
+    db.apply_schema(conn, schema)
+    with conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT lower(term) FROM vocab.wiktionary")
+        needed = {r[0] for r in cur.fetchall()}
+        cur.execute(f"SELECT lemma_lc FROM {schema}.word WHERE active")
+        needed |= {r[0] for r in cur.fetchall()}
+    with console.status("[bold]Reading the Wiktionary dump…") as status:
+        glosses = wiktgaps.load_glosses(dump_path, needed,
+                                        progress=lambda n: status.update(f"[bold]Reading the Wiktionary dump… {n:,} lines"))
+    repairs = wiktgaps.find_repairs(conn, schema, glosses)
+    console.print(f"{len(repairs['table']):,} local Wiktionary rows and {len(repairs['words']):,} active words to repair")
+    for _, lemma, old, new in repairs["words"][:15]:
+        console.print(f"  [bold]{lemma}[/bold]: {old[:90]}\n    → {new[:90]}")
+    if not apply:
+        console.print("[dim]dry run — rerun with --apply to write.[/dim]")
+        return
+    backup = Path("db_backups") / f"wiktionary_gaps_{datetime.date.today():%Y%m%d}.csv"
+    if backup.exists():   # a second run the same day mustn't overwrite the first run's old values
+        backup = backup.with_name(f"{backup.stem}_{datetime.datetime.now():%H%M%S}.csv")
+    wiktgaps.apply_repairs(conn, schema, repairs, backup)
+    console.print(f"[green]✓[/green] repaired; old values in {backup}")
+
+    ids = [wid for wid, *_ in repairs["words"]]
+    if ids:
+        cfg = Config()
+        with gpu_lock(database_url, on_wait=lambda: console.print("[yellow]Waiting for the GPU…[/yellow]")):
+            with console.status("[bold]Re-classifying the repaired words…"):
+                classify_and_store(conn, schema, cfg, word_ids=ids)
+            with console.status("[bold]Rebuilding their quiz definitions…"):
+                db.compute_quiz_definitions(conn, schema, cfg, word_ids=ids)
+        with console.status("[bold]Re-embedding and relinking…"):
+            db.compute_definition_embeddings(conn, schema, only_missing=True, word_ids=ids)
+            db.compute_definition_links(conn, schema, source_ids=ids)
+        console.print(f"[green]✓[/green] {len(ids):,} words re-classified, quiz definitions, embeddings and links redone")
+    review = wiktgaps.review_rows(conn, schema, glosses)
+    if review:
+        path = Path("data/review/wiktionary_gaps.csv")
+        wiktgaps.write_review(review, path)
+        console.print(f"{len(review)} gapped definitions Wiktionary has reworded since — review {path}, "
+                      "mark y (edit the proposal if you like), then `concordance apply-reviewed` it")
+    conn.close()
 
 
 @app.command("refresh-words")
