@@ -1213,6 +1213,29 @@ def _migration_0008_book_upload(conn: psycopg.Connection, s: str) -> None:
             finished_at    timestamptz)""")
 
 
+def _migration_0009_book_retirement(conn: psycopg.Connection, s: str) -> None:
+    """A duplicate book taken out of the collection (dedupe_books.py), and
+    everything needed to put it back: `snapshot` holds the book row and
+    every row that referenced it (word links, rejections, genres, fame,
+    stats, similarity, clusters, map points), `added_links` the word links
+    copied onto the kept copy so no word lost its only book. status is the
+    switch: removed | restored."""
+    with conn.cursor() as cur:
+        cur.execute(f"""CREATE TABLE IF NOT EXISTS {s}.book_retirement (
+            id           serial PRIMARY KEY,
+            book_id      integer NOT NULL,
+            keeper_id    integer NOT NULL,
+            title        text NOT NULL,
+            author       text,
+            reason       text NOT NULL,
+            snapshot     jsonb NOT NULL,
+            added_links  integer[] NOT NULL DEFAULT '{{}}',
+            status       text NOT NULL DEFAULT 'removed' CHECK (status IN ('removed', 'restored')),
+            retired_by   text,
+            retired_at   timestamptz NOT NULL DEFAULT now(),
+            restored_at  timestamptz)""")
+
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, _migration_0001_baseline),
     (2, _migration_0002_compound_verdict),
@@ -1222,6 +1245,7 @@ MIGRATIONS: list[tuple[int, object]] = [
     (6, _migration_0006_pointer_target_rejection),
     (7, _migration_0007_respell),
     (8, _migration_0008_book_upload),
+    (9, _migration_0009_book_retirement),
 ]
 
 

@@ -1991,6 +1991,82 @@ def repair_wiktionary_gaps_cmd(
     conn.close()
 
 
+def _refresh_book_aggregates(conn, schema: str) -> None:
+    with console.status("[bold]Refreshing book/author stats and the rejected index…"):
+        db.compute_author_stats(conn, schema)
+        db.compute_book_stats(conn, schema)
+        db.refresh_rejected_lemma_index(conn, schema)
+
+
+@app.command("dedupe-books")
+def dedupe_books_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    apply: bool = typer.Option(False, "--apply", help="Remove the duplicates (default: dry run, list only)."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Take duplicate books out of the collection -- conservatively: same
+    title and author once case and punctuation are ignored, a real author,
+    word counts within 3% -- keeping the copy with more linked words.
+    Reversible: each removal is snapshotted in book_retirement; see
+    `restore-book`. See concordance/dedupe_books.py."""
+    from . import dedupe_books as dd
+
+    conn = _connect(database_url)
+    db.apply_schema(conn, schema)
+    groups = dd.find_duplicates(conn, schema)
+    n = sum(len(d) for _, d in groups)
+    console.print(f"{len(groups)} duplicate group(s); {n} copy(ies) to remove")
+    for keeper, dups in groups:
+        console.print(f"  keep [bold]{keeper.title}[/bold] ({keeper.author}, #{keeper.id}, {keeper.linked_words} words)")
+        for d in dups:
+            console.print(f"    remove {d.title!r} (#{d.id}, {d.linked_words} words)")
+    if not apply:
+        console.print("[dim]dry run — rerun with --apply to remove them.[/dim]")
+        return
+    for keeper, dups in groups:
+        for d in dups:
+            dd.retire(conn, schema, keeper, d, by="dedupe-books",
+                      reason=f"same work as #{keeper.id} {keeper.title!r}")
+    conn.commit()
+    _refresh_book_aggregates(conn, schema)
+    conn.close()
+    console.print(f"[green]✓[/green] removed {n} duplicate(s); undo any with `concordance restore-book <id>` "
+                  "(ids: SELECT id, title FROM book_retirement)")
+
+
+@app.command("restore-book")
+def restore_book_cmd(
+    retirement_id: Optional[int] = typer.Argument(None, help="The book_retirement id to undo."),
+    all_: bool = typer.Option(False, "--all", help="Undo every removal still in effect."),
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Put back a book `dedupe-books` removed, exactly as it was (word links,
+    rejections, genres, fame, stats...), and take the word links copied onto
+    the kept copy off again. With no id, lists the removals."""
+    from . import dedupe_books as dd
+
+    conn = _connect(database_url)
+    db.apply_schema(conn, schema)
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT id, book_id, title, keeper_id FROM {schema}.book_retirement
+                        WHERE status = 'removed' ORDER BY id""")
+        removed = cur.fetchall()
+    if retirement_id is None and not all_:
+        for rid, bid, title, keeper in removed:
+            console.print(f"  {rid}: {title} (was #{bid}; kept #{keeper})")
+        console.print(f"{len(removed)} removal(s) in effect")
+        return
+    ids = [r[0] for r in removed] if all_ else [retirement_id]
+    for rid in ids:
+        out = dd.restore(conn, schema, rid)
+        console.print(f"  restored {out['title']!r} (#{out['book_id']})")
+    conn.commit()
+    _refresh_book_aggregates(conn, schema)
+    conn.close()
+    console.print(f"[green]✓[/green] {len(ids)} book(s) restored")
+
+
 @app.command("process-uploads")
 def process_uploads_cmd(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
