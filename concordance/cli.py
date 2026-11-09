@@ -2002,6 +2002,9 @@ def _refresh_book_aggregates(conn, schema: str) -> None:
 def dedupe_books_cmd(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
     apply: bool = typer.Option(False, "--apply", help="Remove the duplicates (default: dry run, list only)."),
+    contained: bool = typer.Option(False, "--contained", help="Second pass instead: in multi-volume works with a "
+                                   "Complete book, remove each volume (or partial compilation) whose text a larger "
+                                   "copy of the work already holds (95%+ of its words)."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Take duplicate books out of the collection -- conservatively: same
@@ -2013,6 +2016,22 @@ def dedupe_books_cmd(
 
     conn = _connect(database_url)
     db.apply_schema(conn, schema)
+    if contained:
+        pairs = dd.find_contained(conn, schema)
+        console.print(f"{len(pairs)} book(s) another copy of the same work already contains")
+        for keeper, d, share in pairs:
+            console.print(f"  remove {d.title!r} (#{d.id}) — {share:.1%} of its words in {keeper.title!r} (#{keeper.id})")
+        if not apply:
+            console.print("[dim]dry run — rerun with --apply to remove them.[/dim]")
+            return
+        for keeper, d, share in pairs:
+            dd.retire(conn, schema, keeper, d, by="dedupe-books --contained",
+                      reason=f"contained in #{keeper.id} {keeper.title!r} ({share:.1%} of its words)")
+        conn.commit()
+        _refresh_book_aggregates(conn, schema)
+        conn.close()
+        console.print(f"[green]✓[/green] removed {len(pairs)}; undo with `concordance restore-book <id>`")
+        return
     groups = dd.find_duplicates(conn, schema)
     n = sum(len(d) for _, d in groups)
     console.print(f"{len(groups)} duplicate group(s); {n} copy(ies) to remove")
@@ -2032,6 +2051,28 @@ def dedupe_books_cmd(
     conn.close()
     console.print(f"[green]✓[/green] removed {n} duplicate(s); undo any with `concordance restore-book <id>` "
                   "(ids: SELECT id, title FROM book_retirement)")
+
+
+@app.command("retire-book")
+def retire_book_cmd(
+    book_id: int = typer.Argument(..., help="The book to take out."),
+    keep: int = typer.Option(..., "--keep", help="The copy of the same work that stays (gets its word links)."),
+    reason: str = typer.Option(..., "--reason", help="Why, for the record."),
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Take one hand-picked duplicate out, exactly as dedupe-books does
+    (snapshotted, its word links copied onto --keep; undo with restore-book)."""
+    from . import dedupe_books as dd
+
+    conn = _connect(database_url)
+    db.apply_schema(conn, schema)
+    dup, keeper = dd.book(conn, schema, book_id), dd.book(conn, schema, keep)
+    rid = dd.retire(conn, schema, keeper, dup, by="retire-book", reason=reason)
+    conn.commit()
+    _refresh_book_aggregates(conn, schema)
+    conn.close()
+    console.print(f"[green]✓[/green] removed {dup.title!r} (#{dup.id}), kept #{keeper.id}; undo: restore-book {rid}")
 
 
 @app.command("restore-book")

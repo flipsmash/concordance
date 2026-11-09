@@ -159,3 +159,83 @@ def _insertable(cur, s: str, table: str) -> str:
 def _book_exists(cur, s: str, book_id: int) -> bool:
     cur.execute(f"SELECT 1 FROM {s}.book WHERE id = %s", (book_id,))
     return cur.fetchone() is not None
+
+
+# --- second pass: books another book of the same work already contains --------
+
+# "Title — Volume 03", "Title, Part 1", "Title (Complete)", "Title — Complete":
+# Gutenberg's multi-volume works, our own book-merge compilations, and its
+# one-file complete editions, all under one base title.
+_PART = re.compile(r"^(.*?)[\s,;:—–-]*\b(?:volume|vol\.?|part|book)\s+[0-9ivxlc]+\.?\s*$", re.I)
+_COMPLETE = re.compile(r"^(.*?)[\s,;:—–(\[-]*\bcomplete\b[)\]\.]*\s*$", re.I)
+CONTAINED = 0.95
+
+
+def _work(title: str) -> tuple[str, bool] | None:
+    """(base title, is a "Complete" book) for a volume/part/complete title."""
+    if m := _COMPLETE.match(title):
+        return _norm(m.group(1)), True
+    if m := _PART.match(title):
+        return _norm(m.group(1)), False
+    return None
+
+
+def _text_vocab(path: str | None) -> set[str] | None:
+    from pathlib import Path
+    if not path or not path.endswith(".txt") or not Path(path).exists():
+        return None
+    return set(re.findall(r"[a-z]{4,}", Path(path).read_text(errors="replace").lower()))
+
+
+def find_contained(conn, schema: str, threshold: float = CONTAINED) -> list[tuple[Book, Book, float]]:
+    """[(keeper, book to remove, share of its text's words found in the
+    keeper)] within multi-volume works that have a Complete book: a volume
+    whose text a Complete edition already holds, or a partial compilation
+    inside a fuller one. Compared on the archived texts' vocabularies --
+    their linked words differ with when each was ingested. A volume the
+    Complete book lacks (our own compilation missed it) scores low and stays."""
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT b.id, b.title, b.author, b.word_count, b.archive_path,
+                               (SELECT count(*) FROM {s}.word_book wb WHERE wb.book_id = b.id)
+                        FROM {s}.book b""")
+        rows = cur.fetchall()
+    works: dict[tuple[str, str], list] = defaultdict(list)
+    for bid, title, author, wc, path, linked in rows:
+        w = _work(title)
+        if w and _norm(author):
+            works[(w[0], _norm(author))].append((Book(bid, title, author, wc, linked), w[1], path))
+    out = []
+    for members in works.values():
+        if not any(is_complete for _, is_complete, _ in members) or len(members) < 2:
+            continue
+        members.sort(key=lambda m: -(m[0].word_count or 0))
+        vocab = {m[0].id: _text_vocab(m[2]) for m in members}
+        kept: list[Book] = []
+        for book, _, _ in members:
+            mine = vocab[book.id]
+            best = None
+            if mine:
+                for k in kept:
+                    theirs = vocab[k.id]
+                    if theirs and (k.word_count or 0) > (book.word_count or 0):
+                        share = len(mine & theirs) / len(mine)
+                        if share >= threshold and (best is None or share > best[1]):
+                            best = (k, share)
+            if best:
+                out.append((best[0], book, round(best[1], 3)))
+            else:
+                kept.append(book)
+    return out
+
+
+def book(conn, schema: str, book_id: int) -> Book:
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT b.id, b.title, b.author, b.word_count,
+                               (SELECT count(*) FROM {s}.word_book wb WHERE wb.book_id = b.id)
+                        FROM {s}.book b WHERE b.id = %s""", (book_id,))
+        row = cur.fetchone()
+    if row is None:
+        raise ValueError(f"no book #{book_id}")
+    return Book(*row)

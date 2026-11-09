@@ -98,3 +98,42 @@ def test_finds_conservative_duplicates_and_removes_one_reversibly():
         cur.execute(f"DROP SCHEMA {s} CASCADE")
     conn.commit()
     conn.close()
+
+
+@pg
+def test_contained_pass_removes_only_volumes_the_complete_book_holds(tmp_path):
+    s = "cc_test_dedupe_contained"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {s} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, s)
+    vol1 = "chapter one: the lighthouse keeper rowed toward the darkening headland " * 40
+    vol2 = "chapter two: brambles overgrew the ruined chapel beyond the marshes " * 40
+    vol3 = "chapter three: smugglers unloaded brandy beneath the crumbling viaduct " * 40
+    texts = {
+        "Grania — Complete": vol1 + vol2,           # Gutenberg's one-file edition, lacks volume 3
+        "Grania — Volume 01": vol1,
+        "Grania — Volume 02": vol2,
+        "Grania — Volume 03": vol3,                # not in the Complete book: stays
+        "Grania (Complete)": vol2,                 # our partial compilation: inside the fuller one
+    }
+    ids = {}
+    with conn.cursor() as cur:
+        for title, text in texts.items():
+            p = tmp_path / f"{len(ids)}.txt"
+            p.write_text(text)
+            cur.execute(f"INSERT INTO {s}.book (title, author, word_count, archive_path) VALUES (%s, 'Lawless, Emily', %s, %s) RETURNING id",
+                        (title, len(text.split()), str(p)))
+            ids[title] = cur.fetchone()[0]
+    conn.commit()
+
+    pairs = dd.find_contained(conn, s)
+    removed = sorted(d.title for _, d, _ in pairs)
+    assert removed == ["Grania (Complete)", "Grania — Volume 01", "Grania — Volume 02"]
+    assert {k.title for k, _, _ in pairs} == {"Grania — Complete"}
+
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {s} CASCADE")
+    conn.commit()
+    conn.close()
