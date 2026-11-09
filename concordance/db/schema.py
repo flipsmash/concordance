@@ -1236,6 +1236,13 @@ def _migration_0009_book_retirement(conn: psycopg.Connection, s: str) -> None:
             restored_at  timestamptz)""")
 
 
+def _migration_0010_mw_pron(conn: psycopg.Connection, s: str) -> None:
+    """When `mw-pronounce` last asked Merriam-Webster about a word (hit or
+    miss), so its daily runs move on instead of asking again."""
+    with conn.cursor() as cur:
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS mw_pron_checked_at timestamptz")
+
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, _migration_0001_baseline),
     (2, _migration_0002_compound_verdict),
@@ -1246,6 +1253,7 @@ MIGRATIONS: list[tuple[int, object]] = [
     (7, _migration_0007_respell),
     (8, _migration_0008_book_upload),
     (9, _migration_0009_book_retirement),
+    (10, _migration_0010_mw_pron),
 ]
 
 

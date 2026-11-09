@@ -120,6 +120,20 @@ def _record_usage() -> int:
     return count
 
 
+DAILY_QUOTA = _DAILY_QUOTA
+
+
+def usage_today() -> int:
+    """API lookups spent today (against DAILY_QUOTA)."""
+    return _usage_count()
+
+
+def cached_words() -> list[str]:
+    """Every word the on-disk cache already holds an answer for (looking one
+    up again costs nothing)."""
+    return list(_load_json(_CACHE_FILE))
+
+
 def quota_exhausted() -> bool:
     """Whether today's usage has already hit the daily cap. `lookup_api` already
     checks this internally before spending a fresh (uncached) call, but a batch

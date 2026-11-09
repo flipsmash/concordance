@@ -2108,6 +2108,32 @@ def restore_book_cmd(
     console.print(f"[green]✓[/green] {len(ids)} book(s) restored")
 
 
+@app.command("mw-pronounce")
+def mw_pronounce_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap words checked this run (0 = until the daily reserve)."),
+    reserve: int = typer.Option(100, "--reserve", help="MW API lookups to leave unspent today, for ingest."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Replace synthesized pronunciations with Merriam-Webster's: its human
+    recording (audio source 'mw') and, for a word with no IPA, its respelling
+    converted to IPA (ipa_source 'mw'). Worst first -- spelling-guess (Piper)
+    audio, then Azure, then none -- through the licensed API, cached words
+    first, stopping at the daily quota minus --reserve. Resumable: the daily
+    concordance-mw-pronounce timer runs it. See concordance/mw_pron.py."""
+    from . import mw_pron
+
+    conn = _connect(database_url)
+    db.apply_schema(conn, schema)
+    stats = mw_pron.pronounce(conn, schema, limit=limit, reserve=reserve,
+                              log=lambda m: console.print(f"[dim]{m}[/dim]"))
+    conn.close()
+    console.print(f"[green]✓[/green] mw-pronounce: {stats.get('checked', 0)} checked of {stats.get('candidates', 0)} "
+                  f"waiting — {stats.get('recordings', 0)} recordings, {stats.get('ipa_added', 0)} IPA added, "
+                  f"{stats.get('no_entry', 0)} not in MW"
+                  + (" (stopped at today's API reserve)" if stats.get("stopped_for_quota") else ""))
+
+
 @app.command("process-uploads")
 def process_uploads_cmd(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
