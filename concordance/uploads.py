@@ -123,7 +123,10 @@ def process_uploads(conn, schema: str, *, database_url: str | None = None, archi
     lock.autocommit = True
     try:
         with lock.cursor() as cur:
-            cur.execute("SELECT pg_try_advisory_lock(hashtext(%s))", (_RUNNER_LOCK,))
+            # per schema: a test schema's job mustn't wait on the live one (the
+            # GPU lock, which its steps take, stays global -- one GPU)
+            key = _RUNNER_LOCK if s == db.DEFAULT_SCHEMA else f"{_RUNNER_LOCK}:{s}"
+            cur.execute("SELECT pg_try_advisory_lock(hashtext(%s))", (key,))
             if not cur.fetchone()[0]:
                 log("another upload job is running; it will pick these up")
                 return {"uploads": 0}
