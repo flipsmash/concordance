@@ -14,9 +14,9 @@ It uses the licensed Collegiate API (mw.lookup_api): cached on disk, so a
 word looked up before -- by ingest, mw-backfill or the audio step -- costs
 nothing, and capped at 1,000 new lookups a day, of which this leaves a
 reserve for ingest. Cached words go first, then new lookups until the
-reserve. Each word is marked mw_pron_checked_at, hit or miss, so a daily run
-(the concordance-mw-pronounce timer) carries on where the last stopped and
-picks up newly ingested words.
+reserve. Each word is marked mw_pron_checked_at, hit or miss, so running it
+once a day carries on where the last run stopped and picks up newly ingested
+words.
 
 Scraping the website instead (no daily cap) was asked for but isn't done:
 the site sits behind a Cloudflare bot challenge, and getting past one was

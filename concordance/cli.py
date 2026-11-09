@@ -2119,8 +2119,8 @@ def mw_pronounce_cmd(
     recording (audio source 'mw') and, for a word with no IPA, its respelling
     converted to IPA (ipa_source 'mw'). Worst first -- spelling-guess (Piper)
     audio, then Azure, then none -- through the licensed API, cached words
-    first, stopping at the daily quota minus --reserve. Resumable: the daily
-    concordance-mw-pronounce timer runs it. See concordance/mw_pron.py."""
+    first, stopping at the daily quota minus --reserve. Resumable: run it
+    once a day to work through the list. See concordance/mw_pron.py."""
     from . import mw_pron
 
     conn = _connect(database_url)
@@ -2492,6 +2492,7 @@ def oed_pronounce(
     conn = _connect(database_url)
     cfg = OedConfig(schema=schema)
     oed_db.apply_schema(conn, schema)
+    _hold_gpu(database_url)   # days long: uploads and respellings wait (stop it any time; it resumes)
     with console.status("[bold]Loading pronunciation transcriber…"):
         transcriber = _pron.get_transcriber(cfg)
     if isinstance(transcriber, _pron.StubTranscriber):
