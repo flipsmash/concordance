@@ -10,22 +10,14 @@ systemd unit, so restarting this web service can't kill it mid-run.
 
 from __future__ import annotations
 
-import logging
-import subprocess
-import sys
-import time
-from pathlib import Path
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from concordance import respell
+from webapp.backend import jobs
 from webapp.backend import main as _main
 
 router = APIRouter()
-log = logging.getLogger(__name__)
-
-_REPO = Path(__file__).resolve().parents[2]
 
 
 class RespellRequest(BaseModel):
@@ -41,17 +33,7 @@ class RespellResult(BaseModel):
 
 
 def start_refresh_job() -> None:
-    """Run `concordance refresh-words` in the background, outside this
-    service's cgroup. If systemd-run isn't available the job stays queued
-    and the next refresh-words (or a later respelling) picks it up."""
-    cmd = [sys.executable, "-m", "concordance", "refresh-words", "--schema", _main.SCHEMA]
-    unit = f"concordance-refresh-{int(time.time())}"
-    try:
-        subprocess.run(["systemd-run", "--user", "--collect", f"--unit={unit}",
-                        f"--working-directory={_REPO}", "--", *cmd],
-                       check=True, capture_output=True, timeout=15)
-    except (OSError, subprocess.SubprocessError) as exc:
-        log.warning("couldn't start the refresh job (%s); it stays queued", exc)
+    jobs.start("refresh-words", _main.SCHEMA)
 
 
 @router.post("/api/words/{word_id}/spelling", response_model=RespellResult)

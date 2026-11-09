@@ -1,0 +1,91 @@
+.admin-upload {
+  max-width: 820px;
+  padding: 16px 0 40px;
+}
+
+.admin-upload-form {
+  display: grid;
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.admin-upload-form label {
+  display: grid;
+  gap: 4px;
+  font-size: 14px;
+  color: var(--text-h);
+}
+
+.admin-upload-form input:not([type="file"]) {
+  max-width: 520px;
+  padding: 6px 8px;
+  font: inherit;
+}
+
+.admin-upload-confirm {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+}
+
+.admin-upload-confirm p {
+  margin: 0 0 8px;
+}
+
+.admin-upload-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-upload-item {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.admin-upload-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+}
+
+.admin-upload-status {
+  margin-left: auto;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: var(--row-alt);
+  font-size: 12px;
+}
+
+.status-failed .admin-upload-status {
+  outline: 1px solid #c0392b;
+}
+
+.admin-upload-meta,
+.admin-upload-step {
+  margin-top: 4px;
+  font-size: 13px;
+}
+
+.admin-upload-step {
+  color: var(--text-h);
+}
+
+.admin-upload-link {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 13px;
+}
+
+.admin-upload-error pre {
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 12px;
+}

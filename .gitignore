@@ -20,6 +20,7 @@ models/
 *.csv
 archive/
 incoming/
+uploads/
 gutenberg_literature/
 *.zip
 missed_shadow.txt

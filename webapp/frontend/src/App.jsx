@@ -12,6 +12,7 @@ import RequestInvite from './RequestInvite'
 import RequireAdmin from './RequireAdmin'
 import RequireAuth from './RequireAuth'
 import SuggestWord from './SuggestWord'
+import AdminUpload from './AdminUpload'
 
 // Lazy-loaded: pulls in react-force-graph-2d's canvas/d3-force bundle only
 // when the Graph tab is actually opened, so Accepted/Rejected stay unaffected.
@@ -76,6 +77,9 @@ function Layout() {
           </NavLink>
           <NavLink to="suggest-word" className={tabClass}>
             Suggest Word
+          </NavLink>
+          <NavLink to="upload" className={tabClass}>
+            Upload Book
           </NavLink>
           <NavLink to="graph" className={tabClass}>
             Graph
@@ -404,6 +408,7 @@ function App() {
                 <Route path="accepted" element={<AcceptedView />} />
                 <Route path="rejected" element={<RejectedView />} />
                 <Route path="suggest-word" element={<SuggestWord />} />
+                <Route path="upload" element={<AdminUpload />} />
                 <Route path="settings" element={<AdminSettings />} />
                 <Route
                   path="graph"

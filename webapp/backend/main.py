@@ -1311,6 +1311,9 @@ app.include_router(_suggest_word.router)
 from webapp.backend import respell_api as _respell_api  # noqa: E402
 app.include_router(_respell_api.router)
 
+from webapp.backend import uploads_api as _uploads_api  # noqa: E402
+app.include_router(_uploads_api.router)
+
 # Serves the built frontend (webapp/frontend/dist, from `npm run build`) so a
 # single port can be exposed publicly. Registered last so it never shadows an
 # /api/* route above; absent in plain local dev, where the Vite dev server is

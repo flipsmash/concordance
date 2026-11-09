@@ -123,6 +123,11 @@ def ingest(
                                     "(Tier.OED in the definition cascade); a no-op if it doesn't exist yet."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
     no_archive: bool = typer.Option(False, "--no-archive", help="Leave source book files in place instead of moving them to archive/."),
+    title_opt: Optional[str] = typer.Option(None, "--title", help="Single-file mode: the book's title (default: "
+                                            "parsed from a '[Title] -- [Author]' filename)."),
+    author_opt: Optional[str] = typer.Option(None, "--author", help="Single-file mode: the book's author."),
+    archive_to: Optional[Path] = typer.Option(None, "--archive-dir", help="Single-file mode: archive the file here "
+                                              "(default: an archive/ folder next to it)."),
 ) -> None:
     """Run the extraction pipeline and write straight to Postgres — no CSV,
     no hand-edit, no finalize. Review/prune the result in the review web app.
@@ -181,6 +186,10 @@ def ingest(
             console.print()
             console.rule(f"[bold]{i}/{len(books)} · {b.name}")
         title, author = _parse_incoming_name(b)
+        if not batch_mode and title_opt:
+            # given outright (a web upload): titles routinely hold characters
+            # a filename can't (Frankenstein: or, The Modern Prometheus)
+            title, author = title_opt.strip(), (author_opt or "").strip() or None
 
         try:
             kept, rejected = process_pipeline(b, cfg, console, schema=schema,
@@ -204,7 +213,7 @@ def ingest(
             # batch mode always archives to the top-level archive/ (incoming/
             # and archive/ are siblings at the project root); single-file mode
             # keeps `run`'s convention of archiving next to the source file.
-            archive_dir = ARCHIVE_DIR if batch_mode else b.parent / "archive"
+            archive_dir = ARCHIVE_DIR if batch_mode else (archive_to or b.parent / "archive")
             archive_dir.mkdir(parents=True, exist_ok=True)
             dest = archive_dir / b.name
             try:
@@ -873,6 +882,7 @@ def book_genres_cmd(
 
     conn = _connect(database_url)
     db.apply_schema(conn, schema)
+    _hold_gpu(database_url)
     cfg = Config()
     if model:
         cfg.model_path = str(model)
@@ -1200,6 +1210,7 @@ def author_fame_cmd(
     so book scoring has the author's context available."""
     conn = _connect(database_url)
     db.apply_schema(conn, schema)
+    _hold_gpu(database_url)
     with console.status("[bold]Scoring author fame…"):
         stats = db.compute_author_fame(conn, schema, limit=limit, stale_days=stale_days, dry_run=stub)
     conn.close()
@@ -1250,6 +1261,7 @@ def book_fame_cmd(
     best results; this tolerates a book whose author has no fame row yet."""
     conn = _connect(database_url)
     db.apply_schema(conn, schema)
+    _hold_gpu(database_url)
     with console.status("[bold]Scoring book fame…"):
         stats = db.compute_book_fame(conn, schema, limit=limit, stale_days=stale_days, dry_run=stub)
     conn.close()
@@ -1977,6 +1989,27 @@ def repair_wiktionary_gaps_cmd(
         console.print(f"{len(review)} gapped definitions Wiktionary has reworded since — review {path}, "
                       "mark y (edit the proposal if you like), then `concordance apply-reviewed` it")
     conn.close()
+
+
+@app.command("process-uploads")
+def process_uploads_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Bring the books admins uploaded from the web app into the corpus:
+    ingest each, then the upkeep once for the batch (maintain, book genres,
+    fame, book/author stats, the rejected index), then the relatedness
+    rebuild (relate, corpus-map). The web app starts this in the background
+    after an upload; safe to run by hand (a second copy just exits). See
+    concordance/uploads.py."""
+    from . import uploads
+
+    conn = _connect(database_url)
+    db.apply_schema(conn, schema)
+    stats = uploads.process_uploads(conn, schema, database_url=database_url,
+                                    log=lambda m: console.print(f"[dim]{m}[/dim]"))
+    conn.close()
+    console.print(f"[green]✓[/green] process-uploads: {stats['uploads']} upload(s) processed")
 
 
 @app.command("refresh-words")

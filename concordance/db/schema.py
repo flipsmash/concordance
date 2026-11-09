@@ -1187,6 +1187,32 @@ def _migration_0007_respell(conn: psycopg.Connection, s: str) -> None:
                         WHERE status IN ('pending', 'running')""")
 
 
+def _migration_0008_book_upload(conn: psycopg.Connection, s: str) -> None:
+    """A book an admin uploaded from the web app (uploads.py), and how far
+    the background job has got with it. status: queued | ingesting |
+    in_corpus (its words are live) | upkeep (maintenance and relatedness
+    still running) | done | failed. step: the command running now. Kept
+    after it finishes as the upload history."""
+    with conn.cursor() as cur:
+        cur.execute(f"""CREATE TABLE IF NOT EXISTS {s}.book_upload (
+            id             serial PRIMARY KEY,
+            filename       text NOT NULL,
+            stored_path    text NOT NULL,
+            title          text NOT NULL,
+            author         text,
+            status         text NOT NULL DEFAULT 'queued'
+                           CHECK (status IN ('queued', 'ingesting', 'in_corpus', 'upkeep', 'done', 'failed')),
+            step           text,
+            book_id        integer REFERENCES {s}.book(id) ON DELETE SET NULL,
+            words_kept     integer,
+            words_rejected integer,
+            error          text,
+            uploaded_by    text,
+            uploaded_at    timestamptz NOT NULL DEFAULT now(),
+            started_at     timestamptz,
+            finished_at    timestamptz)""")
+
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, _migration_0001_baseline),
     (2, _migration_0002_compound_verdict),
@@ -1195,6 +1221,7 @@ MIGRATIONS: list[tuple[int, object]] = [
     (5, _migration_0005_pointer_target),
     (6, _migration_0006_pointer_target_rejection),
     (7, _migration_0007_respell),
+    (8, _migration_0008_book_upload),
 ]
 
 
