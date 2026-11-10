@@ -381,7 +381,7 @@ CREATE TABLE IF NOT EXISTS {s}.book_merge_group (
 
 CREATE TABLE IF NOT EXISTS {s}.word_audio (
     word_id      integer PRIMARY KEY REFERENCES {s}.word(id) ON DELETE CASCADE,
-    source       text,          -- 'commons' | 'mw' | 'azure' | 'piper' | 'azure_guess' (legacy) | 'none' (looked up, nothing found)
+    source       text,          -- 'commons' | 'mw' | 'azure' | 'piper_ipa' | 'piper' | 'azure_guess' (legacy) | 'none' (looked up, nothing found)
     file_path    text,
     ipa_used     text,          -- the exact phoneme string sent to the synthesizer (azure only)
     voice        text,          -- azure voice name, or the Commons source URL

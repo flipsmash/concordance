@@ -2512,6 +2512,15 @@ def oed_pronounce(
     console.print(f"[green]✓[/green] oed-pronounce: [bold]{total}[/bold] entries transcribed")
 
 
+def _upgrade_guessed_audio(conn, schema: str, dump_path: Optional[str] = None, limit: int = 0) -> None:
+    console.print("[bold]Re-voicing spelling-guess audio from IPA…[/bold]")
+    stats = db.compute_audio(conn, schema, dump_path=dump_path, upgrade_guesses=True, limit=limit)
+    voiced = {k: v for k, v in stats.items() if k in ("commons", "commons_direct_search", "mw", "azure", "piper_ipa") and v}
+    console.print(f"[green]✓[/green] audio upgrade: {stats.get('candidates', 0)} spelling-guess words with IPA — "
+                  + (", ".join(f"{v} {k}" for k, v in voiced.items()) or "none re-voiced")
+                  + (f", {stats['kept_guess']} kept (unusable IPA)" if stats.get("kept_guess") else ""))
+
+
 @app.command("oed-ipa")
 def oed_ipa_cmd(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
@@ -2533,19 +2542,21 @@ def oed_ipa_cmd(
     resolved pronunciation for that headword agrees; a genuine conflict is
     skipped, not guessed at, since oed's part_of_speech field isn't clean
     enough to pick the "right" homograph. Only fills currently-empty ipa —
-    never overrides an existing valid IPA from another source. Run `audio`
-    (or `compute_audio`) afterward — it picks the matching UK voice
-    automatically for anything backfilled from here."""
+    never overrides an existing valid IPA from another source. Words that
+    gain IPA here then get their spelling-guess audio re-voiced from it
+    (audio --upgrade-guesses), with a UK voice where one is available."""
     conn = _connect(database_url)
     db.apply_schema(conn, schema)
     stats = db.backfill_ipa_from_oed(conn, schema, oed_schema, only_missing=not refetch, limit=limit)
-    conn.close()
     console.print(f"[green]✓[/green] oed-ipa: {stats.get('total',0)} words — "
                   f"[bold]{stats.get('already_valid',0)}[/bold] already valid, "
                   f"{stats.get('backfilled',0)} backfilled from oed, "
                   f"{stats.get('ambiguous_homograph',0)} ambiguous homographs skipped, "
                   f"{stats.get('failed_sanity_check',0)} failed the English-IPA sanity check, "
                   f"{stats.get('no_match',0)} had no oed match")
+    if stats.get("backfilled"):
+        _upgrade_guessed_audio(conn, schema)   # the new IPA gets voiced, not left behind a spelling guess
+    conn.close()
 
 
 @app.command("oed-lemma")
@@ -2667,6 +2678,8 @@ def maintain(
     skip_calibrate_difficulty: bool = typer.Option(False, "--skip-calibrate-difficulty"),
     skip_wordnik: bool = typer.Option(False, "--skip-wordnik", help="Skip the wordnik-pron fetch step."),
     skip_ipa: bool = typer.Option(False, "--skip-ipa", help="Skip the ipa backfill step."),
+    skip_audio_upgrade: bool = typer.Option(False, "--skip-audio-upgrade",
+                                            help="Skip re-voicing spelling-guess audio for words that now have IPA."),
     skip_embed: bool = typer.Option(False, "--skip-embed"),
     skip_analogies: bool = typer.Option(False, "--skip-analogies",
                                          help="Skip the analogy-relation extraction+verification "
@@ -2876,6 +2889,13 @@ def maintain(
     else:
         console.print("[dim]ipa skipped.[/dim]")
 
+    if not skip_audio_upgrade:
+        # audio follows IPA: a word that gained IPA (this run's ipa step,
+        # oed-ipa, mw-pronounce) loses its spelling-guess clip
+        _upgrade_guessed_audio(conn, schema, dump_path, limit)
+    else:
+        console.print("[dim]audio upgrade skipped.[/dim]")
+
     if not skip_embed:
         with console.status("[bold]Embedding definitions…"):
             stats = db.compute_definition_embeddings(conn, schema, only_missing=True, limit=limit)
@@ -3053,8 +3073,10 @@ def audio(
                   f"{commons_total} Commons ({stats.get('commons_direct_search',0)} via direct search), "
                   f"{stats.get('mw',0)} Merriam-Webster, "
                   f"{stats.get('azure',0)} Azure-synthesized, "
+                  f"{stats.get('piper_ipa',0)} Piper from IPA, "
                   f"{stats.get('piper',0)} Piper-synthesized (unverified), "
-                  f"{stats.get('none',0)} no data found")
+                  f"{stats.get('none',0)} no data found"
+                  + (f", {stats['kept_guess']} kept their spelling guess (IPA unusable)" if stats.get("kept_guess") else ""))
 
 
 @app.command()

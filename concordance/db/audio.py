@@ -413,8 +413,13 @@ def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = No
         conn, lemmas, dump_path, progress_cb=lambda n: print(f"  ...{n} lines scanned"))
 
     key, region = audio.azure_credentials()
-    if not (key and region):
-        print("  (no AZURE_SPEECH_KEY/AZURE_SPEECH_REGION in .env — skipping synthesis, Commons-only pass)")
+    if key and region and not audio.synthesize_azure("test", "tɛst", key, region):
+        # one probe, not a failed request per word: the key stopped working
+        # (HTTP 401) in Nov 2026; Piper's IPA-guided tier stands in
+        print("  (Azure isn't answering — using local Piper with each word's IPA instead)")
+        key = region = None
+    elif not (key and region):
+        print("  (no AZURE_SPEECH_KEY/AZURE_SPEECH_REGION in .env — IPA-guided audio from local Piper)")
 
     # NOT gated on mw_module.quota_exhausted() here, unlike
     # fill_definitions/pipeline.py's batch-level pre-check: mw.lookup_api
@@ -494,6 +499,19 @@ def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = No
                     ipa_used = audio.normalize_ipa(existing_ipa, keep_optional=keep_optional)
                     row = ("azure", str(dest), ipa_used, voice, None)
                     dist["azure"] += 1
+            if row is None and (existing_ipa or "").strip():
+                # Azure's stand-in: the local Piper voice speaking the word's
+                # own IPA (audio.ipa_to_piper_phonemes refuses any symbol the
+                # voice wasn't trained on, so a refusal falls through below)
+                dialect = audio.ipa_dialect_for_source(ipa_source)
+                phonemes = audio.ipa_to_piper_phonemes(existing_ipa, keep_optional=dialect == "us")
+                clip = audio.synthesize_piper_ipa(phonemes) if phonemes else None
+                if clip:
+                    dest = audio.AUDIO_DIR / f"{lemma_lc}.mp3"
+                    dest.write_bytes(clip)
+                    row = ("piper_ipa", str(dest), "".join(phonemes), audio.PIPER_IPA_VOICE_NAME,
+                           "Synthesized locally by Piper from the word's IPA")
+                    dist["piper_ipa"] += 1
             if row is None and upgrade_guesses:
                 dist["kept_guess"] += 1          # nothing better than the Piper clip it already has
                 continue

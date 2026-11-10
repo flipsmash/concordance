@@ -146,6 +146,7 @@ def pronounce(conn, schema: str, *, limit: int = 0, reserve: int = API_RESERVE,
                            else mw.lookup_api(lemma, key, session))
             entries = mw.exact_matches(raw_entries, lemma)
             stats["checked"] += 1
+            recorded = False
             if entries:
                 entry = mw.pick_entry(entries, _POS_TO_TAGGER.get((pos or "").lower(), ""))
                 prs = entry.pronunciations
@@ -162,12 +163,31 @@ def pronounce(conn, schema: str, *, limit: int = 0, reserve: int = API_RESERVE,
                                     license_note = EXCLUDED.license_note, generated_at = now()""",
                             (wid, str(dest), url, "Merriam-Webster recording"))
                         stats["recordings"] += 1
+                        recorded = True
                         stats[f"replaced_{source or 'none'}"] += 1
                 if not (ipa or "").strip() or not audio.looks_like_english_ipa(ipa):
                     new = next((x for x in (mw_to_ipa(p.respelling) for p in prs) if x), None)
                     if new and audio.looks_like_english_ipa(new):
                         cur.execute(f"UPDATE {s}.word SET ipa = %s, ipa_source = 'mw' WHERE id = %s", (new, wid))
                         stats["ipa_added"] += 1
+                        # no recording, but now IPA: voice that rather than keep the spelling guess
+                        if not recorded and source in (None, "piper", "azure_guess"):
+                            phonemes = audio.ipa_to_piper_phonemes(new)
+                            clip = audio.synthesize_piper_ipa(phonemes) if phonemes else None
+                            if clip:
+                                dest = audio_dir / f"{lemma_lc}.mp3"
+                                dest.write_bytes(clip)
+                                cur.execute(
+                                    f"""INSERT INTO {s}.word_audio (word_id, source, file_path, ipa_used, voice,
+                                                                    license_note, generated_at)
+                                        VALUES (%s, 'piper_ipa', %s, %s, %s, %s, now())
+                                        ON CONFLICT (word_id) DO UPDATE SET source = 'piper_ipa',
+                                            file_path = EXCLUDED.file_path, ipa_used = EXCLUDED.ipa_used,
+                                            voice = EXCLUDED.voice, license_note = EXCLUDED.license_note,
+                                            generated_at = now()""",
+                                    (wid, str(dest), "".join(phonemes), audio.PIPER_IPA_VOICE_NAME,
+                                     "Synthesized locally by Piper from the word's IPA"))
+                                stats["voiced_from_ipa"] += 1
             else:
                 stats["no_entry"] += 1
             cur.execute(f"UPDATE {s}.word SET mw_pron_checked_at = now() WHERE id = %s", (wid,))

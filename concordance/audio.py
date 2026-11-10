@@ -259,6 +259,113 @@ def synthesize_piper(word: str) -> bytes | None:
         dest_mp3.unlink(missing_ok=True)
 
 
+# --- Tier 2b: Piper, IPA-guided (Azure's replacement) -------------------------
+#
+# Azure's key stopped working (HTTP 401, Nov 2026), leaving no IPA-guided
+# voice. Piper's voice speaks from espeak-style IPA phonemes internally, so it
+# can be handed a word's own IPA instead of guessing from the spelling. The
+# risk the docstring above describes (an unknown phoneme silently mangled) is
+# handled by refusing: every symbol must be one the voice was trained on, or
+# the word keeps its spelling guess.
+
+PIPER_IPA_VOICE_NAME = "piper-ipa:en_US-lessac-high"
+_PIPER_VOWELS = set("aeiouæɐɑɒɔəɚɛɜɞɪɨʉʊʌɤɯøœɶɘɵ")
+# our dictionaries' spellings -> the symbols the voice was trained on (espeak's)
+_PIPER_SUBS = [("ʧ", "tʃ"), ("ʤ", "dʒ"), ("ɝ", "ɜː"), ("r", "ɹ"), ("g", "ɡ"), ("ʳ", ""), ("'", "ˈ"), ("ˑ", "")]
+
+
+# Wiktionary template leftovers some imported IPA still carries ("<q:noun>",
+# "<a:UK>", "<ref:<<name:OED>>>"), and lookalike characters that aren't IPA.
+_MARKUP = re.compile(r"<[^<>]*>")
+_LOOKALIKES = [("ǝ", "ə"), ("͜", ""), ("ʹ", "ˈ"), ("’", "ˈ")]
+
+
+def clean_ipa_text(ipa: str | None) -> str:
+    """Stored IPA with template markup and lookalike characters removed;
+    "" for junk that holds no IPA at all ("a=US")."""
+    text = ipa or ""
+    while _MARKUP.search(text):
+        text = _MARKUP.sub("", text)
+    for a, b in _LOOKALIKES:
+        text = text.replace(a, b)
+    text = text.strip()
+    return "" if "=" in text else text
+
+
+def ipa_to_piper_phonemes(ipa: str, *, keep_optional: bool = True) -> list[str] | None:
+    """A word's IPA as the phoneme symbols the Piper voice knows, or None if
+    any symbol isn't one of them (or the IPA is a partial/variant mess like
+    "ps-, saɪkəʊˈgræfɪk"). Stress marks move to just before the syllable's
+    vowel, where espeak (and so the voice) puts them; dictionaries put them
+    before the syllable's first consonant."""
+    voice = _piper_voice()
+    if voice is None or not ipa:
+        return None
+    known = voice.config.phoneme_id_map
+    parts = [p.strip() for p in re.split(r"[,;]", clean_ipa_text(ipa)) if p.strip()]
+    whole = next((p for p in parts if "-" not in p and "…" not in p), None)
+    if whole is None:
+        return None
+    text = normalize_ipa(whole, keep_optional=keep_optional).replace(" ", "")
+    for a, b in _PIPER_SUBS:
+        text = text.replace(a, b)
+    out: list[str] = []
+    pending = ""
+    for ch in text:
+        if ch in "ˈˌ":
+            pending = ch
+            continue
+        if pending and ch in _PIPER_VOWELS:
+            out.append(pending)
+            pending = ""
+        out.append(ch)
+    if pending:
+        return None
+    if not out or not any(c in _PIPER_VOWELS for c in out) or any(c not in known for c in out):
+        return None
+    return out
+
+
+def synthesize_piper_ipa(phonemes: list[str]) -> bytes | None:
+    """MP3 of the Piper voice speaking these phonemes (ipa_to_piper_phonemes)."""
+    voice = _piper_voice()
+    if voice is None or not phonemes:
+        return None
+    import io
+    import wave
+
+    import numpy as np
+    audio_arr = voice.phoneme_ids_to_audio(voice.phonemes_to_ids(phonemes))
+    if isinstance(audio_arr, tuple):
+        audio_arr = audio_arr[0]
+    pcm = (np.clip(audio_arr, -1.0, 1.0) * 32767).astype("<i2").tobytes()
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(voice.config.sample_rate)
+        wav_file.writeframes(pcm)
+    return _wav_to_mp3(buf.getvalue())
+
+
+def _wav_to_mp3(wav: bytes) -> bytes | None:
+    tmp_src = AUDIO_DIR / f".piper_tmp_{os.getpid()}.wav"
+    dest_mp3 = tmp_src.with_suffix(".mp3")
+    AUDIO_DIR.mkdir(exist_ok=True)
+    tmp_src.write_bytes(wav)
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(tmp_src), "-codec:a", "libmp3lame", "-qscale:a", "4", str(dest_mp3)],
+            capture_output=True, timeout=30, stdin=subprocess.DEVNULL,
+        )
+        return dest_mp3.read_bytes() if proc.returncode == 0 and dest_mp3.exists() else None
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    finally:
+        tmp_src.unlink(missing_ok=True)
+        dest_mp3.unlink(missing_ok=True)
+
+
 # --- Tier 1: Commons real recordings ----------------------------------------
 
 def fetch_commons_audio(url: str, dest_mp3: Path, tries: int = 4) -> bool:

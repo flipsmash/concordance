@@ -254,3 +254,34 @@ def test_piper_voice_degrades_to_none_when_load_fails(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "piper", FakePiperModule)
     assert audio._piper_voice() is None
+
+
+_PIPER = __import__("pathlib").Path("models/piper/en_US-lessac-high.onnx")
+
+
+@__import__("pytest").mark.skipif(not _PIPER.exists(), reason="local Piper voice not installed")
+def test_ipa_to_piper_phonemes_follows_espeak_conventions_and_refuses_unknowns():
+    from concordance.audio import ipa_to_piper_phonemes as conv
+
+    # stress moves onto the vowel, r -> ɹ, g -> ɡ, slashes and optional parens handled
+    assert conv("ˈsuːbədɑːr") == ["s", "ˈ", "u", "ː", "b", "ə", "d", "ɑ", "ː", "ɹ"]
+    assert conv("/ˈɡjuːɡɔːd/") == ["ɡ", "j", "ˈ", "u", "ː", "ɡ", "ɔ", "ː", "d"]
+    assert conv("ˈɡɑːblə(r)", keep_optional=False) == ["ɡ", "ˈ", "ɑ", "ː", "b", "l", "ə"]
+    assert conv("ˈɡɑːblə(r)") == ["ɡ", "ˈ", "ɑ", "ː", "b", "l", "ə", "ɹ"]
+    # a partial variant is skipped for the whole one
+    assert conv("ps-, saɪkəʊˈgræfɪk")[:3] == ["s", "a", "ɪ"]
+    # nothing usable, or a stress mark with no vowel after it
+    assert conv("ps-") is None
+    assert conv("ˈ") is None
+    assert conv("") is None
+
+
+def test_clean_ipa_text_strips_template_leftovers_and_junk():
+    from concordance.audio import clean_ipa_text as clean
+
+    assert clean("/ɒbˈskjʊəɹənt/<a:RP><ref:<<name:OED>>>") == "/ɒbˈskjʊəɹənt/"
+    assert clean("/ˈʌnθɹɪft/<q:noun>") == "/ˈʌnθɹɪft/"
+    assert clean("/fʌnd͜ʒ/") == "/fʌndʒ/"          # the other tie bar
+    assert clean("/ˈvǝrb/") == "/ˈvərb/"            # turned e -> schwa
+    assert clean("a=US") == ""                      # a label, not IPA
+    assert clean(None) == ""
