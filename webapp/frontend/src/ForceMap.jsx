@@ -149,7 +149,8 @@ function ForceMap({ entity }) {
     renderer.on('clickStage', () => setSelected(null))
     renderer.on('afterRender', () => {
       const ratio = renderer.getCamera().ratio
-      const show = ratio > 0.25
+      // the word map shows just the words; books/authors get region names
+      const show = entity !== 'word' && ratio > 0.25
       setRegionLabels(show
         ? named.slice(0, 18).map((r) => ({ ...r, ...renderer.graphToViewport({ x: r.x, y: r.y }) }))
         : [])
@@ -250,7 +251,7 @@ function ForceMap({ entity }) {
           <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={`Find a ${entity}…`}
             aria-label={`Find a ${entity} on the map`} />
         </form>
-        {named.length > 0 && (
+        {entity !== 'word' && named.length > 0 && (
           <select value={region} onChange={(e) => { setRegion(e.target.value); setFound(null) }}
             aria-label="Highlight a region">
             <option value="">All regions</option>
@@ -288,7 +289,7 @@ function ForceMap({ entity }) {
             {tip.detail?.subtitle && <span className="muted"> · {tip.detail.subtitle}</span>}
             {tip.detail?.text && <p>{tip.detail.text}</p>}
             {tip.detail?.facts?.length > 0 && <p className="muted">{tip.detail.facts.join(' · ')}</p>}
-            {regionName.get(data.nodes.region[Number(tip.node)]) && (
+            {entity !== 'word' && regionName.get(data.nodes.region[Number(tip.node)]) && (
               <p className="muted">Region: {regionName.get(data.nodes.region[Number(tip.node)])}</p>
             )}
             {!tip.detail && <p className="muted">…</p>}
