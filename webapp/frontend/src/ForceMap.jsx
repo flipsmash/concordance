@@ -97,9 +97,11 @@ function ForceMap({ entity }) {
       renderer = new Sigma(g, containerRef.current, {
         settings: {
           hideEdgesOnMove: true,
-          labelRenderedSizeThreshold: 7,
-          labelDensity: 0.6,
-          labelGridCellSize: 90,
+          // labels from the start: the label grid keeps them from overlapping,
+          // so zooming out shows fewer, zooming in more
+          labelRenderedSizeThreshold: 0,
+          labelDensity: 1,
+          labelGridCellSize: 70,
           zIndex: true,
           minCameraRatio: 0.005,
           maxCameraRatio: 3,
@@ -253,7 +255,7 @@ function ForceMap({ entity }) {
         <p className="muted force-map-caption">
           {data.nodes.key.length.toLocaleString()} {NOUNS[entity]}, each pulled toward the ones it shares the most
           with{entity === 'word' ? ' in meaning' : ' in rare vocabulary'}, so neighbours sit close. Drag to move, scroll
-          or pinch to zoom; names appear as you zoom in. Point at one to see its links; click it to keep them and open it. Laid out {new Date(data.computed_at).toLocaleDateString()}.
+          or pinch to zoom; names fill in as you zoom in. Point at one to see its links; click it to keep them and open it. Laid out {new Date(data.computed_at).toLocaleDateString()}.
         </p>
       )}
     </div>
