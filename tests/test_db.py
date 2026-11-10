@@ -1237,6 +1237,7 @@ def test_mw_backfill_defines_skips_and_casts_out(monkeypatch):
 
     monkeypatch.setattr(mw_module, "lookup_api", fake_lookup_api)
     monkeypatch.setattr(mw_module, "mw_api_key", lambda: "fake-key")
+    monkeypatch.setattr(mw_module, "quota_exhausted", lambda: False)   # not today's real usage
 
     schema = "cc_test_mw_backfill"
     conn = db.connect(_URL)
@@ -1302,6 +1303,7 @@ def test_mw_backfill_never_overwrites_existing_metadata_with_blank(monkeypatch):
                            definitions=["a fresh MW definition"], etymology=""),
     ])
     monkeypatch.setattr(mw_module, "mw_api_key", lambda: "fake-key")
+    monkeypatch.setattr(mw_module, "quota_exhausted", lambda: False)   # not today's real usage
 
     schema = "cc_test_mw_backfill_coalesce"
     conn = db.connect(_URL)
