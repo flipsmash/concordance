@@ -116,6 +116,13 @@ function ForceMap({ entity }) {
           labelDensity: 1,
           labelGridCellSize: 70,
           zIndex: true,
+          // sigma 4 measures sizes in layout units by default; these layouts
+          // span thousands of units, so dots came out sub-pixel (no colour
+          // showing, nothing to hover). Size them in screen pixels instead.
+          itemSizesReference: 'screen',
+          // pointing at a word's label counts as pointing at the word
+          nodeLabelEvents: 'extend',
+          nodePickingPadding: 3,
           minCameraRatio: 0.005,
           maxCameraRatio: 3,
         },
