@@ -332,6 +332,12 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
             )}
           </p>
         )}
+        {word.definition && word.definition_source_name && !editingDefinition && (
+          <p className="word-detail-source">
+            Source: {word.definition_source_name}
+            {word.definition_source_note && <> ({word.definition_source_note})</>}
+          </p>
+        )}
         {word.etymology && <p className="word-detail-etymology">{word.etymology}</p>}
         {word.synonyms.length > 0 && (
           <div className="word-detail-synonyms">

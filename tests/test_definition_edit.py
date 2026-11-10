@@ -360,6 +360,8 @@ def test_word_detail_carries_its_origin():
         client = TestClient(main.app, base_url="https://testserver")
         client.post("/api/auth/login", json={"username": "adminuser", "password": "password123"})
         assert client.get(f"/api/words/{word_id}").json()["origin"] is None
+        detail = client.get(f"/api/words/{word_id}").json()
+        assert (detail["definition_source_name"], detail["definition_source_note"]) == (None, None)
 
         conn = db.connect(_URL)
         with conn.cursor() as cur:

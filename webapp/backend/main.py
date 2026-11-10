@@ -27,6 +27,7 @@ from concordance import localdict
 from concordance import usas_domains
 from concordance.dictionary import enrich as dictionary_enrich
 from concordance.model import Candidate, RejectReason, junk_pos_reason, normalize_pos
+from concordance.sources import describe_definition_source
 from webapp.backend import auth
 
 app = FastAPI(title="Concordance Review API")
@@ -751,6 +752,12 @@ class WordDetail(BaseModel):
     synonyms: list[str]
     etymology: str | None
     definition_source: str | None
+    # the same, readable (concordance/sources.py): "Wiktionary", "0 Dict",
+    # "Merriam-Webster"... -- None when there's no definition to credit --
+    # and how a borrowed/built one came about ("the definition of its
+    # synonym “odoriferous”", "built from stringless + -ly")
+    definition_source_name: str | None = None
+    definition_source_note: str | None = None
     first_added: date | None
 
     zipf: float  # live wordfreq, not stored -- same as /graph
@@ -888,6 +895,8 @@ def word_detail(word_id: int, _: dict = Depends(require_viewer)) -> WordDetail:
         id=word_id, lemma=lemma, part_of_speech=pos, definition=definition, ipa=ipa,
         sentence=sentence, chapter=chapter, synonyms=synonyms, etymology=etymology,
         definition_source=definition_source, first_added=first_added,
+        **dict(zip(("definition_source_name", "definition_source_note"),
+                   describe_definition_source(definition_source) if (definition or "").strip() else (None, None))),
         zipf=zipf_frequency(lemma, "en"), difficulty=difficulty,
         difficulty_factors=DifficultyFactors(**difficulty_factors) if difficulty_factors else None,
         archaic=archaic, archaic_evidence=archaic_evidence, archaic_confidence=archaic_confidence,
