@@ -29,6 +29,10 @@ function ForceMap({ entity }) {
   const containerRef = useRef(null)
   const viewRef = useRef(null)
   const sigmaRef = useRef(null)
+  // what the reducers draw from: sigma v4 only takes reducers when it's
+  // created, so they read the current focus/region/colours from here and a
+  // refresh() redraws after this changes
+  const viewState = useRef({ focus: null, near: null, pick: null, showLinks: false, hue: '#2a78d6', faint: '#d6d4da', line: '#6b6375', text: '#08060d' })
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
   const [region, setRegion] = useState('')
@@ -64,7 +68,7 @@ function ForceMap({ entity }) {
     function onChange() {
       setIsFullscreen(document.fullscreenElement === viewRef.current)
       // re-centre after entering/leaving fullscreen (Brian's rule for every viz)
-      setTimeout(() => sigmaRef.current?.getCamera().animatedReset({ duration: 300 }), 150)
+      setTimeout(() => sigmaRef.current?.getCamera().animate({ x: 0.5, y: 0.5, ratio: 1, angle: 0 }, { duration: 300 }), 150)
     }
     document.addEventListener('fullscreenchange', onChange)
     return () => document.removeEventListener('fullscreenchange', onChange)
@@ -91,13 +95,40 @@ function ForceMap({ entity }) {
     let renderer
     try {
       renderer = new Sigma(g, containerRef.current, {
-      hideEdgesOnMove: true,
-      labelRenderedSizeThreshold: 7,
-      labelDensity: 0.6,
-      labelGridCellSize: 90,
-      zIndex: true,
-      minCameraRatio: 0.005,
-      maxCameraRatio: 3,
+        settings: {
+          hideEdgesOnMove: true,
+          labelRenderedSizeThreshold: 7,
+          labelDensity: 0.6,
+          labelGridCellSize: 90,
+          zIndex: true,
+          minCameraRatio: 0.005,
+          maxCameraRatio: 3,
+        },
+        nodeReducer: (node, data, attrs) => {
+          const v = viewState.current
+          const isFocus = node === v.focus
+          const isNear = v.near?.has(node)
+          const dim = (v.pick !== null && attrs.region !== v.pick) || (v.near && !isFocus && !isNear)
+          return {
+            color: dim ? v.faint : v.hue,
+            labelColor: v.text,
+            zIndex: isFocus ? 3 : isNear ? 2 : dim ? 0 : 1,
+            size: isFocus ? attrs.size * 2.2 : attrs.size,
+            labelVisibility: isFocus || isNear ? 'visible' : dim ? 'hidden' : 'auto',
+          }
+        },
+        // positions carry the relations; links are only drawn for the term in
+        // focus, or all of them when asked
+        edgeReducer: (edge, data, attrs, state, graphState, graph) => {
+          const v = viewState.current
+          const [a, b] = graph.extremities(edge)
+          let show
+          if (v.focus) show = a === v.focus || b === v.focus
+          else if (!v.showLinks) show = false
+          else show = v.pick === null
+            || (graph.getNodeAttribute(a, 'region') === v.pick && graph.getNodeAttribute(b, 'region') === v.pick)
+          return { visibility: show ? 'visible' : 'hidden', color: v.line, size: v.focus ? 1 : 0.4 }
+        },
       })
     } catch (err) {
       // sigma needs WebGL 2; without it, say so rather than take the page down
@@ -129,38 +160,21 @@ function ForceMap({ entity }) {
   useEffect(() => {
     const renderer = sigmaRef.current
     if (!renderer) return
-    const hue = cssVar('--accent', '#2a78d6')
-    const faint = cssVar('--border', '#d6d4da')
-    const text = cssVar('--text-h', '#08060d')
-    const pick = region === '' ? null : Number(region)
     const graph = renderer.getGraph()
     const focus = hovered ?? selected ?? found
-    const near = focus ? new Set(graph.neighbors(focus)) : null
-    renderer.setSetting('labelColor', { color: text })
-    renderer.setSetting('defaultEdgeColor', cssVar('--text', '#6b6375'))
-    renderer.setSetting('nodeReducer', (node, attrs) => {
-      const isFocus = node === focus
-      const isNear = near?.has(node)
-      const dim = (pick !== null && attrs.region !== pick) || (near && !isFocus && !isNear)
-      return {
-        ...attrs,
-        color: dim ? faint : hue,
-        zIndex: isFocus ? 3 : isNear ? 2 : dim ? 0 : 1,
-        size: isFocus ? attrs.size * 2.2 : attrs.size,
-        forceLabel: isFocus || isNear,
-        label: dim && !isNear ? null : attrs.label,
-      }
-    })
-    renderer.setSetting('edgeReducer', (edge, attrs) => {
-      const [s, t] = graph.extremities(edge)
-      if (focus) return { ...attrs, hidden: s !== focus && t !== focus, size: 1 }
-      if (!showLinks) return { ...attrs, hidden: true }
-      if (pick === null) return attrs
-      const keep = graph.getNodeAttribute(s, 'region') === pick && graph.getNodeAttribute(t, 'region') === pick
-      return { ...attrs, hidden: !keep }
-    })
+    viewState.current = {
+      focus,
+      near: focus ? new Set(graph.neighbors(focus)) : null,
+      pick: region === '' ? null : Number(region),
+      showLinks,
+      hue: cssVar('--accent', '#2a78d6'),
+      faint: cssVar('--border', '#d6d4da'),
+      line: cssVar('--text', '#6b6375'),
+      text: cssVar('--text-h', '#08060d'),
+    }
     renderer.refresh()
   }, [region, found, theme, data, hovered, selected, showLinks])
+
 
   function search(e) {
     e.preventDefault()
