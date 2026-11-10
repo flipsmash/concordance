@@ -3,7 +3,7 @@ import ForceGraph3D from 'react-force-graph-3d'
 import * as THREE from 'three'
 import SpriteText from 'three-spritetext'
 import { colorForBucket } from './domainColors'
-import { cssVar, radiusForZipf } from './graphUtils'
+import { cssVar, radiusForZipf, ringAlpha } from './graphUtils'
 
 // Lazy-loaded from GraphView.jsx (only when the user actually switches to 3D)
 // specifically because `three` is a large dependency (WebGL) that 2D users —
@@ -21,18 +21,16 @@ import { cssVar, radiusForZipf } from './graphUtils'
 function buildNode(node, isCenterId) {
   const group = new THREE.Group()
   const isCenter = node.id === isCenterId
-  // Same second-hop fade as GraphView.jsx's 2D canvas (RING_2_ALPHA there) --
-  // kept in sync visually, not literally shared, since one's a canvas alpha
-  // and the other's a THREE.Material property.
-  const isOuter = node.ring === 2
+  // Same per-ring fade as GraphView.jsx's 2D canvas (graphUtils.ringAlpha).
+  const alpha = ringAlpha(node.ring)
   const radius = isCenter ? Math.max(radiusForZipf(node.zipf), 10) : radiusForZipf(node.zipf)
 
   const sphere = new THREE.Mesh(
     new THREE.SphereGeometry(radius, 16, 16),
     new THREE.MeshLambertMaterial({
       color: isCenter ? cssVar('--graph-center', '#e6d200') : colorForBucket(node.color_bucket),
-      transparent: isOuter,
-      opacity: isOuter ? 0.45 : 1,
+      transparent: alpha < 1,
+      opacity: alpha,
     }),
   )
   group.add(sphere)
@@ -56,10 +54,10 @@ function buildNode(node, isCenterId) {
   }
 
   const label = new SpriteText(node.lemma)
-  label.textHeight = isOuter ? 3 : 4
+  label.textHeight = alpha < 1 ? 3 : 4
   label.color = cssVar('--text-h', '#08060d')
   label.material.transparent = true
-  label.material.opacity = isOuter ? 0.45 : 1
+  label.material.opacity = alpha
   label.position.set(0, -(radius + 5), 0)
   group.add(label)
 

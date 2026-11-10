@@ -24,3 +24,11 @@ export function cssVar(name, fallback) {
 // zoomToFit(durationMs, paddingPx) — same call, same tuning, in both 2D and 3D.
 export const ZOOM_MS = 400
 export const ZOOM_PADDING = 40
+
+// How opaque a word-graph node is by ring (0 = the word, 1 = direct
+// neighbors, 2+ = indirect): each ring further out a little fainter, so a
+// deep graph still reads as "near" and "far" rather than one cloud.
+export function ringAlpha(ring) {
+  if (ring <= 1) return 1
+  return [0.5, 0.35, 0.25][Math.min(ring, 4) - 2]
+}

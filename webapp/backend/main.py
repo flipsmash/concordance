@@ -1066,7 +1066,7 @@ class GraphNode(BaseModel):
     lemma: str
     definition: str | None
     part_of_speech: str | None
-    ring: int                   # 0 = center, 1 = first hop, 2 = second hop
+    ring: int                   # 0 = center, 1 = first hop, 2 = second hop... up to the requested depth
     zipf: float                 # wordfreq.zipf_frequency(lemma, "en") — frontend maps to radius
     usas_code: str | None       # specific top-level code, e.g. "S" — for tooltip text
     usas_name: str | None       # specific name, e.g. "SOCIAL ACTIONS..." — for tooltip text
@@ -1106,14 +1106,17 @@ def word_graph(
     signal: Literal["definition", "fasttext"] = "definition",
     k1: int = Query(8, ge=3, le=15, description="Center word's direct neighbor count."),
     k2: int = Query(6, ge=0, le=15, description="Each first-hop node's own neighbor count."),
-    max_nodes: int = Query(70, ge=10, le=90),
+    depth: int = Query(2, ge=1, le=4, description="Rings out from the word: 1 = direct neighbors only, "
+                                                   "2 = their neighbors too (the default), up to 4."),
+    max_nodes: int | None = Query(None, ge=10, le=160,
+                                  description="Node cap (default grows with depth: 70, 110, 150)."),
     exclude_synonyms: bool = True,
     _: dict = Depends(require_viewer),
 ) -> GraphResponse:
     """A multi-hop similarity network around one word: its top-k1 neighbors,
     then each of those gets its own smaller neighbor set too (cross-links kept
-    as edges, not duplicate nodes), capped at max_nodes so it reads as an
-    actual web rather than a star. Bounded round trips regardless of k1/k2 —
+    as edges, not duplicate nodes), ring after ring out to `depth`, capped at
+    max_nodes so it reads as an actual web rather than a star. Bounded round trips regardless of k1/k2 —
     one query for the center, one for ring-1, one batched query (a LATERAL
     join per ring-1 seed) for all of ring-2 at once, one batched USAS lookup
     over the final node set. Node color is a coarse macro-domain bucket (see
@@ -1159,31 +1162,6 @@ def word_graph(
         )
         ring1_rows = cur.fetchall()
 
-        # --- ring 2: one batched query, a LATERAL per ring-1 seed, no vector
-        # values ever leave Postgres (each seed's own vector is looked up via
-        # a join on its word_id, not passed in from Python) ---
-        ring2_rows = []
-        seed_ids = [r[0] for r in ring1_rows]
-        if k2 and seed_ids:
-            cur.execute(
-                f"""SELECT seed.word_id AS seed_id, nb.id, nb.lemma, nb.definition, nb.part_of_speech, nb.distance
-                    FROM unnest(%s::int[]) AS seed(word_id)
-                    JOIN {SCHEMA}.word_embedding e1 ON e1.word_id = seed.word_id
-                    CROSS JOIN LATERAL (
-                        SELECT w2.id, w2.lemma, w2.definition, w2.part_of_speech,
-                               e2.{vec_col} <=> e1.{vec_col} AS distance
-                        FROM {SCHEMA}.word_embedding e2
-                        JOIN {SCHEMA}.word w2 ON w2.id = e2.word_id
-                        WHERE e2.{vec_col} IS NOT NULL AND w2.active
-                          AND w2.id != seed.word_id AND w2.id != %s
-                        ORDER BY e2.{vec_col} <=> e1.{vec_col}
-                        LIMIT %s
-                    ) nb""",
-                (seed_ids, word_id, k2),
-            )
-            ring2_rows = cur.fetchall()
-
-        # --- dedup nodes/edges in Python; first-seen ring wins ---
         nodes: dict[int, dict] = {word_id: {"id": word_id, "lemma": center_lemma, "definition": center_definition,
                                              "part_of_speech": center_pos, "ring": 0}}
         edges: dict[tuple[int, int], float] = {}
@@ -1198,20 +1176,48 @@ def word_graph(
                                     "part_of_speech": pos_, "ring": 1})
             add_edge(word_id, wid, distance)
 
-        # ring-2-only additions get trimmed first if we're over budget — sort
-        # globally by distance so the closest second-hop words survive.
-        ring2_new = [r for r in ring2_rows if r[1] not in nodes]
-        ring2_new.sort(key=lambda r: r[5])
-        budget_left = max_nodes - len(nodes)
-        keep_ids = {r[1] for r in ring2_new[: max(budget_left, 0)]}
-
-        for seed_id, wid, wlemma, definition, pos_, distance in ring2_rows:
-            if wid in nodes:
-                add_edge(seed_id, wid, distance)  # cross-link to an existing node, no new node
-            elif wid in keep_ids:
-                nodes.setdefault(wid, {"id": wid, "lemma": wlemma, "definition": definition,
-                                        "part_of_speech": pos_, "ring": 2})
-                add_edge(seed_id, wid, distance)
+        # --- rings 2..depth: each one batched query, a LATERAL per seed from
+        # the ring before, no vector values ever leave Postgres (each seed's
+        # own vector is looked up via a join on its word_id). Fewer
+        # neighbors per seed the further out, and a node budget, so the web
+        # grows outward instead of exploding. ---
+        cap = max_nodes or {1: 70, 2: 70, 3: 110, 4: 150}[depth]
+        fanout = {2: k2, 3: min(k2, 4), 4: min(k2, 3)}
+        seeds = [r[0] for r in ring1_rows]
+        for ring in range(2, depth + 1):
+            k = fanout[ring]
+            if not k or not seeds:
+                break
+            cur.execute(
+                f"""SELECT seed.word_id AS seed_id, nb.id, nb.lemma, nb.definition, nb.part_of_speech, nb.distance
+                    FROM unnest(%s::int[]) AS seed(word_id)
+                    JOIN {SCHEMA}.word_embedding e1 ON e1.word_id = seed.word_id
+                    CROSS JOIN LATERAL (
+                        SELECT w2.id, w2.lemma, w2.definition, w2.part_of_speech,
+                               e2.{vec_col} <=> e1.{vec_col} AS distance
+                        FROM {SCHEMA}.word_embedding e2
+                        JOIN {SCHEMA}.word w2 ON w2.id = e2.word_id
+                        WHERE e2.{vec_col} IS NOT NULL AND w2.active
+                          AND w2.id != seed.word_id AND w2.id != %s
+                        ORDER BY e2.{vec_col} <=> e1.{vec_col}
+                        LIMIT %s
+                    ) nb""",
+                (seeds, word_id, k),
+            )
+            ring_rows = cur.fetchall()
+            # new words this ring, closest first, until the budget runs out
+            new = sorted((r for r in ring_rows if r[1] not in nodes), key=lambda r: r[5])
+            keep_ids = {r[1] for r in new[: max(cap - len(nodes), 0)]}
+            added = []
+            for seed_id, wid, wlemma, definition, pos_, distance in ring_rows:
+                if wid in nodes:
+                    add_edge(seed_id, wid, distance)  # cross-link to an existing node, no new node
+                elif wid in keep_ids:
+                    nodes[wid] = {"id": wid, "lemma": wlemma, "definition": definition,
+                                  "part_of_speech": pos_, "ring": ring}
+                    add_edge(seed_id, wid, distance)
+                    added.append(wid)
+            seeds = added
 
         # --- batched USAS lookup: one top-level field per node (unlike
         # /neighbors, which aggregates every field a word has for shared-domain

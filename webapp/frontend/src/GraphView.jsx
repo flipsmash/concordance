@@ -2,7 +2,7 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 import ForceGraph2D from 'react-force-graph-2d'
 import GraphLegend from './GraphLegend'
 import { colorForBucket } from './domainColors'
-import { ZOOM_MS, ZOOM_PADDING, cssVar, radiusForZipf } from './graphUtils'
+import { ZOOM_MS, ZOOM_PADDING, cssVar, radiusForZipf, ringAlpha } from './graphUtils'
 import './GraphView.css'
 
 // Lazy: pulls in three.js (WebGL, large) only when the user actually opens
@@ -12,7 +12,6 @@ const GraphView3D = lazy(() => import('./GraphView3D'))
 const API_BASE = ''
 
 const ROTATE_STEP = Math.PI / 8 // 22.5° per click
-const RING_2_ALPHA = 0.45 // second-hop node/label fade -- see paintNode's comment
 const ROTATE_PHI_MIN = 0.1 // radians off the top pole
 const ROTATE_PHI_MAX = Math.PI - 0.1 // radians off the bottom pole
 
@@ -21,6 +20,8 @@ function GraphView({ initialWordId, onNodeNavigate, hideSearch = false }) {
   const [suggestions, setSuggestions] = useState([])
   const [center, setCenter] = useState(null) // { id, lemma }
   const [signal, setSignal] = useState('definition')
+  // rings out from the word: 1 = direct neighbors only ... 4 = three levels of indirection
+  const [depth, setDepth] = useState(2)
   const [mode, setMode] = useState('2d') // '2d' | '3d'
   const [rawGraph, setRawGraph] = useState({ nodes: [], edges: [] })
   const [loading, setLoading] = useState(false)
@@ -95,10 +96,10 @@ function GraphView({ initialWordId, onNodeNavigate, hideSearch = false }) {
     return () => clearTimeout(handle)
   }, [query])
 
-  const loadGraph = useCallback((wordId, sig) => {
+  const loadGraph = useCallback((wordId, sig, dep = 2) => {
     setLoading(true)
     setError('')
-    fetch(`${API_BASE}/api/words/${wordId}/graph?signal=${sig}`)
+    fetch(`${API_BASE}/api/words/${wordId}/graph?signal=${sig}&depth=${dep}`)
       .then((res) => {
         if (!res.ok) throw new Error(`request failed (${res.status})`)
         return res.json()
@@ -121,19 +122,24 @@ function GraphView({ initialWordId, onNodeNavigate, hideSearch = false }) {
   // and React Router keeps this component mounted across that navigation —
   // only initialWordId changes, so the effect must re-fire to follow it.
   useEffect(() => {
-    if (initialWordId != null) loadGraph(initialWordId, signal)
+    if (initialWordId != null) loadGraph(initialWordId, signal, depth)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialWordId])
 
   function handlePick(word) {
     setQuery(word.lemma)
     setSuggestions([])
-    loadGraph(word.id, signal)
+    loadGraph(word.id, signal, depth)
   }
 
   function handleSignalChange(next) {
     setSignal(next)
-    if (center) loadGraph(center.id, next)
+    if (center) loadGraph(center.id, next, depth)
+  }
+
+  function handleDepthChange(next) {
+    setDepth(next)
+    if (center) loadGraph(center.id, signal, next)
   }
 
   function handleNodeClick(node) {
@@ -168,7 +174,7 @@ function GraphView({ initialWordId, onNodeNavigate, hideSearch = false }) {
     (l) => {
       const sourceId = typeof l.source === 'object' ? l.source.id : l.source
       const targetId = typeof l.target === 'object' ? l.target.id : l.target
-      return ringById.get(sourceId) === 2 || ringById.get(targetId) === 2
+      return ringById.get(sourceId) >= 2 || ringById.get(targetId) >= 2
     },
     [ringById],
   )
@@ -199,13 +205,11 @@ function GraphView({ initialWordId, onNodeNavigate, hideSearch = false }) {
   const paintNode = useMemo(
     () => (node, ctx, globalScale) => {
       const isCenter = node.id === center?.id
-      // Second-hop words are real data, not noise, but a graph where ring 1
-      // and ring 2 look identical reads as one undifferentiated cloud --
-      // fading ring 2 keeps it legible as "further out" without hiding it
-      // (RING_2_ALPHA, not visibility:none).
-      const isOuter = node.ring === 2
+      // Indirect words are real data, not noise, but a graph where every ring
+      // looks the same reads as one undifferentiated cloud -- each ring out
+      // is a little fainter (ringAlpha), not hidden.
       const r = isCenter ? Math.max(radiusForZipf(node.zipf), 10) : radiusForZipf(node.zipf)
-      ctx.globalAlpha = isOuter ? RING_2_ALPHA : 1
+      ctx.globalAlpha = ringAlpha(node.ring)
       ctx.beginPath()
       ctx.arc(node.x, node.y, r, 0, 2 * Math.PI)
       ctx.fillStyle = isCenter ? cssVar('--graph-center', '#e6d200') : colorForBucket(node.color_bucket)
@@ -263,6 +267,14 @@ function GraphView({ initialWordId, onNodeNavigate, hideSearch = false }) {
           <button className={signal === 'fasttext' ? 'active' : ''} onClick={() => handleSignalChange('fasttext')}>
             Spelling
           </button>
+        </div>
+        <div className="graph-signal-toggle" role="group" aria-label="How far out">
+          {[[1, 'Direct'], [2, '+1'], [3, '+2'], [4, '+3']].map(([d, label]) => (
+            <button key={d} type="button" className={depth === d ? 'active' : ''} onClick={() => handleDepthChange(d)}
+              title={d === 1 ? 'Direct neighbors only' : `Direct neighbors and ${d - 1} level${d > 2 ? 's' : ''} of indirect ones`}>
+              {label}
+            </button>
+          ))}
         </div>
         <div className="graph-signal-toggle">
           <button className={mode === '2d' ? 'active' : ''} onClick={() => setMode('2d')}>

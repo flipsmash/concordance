@@ -2495,3 +2495,38 @@ def test_clusters_are_named_by_their_distinctive_words():
         assert got[1]["size"] == 3 and sorted(got[1]["members"]) == sorted(books[:3])
     finally:
         restore()
+
+
+@pg
+def test_word_graph_depth_controls_how_many_rings_out():
+    """depth=1 is direct neighbors only; each step up adds the next ring of
+    indirect neighbors (and never a ring past the depth asked for)."""
+    import math
+
+    schema = "cc_test_word_graph_depth"
+    client, conn, restore = _setup(schema)
+    try:
+        ids = []
+        with conn.cursor() as cur:
+            # words spread round a circle in embedding space: each one's
+            # nearest neighbors are the ones next to it, so rings grow outward
+            for i in range(80):
+                wid = _insert_word(conn, schema, f"word{i:02d}")
+                a = i * math.pi / 160
+                vec = [math.cos(a), math.sin(a)] + [0.0] * 382
+                cur.execute(f"INSERT INTO {schema}.word_embedding (word_id, definition_vector) VALUES (%s, %s)",
+                            (wid, "[" + ",".join(f"{x:.6f}" for x in vec) + "]"))
+                ids.append(wid)
+        conn.commit()
+
+        def rings(depth):
+            res = client.get(f"/api/words/{ids[0]}/graph?signal=definition&depth={depth}")
+            assert res.status_code == 200, res.text
+            return {n["ring"] for n in res.json()["nodes"]}
+
+        assert rings(1) == {0, 1}
+        assert rings(2) == {0, 1, 2}
+        assert rings(4) == {0, 1, 2, 3, 4}
+        assert client.get(f"/api/words/{ids[0]}/graph?depth=5").status_code == 422
+    finally:
+        restore()
