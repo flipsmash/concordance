@@ -18,6 +18,9 @@ from webapp.backend import main as _main
 from .common import router
 
 _cache: dict[tuple[str, str], tuple[str, bytes]] = {}
+# Bump whenever the body's shape changes (e.g. the word map's `colour` data),
+# or browsers keep revalidating to 304 and reuse a body without it.
+FORMAT_VERSION = 2
 
 
 def _build(cur, s: str, entity: str, computed_at) -> bytes:
@@ -101,7 +104,7 @@ def force_map(
             run = cur.fetchone()
         if run is None:
             raise HTTPException(status_code=404, detail="This map hasn't been laid out yet.")
-        etag = f'"force-{entity}-{run[0].timestamp():.0f}"'
+        etag = f'"force-{entity}-{run[0].timestamp():.0f}-v{FORMAT_VERSION}"'
         if request.headers.get("if-none-match") == etag:
             return Response(status_code=304, headers={"ETag": etag})
         cached = _cache.get((s, entity))
