@@ -40,7 +40,7 @@
      shorter than its own label: a 33% bar's fill really did fill 33% of its
      track, but only ~20% of the visually-scanned row. The full count now
      lives in the row's title tooltip; this column only needs to fit "100%". */
-  grid-template-columns: 12px 150px 1fr 36px;
+  grid-template-columns: 12px 150px 1fr 44px;
   align-items: center;
   gap: 10px;
   width: 100%;
@@ -116,6 +116,42 @@
 
 @media (max-width: 520px) {
   .domain-dist-row {
-    grid-template-columns: 12px 110px 1fr 36px;
+    grid-template-columns: 12px 110px 1fr 44px;
   }
+}
+
+.domain-dist-modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 6px;
+}
+
+/* "vs. the collection": bars grow left (less common here) or right (more
+   common) from a center line at the collection average. */
+.domain-dist-track-index {
+  position: relative;
+  border-radius: 2px;
+}
+
+.domain-dist-track-index::after {
+  content: "";
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  left: 50%;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--text);
+  opacity: 0.55;
+}
+
+.domain-dist-fill-index {
+  position: absolute;
+  top: 0;
+  border-radius: 2px;
+}
+
+.domain-dist-track.domain-dist-track-index {
+  overflow: visible;
 }
