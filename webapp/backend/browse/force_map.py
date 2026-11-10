@@ -72,3 +72,47 @@ def force_map(
             _cache[(s, entity)] = cached
     return Response(cached[1], media_type="application/json",
                     headers={"ETag": etag, "Cache-Control": "private, no-cache"})
+
+
+@router.get("/api/browse/force-map/detail")
+def force_map_detail(
+    entity: Literal["book", "author", "word"],
+    key: str,
+    _: dict = Depends(_main.require_viewer),
+):
+    """A short summary of one map node, for the hover tooltip: a word's part
+    of speech, definition, subject category and difficulty; a book's author,
+    year, genres and vocabulary size; an author's books and vocabulary."""
+    s = _main.SCHEMA
+    with _main.get_conn() as conn, conn.cursor() as cur:
+        if entity == "word":
+            cur.execute(f"""SELECT w.lemma, w.part_of_speech, w.definition, d.difficulty,
+                                   (SELECT c.name FROM {s}.word_category wc JOIN {s}.category c ON c.id = wc.category_id
+                                    WHERE wc.word_id = w.id ORDER BY wc.is_primary DESC, wc.confidence DESC NULLS LAST
+                                    LIMIT 1)
+                            FROM {s}.word w LEFT JOIN {s}.word_difficulty d ON d.word_id = w.id
+                            WHERE w.id = %s""", (int(key),))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="not found")
+            lemma, pos, definition, difficulty, category = row
+            return {"title": lemma, "subtitle": pos, "text": definition,
+                    "facts": [f for f in (category, f"difficulty {round(difficulty)}" if difficulty is not None else None) if f]}
+        if entity == "book":
+            cur.execute(f"""SELECT b.title, b.author, b.publication_year, st.word_count,
+                                   (SELECT string_agg(genre, ', ' ORDER BY genre) FROM {s}.book_genre g WHERE g.book_id = b.id)
+                            FROM {s}.book b LEFT JOIN {s}.book_stats st ON st.book_id = b.id WHERE b.id = %s""",
+                        (int(key),))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="not found")
+            title, author, year, words, genres = row
+            return {"title": title, "subtitle": author, "text": genres,
+                    "facts": [f for f in (str(year) if year else None,
+                                          f"{words:,} vocabulary words" if words else None) if f]}
+        cur.execute(f"SELECT book_count, word_count FROM {s}.author_stats WHERE author = %s", (key,))
+        row = cur.fetchone()
+        books, words = row if row else (None, None)
+        return {"title": key, "subtitle": None, "text": None,
+                "facts": [f for f in (f"{books:,} book{'s' if books != 1 else ''}" if books else None,
+                                      f"{words:,} vocabulary words" if words else None) if f]}

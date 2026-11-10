@@ -125,3 +125,27 @@
   line-height: 1;
   cursor: pointer;
 }
+
+/* hover details, beside the term (pointer-events none so it never blocks the map) */
+.force-map-tip {
+  position: absolute;
+  z-index: 3;
+  max-width: 320px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
+  font-size: 13px;
+  line-height: 1.4;
+  transform: translate(12px, 12px);
+  pointer-events: none;
+}
+
+.force-map-tip p {
+  margin: 4px 0 0;
+}
+
+.force-map-tip.flip {
+  transform: translate(calc(-100% - 12px), 12px);
+}

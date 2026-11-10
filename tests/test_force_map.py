@@ -78,6 +78,8 @@ def test_author_force_map_end_to_end(monkeypatch):
         south = {regions[i] for i, k in enumerate(body["nodes"]["key"]) if k.startswith("South")}
         assert len(north) == 1 and len(south) == 1 and north != south   # the two groups found
         assert client.get("/api/browse/force-map?entity=word").status_code == 404   # not laid out yet
+        tip = client.get("/api/browse/force-map/detail?entity=author&key=North%2C%200").json()
+        assert tip["title"] == "North, 0"
     finally:
         main.SCHEMA = old
         with conn.cursor() as cur:

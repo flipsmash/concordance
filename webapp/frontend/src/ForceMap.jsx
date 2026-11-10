@@ -42,6 +42,9 @@ function ForceMap({ entity }) {
   const [hovered, setHovered] = useState(null)
   const [selected, setSelected] = useState(null)
   const [showLinks, setShowLinks] = useState(false)
+  // hover tooltip: details fetched once per term (debounced), placed by the node
+  const [tip, setTip] = useState(null) // { node, x, y, detail }
+  const detailCache = useRef(new Map())
   const [regionLabels, setRegionLabels] = useState([])
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [theme, setTheme] = useState(0) // bumps on a light/dark switch, to recolour
@@ -158,6 +161,40 @@ function ForceMap({ entity }) {
     }
   }, [data, entity, named])
 
+  // the hover tooltip: same kind of details the other graphs show on hover
+  useEffect(() => {
+    const renderer = sigmaRef.current
+    if (!hovered || !renderer || !data) {
+      setTip(null)
+      return undefined
+    }
+    const i = Number(hovered)
+    const place = () => {
+      const attrs = renderer.getGraph().getNodeAttributes(hovered)
+      return renderer.graphToViewport({ x: attrs.x, y: attrs.y })
+    }
+    const key = data.nodes.key[i]
+    const cached = detailCache.current.get(key)
+    if (cached) {
+      setTip({ node: hovered, ...place(), detail: cached })
+      return undefined
+    }
+    setTip({ node: hovered, ...place(), detail: null })
+    const timer = setTimeout(() => {
+      fetch(`${API_BASE}/api/browse/force-map/detail?entity=${entity}&key=${encodeURIComponent(key)}`)
+        .then((res) => (res.ok ? res.json() : null))
+        .then((d) => {
+          if (!d) return
+          detailCache.current.set(key, d)
+          setTip((t) => (t && t.node === hovered ? { ...t, detail: d } : t))
+        })
+        .catch(() => {})
+    }, 120)
+    return () => clearTimeout(timer)
+  }, [hovered, data, entity])
+
+  const regionName = useMemo(() => new Map((data?.regions || []).map((r) => [r.region, r.name])), [data])
+
   // colours + region highlight + search hit, without rebuilding
   useEffect(() => {
     const renderer = sigmaRef.current
@@ -242,6 +279,19 @@ function ForceMap({ entity }) {
               Open →
             </a>
             <button type="button" aria-label="Close" onClick={() => setSelected(null)}>×</button>
+          </div>
+        )}
+        {tip && data && (
+          <div className={`force-map-tip${tip.x > (containerRef.current?.clientWidth ?? 0) - 340 ? ' flip' : ''}`}
+            style={{ left: tip.x, top: tip.y }}>
+            <strong>{tip.detail?.title ?? data.nodes.label[Number(tip.node)]}</strong>
+            {tip.detail?.subtitle && <span className="muted"> · {tip.detail.subtitle}</span>}
+            {tip.detail?.text && <p>{tip.detail.text}</p>}
+            {tip.detail?.facts?.length > 0 && <p className="muted">{tip.detail.facts.join(' · ')}</p>}
+            {regionName.get(data.nodes.region[Number(tip.node)]) && (
+              <p className="muted">Region: {regionName.get(data.nodes.region[Number(tip.node)])}</p>
+            )}
+            {!tip.detail && <p className="muted">…</p>}
           </div>
         )}
         {regionLabels.map((r) => (
