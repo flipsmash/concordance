@@ -64,6 +64,11 @@ function Visualizations() {
         <Card to="/app/books/relatedness?tab=everything" thumb="scatter" title="Every book on one map">
           The whole collection in one zoomable map, grouped and named by the words that set each group apart.
         </Card>
+        <Card to="/app/books/relatedness?tab=force" thumb="network" title="Books as a force map"
+          extra={<Link to="/app/authors/relatedness?tab=force" className="viz-card-link">Authors as a force map →</Link>}>
+          Every book pulled toward the books it shares the most rare words with, into a zoomable map of
+          neighbourhoods.
+        </Card>
         <Card to="/app/visualizations/genres" thumb="network" title="Genres by shared vocabulary">
           Which genres share the most rare words &mdash; from niche genres to genre fiction to the classics.
         </Card>
@@ -82,6 +87,9 @@ function Visualizations() {
         </Card>
         <Card to="/app/visualizations/word-graph" thumb="network" title="Words by meaning">
           Search a word to see its nearest neighbours by definition or by spelling.
+        </Card>
+        <Card to="/app/visualizations/words-map" thumb="scatter" title="Every word by meaning">
+          The whole vocabulary on one zoomable map, words gathered into neighbourhoods by what they mean.
         </Card>
         <Card to="/app/visualizations/popularity" thumb="line" title="Popularity over time">
           How often words appeared in English books, decade by decade since 1800 &mdash; compare up to four.

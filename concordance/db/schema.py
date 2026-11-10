@@ -1243,6 +1243,44 @@ def _migration_0010_mw_pron(conn: psycopg.Connection, s: str) -> None:
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS mw_pron_checked_at timestamptz")
 
 
+def _migration_0011_force_map(conn: psycopg.Connection, s: str) -> None:
+    """The force-directed maps (force_map.py, `concordance force-map`): every
+    book, author or word placed by ForceAtlas2 over its nearest neighbours.
+    point: one row per node (extra = a book's author, for its page's URL);
+    edge: the links drawn (each node's strongest few); region: Leiden
+    communities with a name and a centre; run: when each entity was laid out
+    (the API's cache key)."""
+    with conn.cursor() as cur:
+        cur.execute(f"""CREATE TABLE IF NOT EXISTS {s}.force_map_point (
+            entity  text NOT NULL,
+            key     text NOT NULL,
+            label   text NOT NULL,
+            extra   text,
+            x       double precision NOT NULL,
+            y       double precision NOT NULL,
+            region  integer NOT NULL,
+            PRIMARY KEY (entity, key))""")
+        cur.execute(f"""CREATE TABLE IF NOT EXISTS {s}.force_map_edge (
+            entity  text NOT NULL,
+            key_a   text NOT NULL,
+            key_b   text NOT NULL,
+            weight  double precision NOT NULL)""")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS force_map_edge_entity_idx ON {s}.force_map_edge (entity)")
+        cur.execute(f"""CREATE TABLE IF NOT EXISTS {s}.force_map_region (
+            entity  text NOT NULL,
+            region  integer NOT NULL,
+            size    integer NOT NULL,
+            name    text,
+            x       double precision NOT NULL,
+            y       double precision NOT NULL,
+            PRIMARY KEY (entity, region))""")
+        cur.execute(f"""CREATE TABLE IF NOT EXISTS {s}.force_map_run (
+            entity       text PRIMARY KEY,
+            nodes        integer NOT NULL,
+            edges        integer NOT NULL,
+            computed_at  timestamptz NOT NULL)""")
+
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, _migration_0001_baseline),
     (2, _migration_0002_compound_verdict),
@@ -1254,6 +1292,7 @@ MIGRATIONS: list[tuple[int, object]] = [
     (8, _migration_0008_book_upload),
     (9, _migration_0009_book_retirement),
     (10, _migration_0010_mw_pron),
+    (11, _migration_0011_force_map),
 ]
 
 

@@ -45,6 +45,7 @@ const VizGrowth = lazy(() => import('./VizGrowth'))
 const VizDistributions = lazy(() => import('./VizDistributions'))
 const VizGenres = lazy(() => import('./VizGenres'))
 const VizWordGraph = lazy(() => import('./VizWordGraph'))
+const VizWordsMap = lazy(() => import('./VizWordsMap'))
 const CategoryTree = lazy(() => import('./CategoryTree'))
 const Popularity = lazy(() => import('./Popularity'))
 const Sets = lazy(() => import('./Sets'))
@@ -203,6 +204,14 @@ function App() {
               element={
                 <Suspense fallback={<div className="page-loading">Loading…</div>}>
                   <VizWordGraph />
+                </Suspense>
+              }
+            />
+            <Route
+              path="visualizations/words-map"
+              element={
+                <Suspense fallback={<div className="page-loading">Loading…</div>}>
+                  <VizWordsMap />
                 </Suspense>
               }
             />

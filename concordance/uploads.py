@@ -10,7 +10,7 @@ then does what a person would after dropping a book into incoming/:
      archive/) -- its words are live from here on ("in_corpus");
   2. the upkeep, once for the whole batch: maintain, book-genres,
      author-fame, book-fame, author-stats, book-stats, refresh-rejected-index;
-  3. the corpus-wide relatedness rebuild, once: relate, corpus-map.
+  3. the corpus-wide relatedness rebuild, once: relate, corpus-map, force-map.
 
 Each step is its own `concordance` subprocess, so each takes (and frees) the
 GPU lock and the GPU memory itself -- this process never holds the lock, or a
@@ -42,7 +42,7 @@ UPKEEP = [
     ("book-stats", ["book-stats"]),
     ("refresh-rejected-index", ["refresh-rejected-index"]),
 ]
-RELATEDNESS = [("relate", ["relate"]), ("corpus-map", ["corpus-map"])]
+RELATEDNESS = [("relate", ["relate"]), ("corpus-map", ["corpus-map"]), ("force-map", ["force-map"])]
 
 
 def _run(step: str, args: list[str], schema: str, log_dir: Path, log=print,

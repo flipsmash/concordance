@@ -1,0 +1,89 @@
+.force-map {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  background: var(--bg);
+}
+
+.force-map:fullscreen {
+  padding: 12px;
+}
+
+.force-map-controls {
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.force-map-search input {
+  width: 220px;
+  max-width: 100%;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 14px;
+}
+
+.force-map-controls select {
+  max-width: 320px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 14px;
+}
+
+.force-map-canvas-wrap {
+  position: relative;
+  height: calc(100vh - 290px);
+  min-height: 420px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.force-map:fullscreen .force-map-canvas-wrap {
+  height: calc(100vh - 80px);
+}
+
+.force-map-canvas {
+  position: absolute;
+  inset: 0;
+}
+
+/* Region names over the zoomed-out map; pointer-events none so dragging
+   through them still moves the map. */
+.force-map-region {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  max-width: 180px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  color: var(--text-h);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.force-map-region.on {
+  outline: 2px solid var(--accent);
+}
+
+.force-map-caption {
+  margin: 0;
+  font-size: 13px;
+}
+
+@media (max-width: 600px) {
+  .force-map-canvas-wrap {
+    height: 70vh;
+    min-height: 320px;
+  }
+
+  .force-map-search input {
+    width: 100%;
+  }
+}

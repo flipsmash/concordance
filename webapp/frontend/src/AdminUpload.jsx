@@ -29,6 +29,7 @@ const STEP = {
   'refresh-rejected-index': 'rejected-word list',
   relate: 'rebuilding book & author relatedness (about an hour)',
   'corpus-map': 'redrawing the full-collection map',
+  'force-map': 'redrawing the force maps of every book, author and word',
 }
 
 // "[Title] -- [Author].epub", the incoming/ folder's naming convention

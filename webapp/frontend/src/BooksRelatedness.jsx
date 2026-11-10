@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import ClusterDendrogram from './ClusterDendrogram'
 import ClusterMap from './ClusterMap'
@@ -18,7 +18,13 @@ const TABS = [
   { id: 'dendrogram', label: 'Dendrogram' },
   { id: 'graph', label: 'Graph' },
   { id: 'everything', label: 'Everything' },
+  { id: 'force', label: 'Force map' },
 ]
+// the whole-collection tabs: no top-200 selection, no highlight picker
+const WHOLE = new Set(['everything', 'force'])
+
+// Lazy: sigma/WebGL only downloads when the force map is opened.
+const ForceMap = lazy(() => import('./ForceMap'))
 
 // Module-level so CorpusMap's fetch effect sees stable functions.
 const bookRelatedUrl = (id) => `/api/browse/books/${id}/related?top_k=20&k2=0`
@@ -89,9 +95,11 @@ function BooksRelatedness() {
     <div className="authors-page">
       <header className="authors-header">
         <div>
-          <h1>{tab === 'everything' ? 'Every book' : clusterNodes ? `Top ${clusterNodes.length} books` : 'Top books'}</h1>
+          <h1>{WHOLE.has(tab) ? 'Every book' : clusterNodes ? `Top ${clusterNodes.length} books` : 'Top books'}</h1>
           <p className="muted">
-            {tab === 'everything'
+            {tab === 'force'
+              ? 'The whole corpus as a force-directed map: each one pulled toward those it shares the most rare words with'
+              : tab === 'everything'
               ? 'The whole corpus, grouped by shared vocabulary'
               : scope === 'fame'
               ? 'Vocabulary overlap across the most historically important books (fame score ≥ 8)'
@@ -104,7 +112,7 @@ function BooksRelatedness() {
       </header>
 
       <div className="authors-relatedness-controls">
-        {tab !== 'everything' && <div className="graph-signal-toggle" role="group" aria-label="Selection">
+        {!WHOLE.has(tab) && <div className="graph-signal-toggle" role="group" aria-label="Selection">
           {SCOPES.map((s) => (
             <button key={s.id} type="button" className={scope === s.id ? 'active' : ''} onClick={() => setScope(s.id)}>
               {s.label}
@@ -118,7 +126,7 @@ function BooksRelatedness() {
             </button>
           ))}
         </div>
-        {tab !== 'everything' && <div className="authors-relatedness-highlight">
+        {!WHOLE.has(tab) && <div className="authors-relatedness-highlight">
           <span className="muted">Highlight:</span>
           <ClusterHighlightSelect items={highlightItems} value={highlighted} onChange={setHighlighted} />
         </div>}
@@ -130,6 +138,12 @@ function BooksRelatedness() {
 
       {tab === 'dendrogram' && (
         <ClusterDendrogram entity="book" highlightKey={highlighted} onItemClick={goToBook} scope={scope} />
+      )}
+
+      {tab === 'force' && (
+        <Suspense fallback={<div className="page-loading">Loading…</div>}>
+          <ForceMap entity="book" />
+        </Suspense>
       )}
 
       {tab === 'everything' && (

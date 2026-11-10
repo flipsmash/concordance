@@ -25,6 +25,7 @@ dependencies = [
     "numpy>=1.24",
     "scipy>=1.11",
     "umap-learn>=0.5",            # corpus-map layout (pulls in scikit-learn, numba)
+    "python-igraph>=0.11",        # force-map layout (DrL)
     "pillow>=10.0",
 ]
 

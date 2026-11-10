@@ -2134,6 +2134,32 @@ def mw_pronounce_cmd(
                   + (" (stopped at today's API reserve)" if stats.get("stopped_for_quota") else ""))
 
 
+@app.command("force-map")
+def force_map_cmd(
+    entity: str = typer.Option("all", "--entity", help="book, author, word, or all."),
+    fresh: bool = typer.Option(False, "--fresh", help="Lay out from scratch instead of from the last layout."),
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Lay out the force-directed maps -- every book, author and word placed
+    by ForceAtlas2 (LinLog) over its nearest neighbours -- for the "Force
+    map" views. A full recompute (books ~6 min, words ~15-20), starting from
+    the last layout so the picture stays recognizable. Needs Node (for
+    graphology's ForceAtlas2). See concordance/force_map.py."""
+    from . import force_map
+
+    entities = ["book", "author", "word"] if entity == "all" else [entity]
+    if any(e not in ("book", "author", "word") for e in entities):
+        console.print("[red]✗[/red] --entity is book, author, word or all"); raise typer.Exit(code=1)
+    conn = _connect(database_url)
+    db.apply_schema(conn, schema)
+    for e in entities:
+        stats = force_map.compute(conn, schema, e, progress=lambda m: console.print(f"[dim]{m}[/dim]"), fresh=fresh)
+        console.print(f"[green]✓[/green] force-map {e}: {stats['nodes']:,} nodes, {stats['edges']:,} links "
+                      f"({stats['shown_edges']:,} drawn), {stats['regions']} regions ({stats['named']} named)")
+    conn.close()
+
+
 @app.command("process-uploads")
 def process_uploads_cmd(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),

@@ -10,11 +10,14 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "graphology": "^0.26.0",
+    "graphology-layout-forceatlas2": "^0.10.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-force-graph-2d": "^1.29.1",
     "react-force-graph-3d": "^1.29.1",
     "react-router-dom": "^7.18.1",
+    "sigma": "^4.0.6",
     "three": "^0.185.1",
     "three-spritetext": "^1.10.0"
   },
