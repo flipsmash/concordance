@@ -69,6 +69,32 @@ def mw_to_ipa(respelling: str) -> str | None:
     return ipa if re.search(r"[æɑɛɪiəʊuɔeoaʌ]", ipa) else None
 
 
+def fetch_recording(url: str, dest: Path, tries: int = 3) -> bool:
+    """Download an MW recording to `dest`. MW serves MP3 already, so no
+    transcoding (audio.fetch_commons_audio converts through ffmpeg, which
+    picks the output format from the file name). Written to a temporary
+    file first, so a failed download never clobbers the clip it replaces."""
+    import time
+
+    import requests
+
+    for attempt in range(tries):
+        try:
+            r = requests.get(url, timeout=20, headers={"User-Agent": "concordance-audio (personal vocab tool)"})
+        except requests.RequestException:
+            r = None
+        # an MP3 starts with an ID3 tag or an MPEG frame sync byte
+        if r is not None and r.status_code == 200 and (r.content[:3] == b"ID3" or r.content[:1] == b"\xff"):
+            tmp = dest.with_name(f".{dest.name}.download")
+            tmp.write_bytes(r.content)
+            tmp.replace(dest)
+            return True
+        if r is not None and r.status_code == 404:
+            return False
+        time.sleep(1 + attempt * 2)
+    return False
+
+
 def candidates(conn, schema: str) -> list[tuple[int, str, str | None, str | None, str | None]]:
     """Unchecked active words, worst pronunciation first: (id, lemma, ipa,
     part of speech, current audio source). Words with a real recording
@@ -100,7 +126,8 @@ def pronounce(conn, schema: str, *, limit: int = 0, reserve: int = API_RESERVE,
         log("no MW_DICTIONARY_API_KEY in .env")
         return {"checked": 0}
     rows = candidates(conn, schema)
-    cached = set(mw.cached_words())
+    cache = mw.load_cache()
+    cached = set(cache)
     # free first: words MW already answered for some other step
     rows.sort(key=lambda r: r[1].strip().lower() not in cached)
     session = make_session()
@@ -115,17 +142,17 @@ def pronounce(conn, schema: str, *, limit: int = 0, reserve: int = API_RESERVE,
             if lemma_lc not in cached and mw.usage_today() >= mw.DAILY_QUOTA - reserve:
                 stats["stopped_for_quota"] = 1
                 break
-            entries = mw.exact_matches(mw.lookup_api(lemma, key, session), lemma)
+            raw_entries = (mw.entries_from_raw(cache[lemma_lc]) if lemma_lc in cache
+                           else mw.lookup_api(lemma, key, session))
+            entries = mw.exact_matches(raw_entries, lemma)
             stats["checked"] += 1
             if entries:
                 entry = mw.pick_entry(entries, _POS_TO_TAGGER.get((pos or "").lower(), ""))
                 prs = entry.pronunciations
                 url = next((p.audio_url for p in prs if p.audio_url), None)
                 if url:
-                    tmp = audio_dir / f".{lemma_lc}.mw.part"
-                    if audio.fetch_commons_audio(url, tmp, tries=2):
-                        dest = audio_dir / f"{lemma_lc}.mp3"
-                        tmp.replace(dest)
+                    dest = audio_dir / f"{lemma_lc}.mp3"
+                    if fetch_recording(url, dest):
                         cur.execute(
                             f"""INSERT INTO {s}.word_audio (word_id, source, file_path, ipa_used, voice,
                                                             license_note, generated_at)
@@ -136,8 +163,6 @@ def pronounce(conn, schema: str, *, limit: int = 0, reserve: int = API_RESERVE,
                             (wid, str(dest), url, "Merriam-Webster recording"))
                         stats["recordings"] += 1
                         stats[f"replaced_{source or 'none'}"] += 1
-                    else:
-                        tmp.unlink(missing_ok=True)
                 if not (ipa or "").strip() or not audio.looks_like_english_ipa(ipa):
                     new = next((x for x in (mw_to_ipa(p.respelling) for p in prs) if x), None)
                     if new and audio.looks_like_english_ipa(new):

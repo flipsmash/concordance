@@ -134,6 +134,12 @@ def cached_words() -> list[str]:
     return list(_load_json(_CACHE_FILE))
 
 
+def load_cache() -> dict:
+    """The whole on-disk response cache, for a batch that reads many cached
+    words (lookup_api re-reads the file on every call)."""
+    return _load_json(_CACHE_FILE)
+
+
 def quota_exhausted() -> bool:
     """Whether today's usage has already hit the daily cap. `lookup_api` already
     checks this internally before spending a fresh (uncached) call, but a batch
@@ -204,6 +210,11 @@ def lookup_api(word: str, api_key: str, session: requests.Session | None = None,
                 fresh[key] = raw
                 _save_json(_CACHE_FILE, fresh)
 
+    return entries_from_raw(raw)
+
+
+def entries_from_raw(raw) -> list[MWEntry]:
+    """Parsed entries from one cached/fetched API response ([] for a miss)."""
     if not raw or isinstance(raw[0], str):   # list[str] == MW's "did you mean" no-match signal
         return []
     return [e for e in (_parse_api_entry(r) for r in raw if isinstance(r, dict)) if e]
