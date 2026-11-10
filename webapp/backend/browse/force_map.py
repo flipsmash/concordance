@@ -12,6 +12,7 @@ from typing import Literal
 
 from fastapi import Depends, HTTPException, Request
 from fastapi.responses import Response
+from concordance import usas_domains
 from webapp.backend import main as _main
 
 from .common import router
@@ -42,7 +43,44 @@ def _build(cur, s: str, entity: str, computed_at) -> bytes:
         nodes["extra"] = [r[2] for r in rows]
     body = {"entity": entity, "computed_at": computed_at.isoformat(), "nodes": nodes,
             "edges": {"a": [a for a, _ in pairs], "b": [b for _, b in pairs]}, "regions": regions}
+    if entity == "word":
+        body["colour"] = _word_colour_data(cur, s, [int(r[0]) for r in rows])
     return json.dumps(body, separators=(",", ":")).encode()
+
+
+_POS_CODES = {"noun": "n", "adjective": "a", "verb": "v", "adverb": "r"}
+
+
+def _word_colour_data(cur, s: str, ids: list[int]) -> dict:
+    """What the word map can be coloured by, one value per node (null when
+    unknown): difficulty (0-100), print frequency (zipf), the decade a word
+    peaked in print, part of speech (n/a/v/r, else null), and indexes into
+    the `origins` / `domains` name lists."""
+    cur.execute(f"""SELECT w.id, d.difficulty, (d.difficulty_factors->>'zipf')::float,
+                           CASE WHEN n.peak > 0 THEN n.peak_year END, lower(w.part_of_speech), o.family,
+                           (SELECT left(c.code, 1) FROM {s}.word_category wc JOIN {s}.category c ON c.id = wc.category_id
+                            WHERE wc.word_id = w.id ORDER BY wc.is_primary DESC, wc.confidence DESC NULLS LAST LIMIT 1)
+                    FROM {s}.word w
+                    LEFT JOIN {s}.word_difficulty d ON d.word_id = w.id
+                    LEFT JOIN {s}.word_ngram n ON n.word_id = w.id
+                    LEFT JOIN {s}.word_origin o ON o.word_id = w.id
+                    WHERE w.id = ANY(%s)""", (ids,))
+    by_id = {r[0]: r[1:] for r in cur.fetchall()}
+    origins = sorted({r[4] for r in by_id.values() if r[4]})
+    domains = list(usas_domains.DOMAIN_BUCKETS)
+    out = {"difficulty": [], "frequency": [], "peak_year": [], "pos": [], "origin": [], "domain": []}
+    for wid in ids:
+        diff, zipf, peak, pos, origin, code = by_id.get(wid, (None,) * 6)
+        bucket = usas_domains.bucket_for(code)
+        out["difficulty"].append(round(diff) if diff is not None else None)
+        out["frequency"].append(round(zipf, 2) if zipf is not None else None)
+        out["peak_year"].append(peak)
+        out["pos"].append(_POS_CODES.get(pos))
+        out["origin"].append(origins.index(origin) if origin else None)
+        out["domain"].append(domains.index(bucket) if bucket else None)
+    out["origins"] = origins
+    out["domains"] = [usas_domains.DOMAIN_BUCKETS[d]["name"] for d in domains]
+    return out
 
 
 @router.get("/api/browse/force-map")

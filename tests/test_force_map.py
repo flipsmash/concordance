@@ -86,3 +86,38 @@ def test_author_force_map_end_to_end(monkeypatch):
             cur.execute(f"DROP SCHEMA {s} CASCADE")
         conn.commit()
         conn.close()
+
+
+@pg
+def test_word_colour_data_one_value_per_word():
+    from webapp.backend.browse.force_map import _word_colour_data
+
+    s = "cc_test_force_map_colour"
+    conn = db.connect(_URL)
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {s} CASCADE")
+    conn.commit()
+    db.apply_schema(conn, s)
+    with conn.cursor() as cur:
+        ids = []
+        for lemma, pos in (("susurrus", "noun"), ("sibilate", "verb"), ("tacitly", "adverb")):
+            cur.execute(f"INSERT INTO {s}.word (lemma, definition, part_of_speech, active) VALUES (%s, 'x', %s, true) RETURNING id",
+                        (lemma, pos))
+            ids.append(cur.fetchone()[0])
+        cur.execute(f"""INSERT INTO {s}.word_difficulty (word_id, difficulty, difficulty_factors)
+                        VALUES (%s, 45.4, '{{"zipf": 1.25}}')""", (ids[0],))
+        cur.execute(f"""INSERT INTO {s}.word_origin (word_id, root_lang, root_lang_name, family, route, method)
+                        VALUES (%s, 'la', 'Latin', 'Latin', 'direct', 'wiktionary')""", (ids[0],))
+        cur.execute(f"""INSERT INTO {s}.word_ngram (word_id, peak, recent, recency_ratio, peak_year, fetched_at)
+                        VALUES (%s, 1.0, 0.5, 0.5, 1863, now()), (%s, 0, 0, NULL, NULL, now())""", (ids[0], ids[1]))
+        out = _word_colour_data(cur, s, ids)
+    assert out["difficulty"] == [45, None, None]
+    assert out["frequency"] == [1.25, None, None]
+    assert out["peak_year"] == [1863, None, None]          # absent from print -> unknown, not 0
+    assert out["pos"] == ["n", "v", "r"]
+    assert out["origins"] == ["Latin"] and out["origin"] == [0, None, None]
+    assert len(out["domain"]) == 3 and len(out["domains"]) == 6
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA {s} CASCADE")
+    conn.commit()
+    conn.close()

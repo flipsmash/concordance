@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import Graph from 'graphology'
 import Sigma from 'sigma'
 import { cssVar } from './graphUtils'
+import { isDark } from './domainColors'
+import { MEASURES, colourWords } from './wordMapColour'
 import './GraphView.css' // .graph-controls / .graph-maximize / .graph-signal-toggle
 import './ForceMap.css'
 
@@ -42,6 +44,12 @@ function ForceMap({ entity }) {
   const [hovered, setHovered] = useState(null)
   const [selected, setSelected] = useState(null)
   const [showLinks, setShowLinks] = useState(false)
+  const [colourBy, setColourBy] = useState('') // word map: '' | measure | 'origin:i' | 'domain:i'
+  const colouring = useMemo(
+    () => colourWords(data, colourBy, isDark(), cssVar('--border', '#d6d4da')),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [data, colourBy, theme],
+  )
   // hover tooltip: details fetched once per term (debounced), placed by the node
   const [tip, setTip] = useState(null) // { node, x, y, detail }
   const detailCache = useRef(new Map())
@@ -115,9 +123,9 @@ function ForceMap({ entity }) {
           const isNear = v.near?.has(node)
           const dim = (v.pick !== null && attrs.region !== v.pick) || (v.near && !isFocus && !isNear)
           return {
-            color: dim ? v.faint : v.hue,
+            color: dim ? v.faint : (v.colours?.[Number(node)] ?? v.hue),
             labelColor: v.text,
-            zIndex: isFocus ? 3 : isNear ? 2 : dim ? 0 : 1,
+            zIndex: isFocus ? 3 : isNear ? 2 : dim ? 0 : v.colours && v.colours[Number(node)] === v.faint ? 0 : 1,
             size: isFocus ? attrs.size * 2.2 : attrs.size,
             labelVisibility: isFocus || isNear ? 'visible' : dim ? 'hidden' : 'auto',
           }
@@ -207,13 +215,14 @@ function ForceMap({ entity }) {
       near: focus ? new Set(graph.neighbors(focus)) : null,
       pick: region === '' ? null : Number(region),
       showLinks,
+      colours: colouring.colours,
       hue: cssVar('--accent', '#2a78d6'),
       faint: cssVar('--border', '#d6d4da'),
       line: cssVar('--text', '#6b6375'),
       text: cssVar('--text-h', '#08060d'),
     }
     renderer.refresh()
-  }, [region, found, theme, data, hovered, selected, showLinks])
+  }, [region, found, theme, data, hovered, selected, showLinks, colouring])
 
 
   function search(e) {
@@ -260,6 +269,18 @@ function ForceMap({ entity }) {
             ))}
           </select>
         )}
+        {data?.colour && (
+          <select value={colourBy} onChange={(e) => setColourBy(e.target.value)} aria-label="Colour the words by">
+            <option value="">Colour by: nothing</option>
+            {MEASURES.map((m) => <option key={m.id} value={m.id}>Colour by: {m.label}</option>)}
+            <optgroup label="Highlight an origin">
+              {data.colour.origins.map((o, i) => <option key={o} value={`origin:${i}`}>{o}</option>)}
+            </optgroup>
+            <optgroup label="Highlight a domain">
+              {data.colour.domains.map((d, i) => <option key={d} value={`domain:${i}`}>{d}</option>)}
+            </optgroup>
+          </select>
+        )}
         <label className="force-map-links">
           <input type="checkbox" checked={showLinks} onChange={(e) => setShowLinks(e.target.checked)} />
           Show all links
@@ -268,6 +289,19 @@ function ForceMap({ entity }) {
           {isFullscreen ? 'Exit fullscreen' : 'Maximize'}
         </button>
       </div>
+      {colouring.legend && (
+        <div className="force-map-legend" aria-label="Colour key">
+          {MEASURES.find((m) => m.id === colourBy)?.help && (
+            <span className="muted">{MEASURES.find((m) => m.id === colourBy).help}:</span>
+          )}
+          {colouring.legend.map((l) => (
+            <span key={l.label} className="force-map-legend-item">
+              <span className="force-map-swatch" style={{ background: l.colour }} />
+              {l.label}
+            </span>
+          ))}
+        </div>
+      )}
       {error && <div className="graph-error">{error}</div>}
       <div className="force-map-canvas-wrap">
         <div className="force-map-canvas" ref={containerRef} />

@@ -149,3 +149,23 @@
 .force-map-tip.flip {
   transform: translate(calc(-100% - 12px), 12px);
 }
+
+.force-map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  font-size: 13px;
+}
+
+.force-map-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.force-map-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
