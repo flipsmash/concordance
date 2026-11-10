@@ -34,6 +34,10 @@ function ForceMap({ entity }) {
   const [region, setRegion] = useState('')
   const [query, setQuery] = useState('')
   const [found, setFound] = useState(null)
+  // the term whose links are shown: hovered, else the one clicked
+  const [hovered, setHovered] = useState(null)
+  const [selected, setSelected] = useState(null)
+  const [showLinks, setShowLinks] = useState(false)
   const [regionLabels, setRegionLabels] = useState([])
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [theme, setTheme] = useState(0) // bumps on a light/dark switch, to recolour
@@ -77,7 +81,7 @@ function ForceMap({ entity }) {
     const g = new Graph({ type: 'undirected', multi: false })
     const n = data.nodes
     for (let i = 0; i < n.key.length; i++) {
-      g.addNode(String(i), { x: n.x[i], y: n.y[i], size: entity === 'word' ? 1.6 : 2.4, label: n.label[i], region: n.region[i] })
+      g.addNode(String(i), { x: n.x[i], y: n.y[i], size: entity === 'word' ? 3 : 3.5, label: n.label[i], region: n.region[i] })
     }
     for (let i = 0; i < data.edges.a.length; i++) {
       const a = String(data.edges.a[i])
@@ -102,10 +106,11 @@ function ForceMap({ entity }) {
         : `The map couldn’t be drawn: ${err?.message || err}`)
       return undefined
     }
-    renderer.on('clickNode', ({ node }) => {
-      const i = Number(node)
-      navigate(hrefFor(entity, n.key[i], n.label[i], n.extra?.[i]))
-    })
+    // positions carry the relations; links only appear for the term in focus
+    renderer.on('enterNode', ({ node }) => setHovered(node))
+    renderer.on('leaveNode', () => setHovered(null))
+    renderer.on('clickNode', ({ node }) => setSelected((cur) => (cur === node ? null : node)))
+    renderer.on('clickStage', () => setSelected(null))
     renderer.on('afterRender', () => {
       const ratio = renderer.getCamera().ratio
       const show = ratio > 0.25
@@ -118,7 +123,7 @@ function ForceMap({ entity }) {
       renderer.kill()
       sigmaRef.current = null
     }
-  }, [data, entity, named, navigate])
+  }, [data, entity, named])
 
   // colours + region highlight + search hit, without rebuilding
   useEffect(() => {
@@ -128,29 +133,34 @@ function ForceMap({ entity }) {
     const faint = cssVar('--border', '#d6d4da')
     const text = cssVar('--text-h', '#08060d')
     const pick = region === '' ? null : Number(region)
+    const graph = renderer.getGraph()
+    const focus = hovered ?? selected ?? found
+    const near = focus ? new Set(graph.neighbors(focus)) : null
     renderer.setSetting('labelColor', { color: text })
-    renderer.setSetting('defaultEdgeColor', faint)
+    renderer.setSetting('defaultEdgeColor', cssVar('--text', '#6b6375'))
     renderer.setSetting('nodeReducer', (node, attrs) => {
-      const isFound = found === node
-      const dim = pick !== null && attrs.region !== pick
+      const isFocus = node === focus
+      const isNear = near?.has(node)
+      const dim = (pick !== null && attrs.region !== pick) || (near && !isFocus && !isNear)
       return {
         ...attrs,
         color: dim ? faint : hue,
-        zIndex: isFound ? 2 : dim ? 0 : 1,
-        size: isFound ? attrs.size * 3 : attrs.size,
-        forceLabel: isFound,
-        label: dim ? null : attrs.label,
+        zIndex: isFocus ? 3 : isNear ? 2 : dim ? 0 : 1,
+        size: isFocus ? attrs.size * 2.2 : attrs.size,
+        forceLabel: isFocus || isNear,
+        label: dim && !isNear ? null : attrs.label,
       }
     })
     renderer.setSetting('edgeReducer', (edge, attrs) => {
+      const [s, t] = graph.extremities(edge)
+      if (focus) return { ...attrs, hidden: s !== focus && t !== focus, size: 1 }
+      if (!showLinks) return { ...attrs, hidden: true }
       if (pick === null) return attrs
-      const [s, t] = renderer.getGraph().extremities(edge)
-      const keep = renderer.getGraph().getNodeAttribute(s, 'region') === pick
-        && renderer.getGraph().getNodeAttribute(t, 'region') === pick
+      const keep = graph.getNodeAttribute(s, 'region') === pick && graph.getNodeAttribute(t, 'region') === pick
       return { ...attrs, hidden: !keep }
     })
     renderer.refresh()
-  }, [region, found, theme, data])
+  }, [region, found, theme, data, hovered, selected, showLinks])
 
   function search(e) {
     e.preventDefault()
@@ -168,6 +178,7 @@ function ForceMap({ entity }) {
     setError('')
     const node = String(i)
     setFound(node)
+    setSelected(node)
     setRegion('')
     const renderer = sigmaRef.current
     const pos = renderer?.getNodeDisplayData(node)
@@ -195,6 +206,10 @@ function ForceMap({ entity }) {
             ))}
           </select>
         )}
+        <label className="force-map-links">
+          <input type="checkbox" checked={showLinks} onChange={(e) => setShowLinks(e.target.checked)} />
+          Show all links
+        </label>
         <button type="button" className="graph-maximize" onClick={toggleFullscreen}>
           {isFullscreen ? 'Exit fullscreen' : 'Maximize'}
         </button>
@@ -203,6 +218,16 @@ function ForceMap({ entity }) {
       <div className="force-map-canvas-wrap">
         <div className="force-map-canvas" ref={containerRef} />
         {!data && !error && <div className="graph-loading">Loading every {entity}…</div>}
+        {selected && data && (
+          <div className="force-map-selected">
+            <strong>{data.nodes.label[Number(selected)]}</strong>
+            <a href={hrefFor(entity, data.nodes.key[Number(selected)], data.nodes.label[Number(selected)], data.nodes.extra?.[Number(selected)])}
+              onClick={(e) => { e.preventDefault(); const i = Number(selected); navigate(hrefFor(entity, data.nodes.key[i], data.nodes.label[i], data.nodes.extra?.[i])) }}>
+              Open →
+            </a>
+            <button type="button" aria-label="Close" onClick={() => setSelected(null)}>×</button>
+          </div>
+        )}
         {regionLabels.map((r) => (
           <span key={r.region} className={`force-map-region${String(r.region) === region ? ' on' : ''}`}
             style={{ left: r.x, top: r.y }}>
@@ -213,8 +238,8 @@ function ForceMap({ entity }) {
       {data && (
         <p className="muted force-map-caption">
           {data.nodes.key.length.toLocaleString()} {NOUNS[entity]}, each pulled toward the ones it shares the most
-          with{entity === 'word' ? ' in meaning' : ' in rare vocabulary'}. Drag to move, scroll or pinch to zoom; names
-          appear as you zoom in. Click one to open it. Laid out {new Date(data.computed_at).toLocaleDateString()}.
+          with{entity === 'word' ? ' in meaning' : ' in rare vocabulary'}, so neighbours sit close. Drag to move, scroll
+          or pinch to zoom; names appear as you zoom in. Point at one to see its links; click it to keep them and open it. Laid out {new Date(data.computed_at).toLocaleDateString()}.
         </p>
       )}
     </div>
