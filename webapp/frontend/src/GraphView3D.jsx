@@ -3,7 +3,7 @@ import ForceGraph3D from 'react-force-graph-3d'
 import * as THREE from 'three'
 import SpriteText from 'three-spritetext'
 import { colorForBucket } from './domainColors'
-import { cssVar, radiusForZipf, ringAlpha } from './graphUtils'
+import { cssVar, linkDash, radiusForZipf } from './graphUtils'
 
 // Lazy-loaded from GraphView.jsx (only when the user actually switches to 3D)
 // specifically because `three` is a large dependency (WebGL) that 2D users —
@@ -21,16 +21,12 @@ import { cssVar, radiusForZipf, ringAlpha } from './graphUtils'
 function buildNode(node, isCenterId) {
   const group = new THREE.Group()
   const isCenter = node.id === isCenterId
-  // Same per-ring fade as GraphView.jsx's 2D canvas (graphUtils.ringAlpha).
-  const alpha = ringAlpha(node.ring)
   const radius = isCenter ? Math.max(radiusForZipf(node.zipf), 10) : radiusForZipf(node.zipf)
 
   const sphere = new THREE.Mesh(
     new THREE.SphereGeometry(radius, 16, 16),
     new THREE.MeshLambertMaterial({
       color: isCenter ? cssVar('--graph-center', '#e6d200') : colorForBucket(node.color_bucket),
-      transparent: alpha < 1,
-      opacity: alpha,
     }),
   )
   group.add(sphere)
@@ -54,10 +50,9 @@ function buildNode(node, isCenterId) {
   }
 
   const label = new SpriteText(node.lemma)
-  label.textHeight = alpha < 1 ? 3 : 4
+  label.textHeight = 4
   label.color = cssVar('--text-h', '#08060d')
   label.material.transparent = true
-  label.material.opacity = alpha
   label.position.set(0, -(radius + 5), 0)
   group.add(label)
 
@@ -65,7 +60,7 @@ function buildNode(node, isCenterId) {
 }
 
 const GraphView3D = forwardRef(function GraphView3D(
-  { graphData, center, width, height, nodeLabel, onNodeClick, onEngineStop },
+  { graphData, center, width, height, nodeLabel, onNodeClick, onEngineStop, linkRing },
   ref,
 ) {
   // Re-run only when the center node changes — not on every render — since
@@ -74,6 +69,29 @@ const GraphView3D = forwardRef(function GraphView3D(
     const centerId = center?.id
     return (node) => buildNode(node, centerId)
   }, [center?.id])
+
+  // Same dashes as the 2D canvas (graphUtils.linkDash): 3d-force-graph has no
+  // dashed links, so each link is its own THREE.Line with a dashed material,
+  // its two ends moved (and dash distances recomputed) as the layout runs.
+  const linkThreeObject = useMemo(() => (link) => {
+    const color = cssVar('--text', '#6b6375')   // the 2D links' color (graphUtils.linkColor); opacity set below
+    const dash = linkDash(linkRing ? linkRing(link) : 1)
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(6), 3))
+    const material = dash
+      ? new THREE.LineDashedMaterial({ color, dashSize: dash[0], gapSize: dash[1], transparent: true, opacity: 0.6 })
+      : new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.6 })
+    return new THREE.Line(geometry, material)
+  }, [linkRing])
+
+  const linkPositionUpdate = (line, { start, end }) => {
+    const pos = line.geometry.attributes.position
+    pos.setXYZ(0, start.x, start.y, start.z)
+    pos.setXYZ(1, end.x, end.y, end.z)
+    pos.needsUpdate = true
+    line.computeLineDistances()
+    return true
+  }
 
   return (
     <ForceGraph3D
@@ -91,7 +109,8 @@ const GraphView3D = forwardRef(function GraphView3D(
       controlType="orbit"
       nodeLabel={nodeLabel}
       nodeThreeObject={nodeThreeObject}
-      linkColor={() => cssVar('--border', '#e5e4e7')}
+      linkThreeObject={linkThreeObject}
+      linkPositionUpdate={linkPositionUpdate}
       onNodeClick={onNodeClick}
       onEngineStop={onEngineStop}
     />

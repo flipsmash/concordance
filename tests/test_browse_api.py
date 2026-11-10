@@ -2527,6 +2527,7 @@ def test_word_graph_depth_controls_how_many_rings_out():
         assert rings(1) == {0, 1}
         assert rings(2) == {0, 1, 2}
         assert rings(4) == {0, 1, 2, 3, 4}
-        assert client.get(f"/api/words/{ids[0]}/graph?depth=5").status_code == 422
+        assert rings(5) == {0, 1, 2, 3, 4, 5}
+        assert client.get(f"/api/words/{ids[0]}/graph?depth=6").status_code == 422
     finally:
         restore()

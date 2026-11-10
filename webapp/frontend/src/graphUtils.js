@@ -25,10 +25,19 @@ export function cssVar(name, fallback) {
 export const ZOOM_MS = 400
 export const ZOOM_PADDING = 40
 
-// How opaque a word-graph node is by ring (0 = the word, 1 = direct
-// neighbors, 2+ = indirect): each ring further out a little fainter, so a
-// deep graph still reads as "near" and "far" rather than one cloud.
-export function ringAlpha(ring) {
-  if (ring <= 1) return 1
-  return [0.5, 0.35, 0.25][Math.min(ring, 4) - 2]
+// A word-graph link's dash by how indirect it is -- the outer ring of its two
+// words (0/1 = the word and its direct neighbors). Direct links are solid;
+// each ring further out is more broken: long dashes, then shorter, then dots.
+// The words themselves stay at full strength whatever the ring.
+const LINK_DASHES = [null, null, [6, 2], [4, 3], [2, 3], [1, 3]]
+
+export function linkDash(ring) {
+  return LINK_DASHES[Math.min(Math.max(ring, 0), LINK_DASHES.length - 1)]
+}
+
+// Word-graph link color: the muted text color at 60% -- dark enough that the
+// dash patterns (linkDash) read as different, light enough not to drown the words.
+export function linkColor() {
+  const c = cssVar('--text', '#6b6375')
+  return /^#[0-9a-f]{6}$/i.test(c) ? `${c}99` : c
 }

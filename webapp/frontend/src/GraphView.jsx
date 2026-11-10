@@ -2,7 +2,7 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 import ForceGraph2D from 'react-force-graph-2d'
 import GraphLegend from './GraphLegend'
 import { colorForBucket } from './domainColors'
-import { ZOOM_MS, ZOOM_PADDING, cssVar, radiusForZipf, ringAlpha } from './graphUtils'
+import { ZOOM_MS, ZOOM_PADDING, cssVar, linkColor, linkDash, radiusForZipf } from './graphUtils'
 import './GraphView.css'
 
 // Lazy: pulls in three.js (WebGL, large) only when the user actually opens
@@ -20,7 +20,7 @@ function GraphView({ initialWordId, onNodeNavigate, hideSearch = false }) {
   const [suggestions, setSuggestions] = useState([])
   const [center, setCenter] = useState(null) // { id, lemma }
   const [signal, setSignal] = useState('definition')
-  // rings out from the word: 1 = direct neighbors only ... 4 = three levels of indirection
+  // rings out from the word: 1 = direct neighbors only ... 5 = four levels of indirection
   const [depth, setDepth] = useState(2)
   const [mode, setMode] = useState('2d') // '2d' | '3d'
   const [rawGraph, setRawGraph] = useState({ nodes: [], edges: [] })
@@ -170,11 +170,12 @@ function GraphView({ initialWordId, onNodeNavigate, hideSearch = false }) {
   // target from a raw id into the node object once the sim ticks, so this
   // checks either shape rather than assuming which one a given render sees.
   const ringById = useMemo(() => new Map(rawGraph.nodes.map((n) => [n.id, n.ring])), [rawGraph])
-  const isOuterLink = useCallback(
+  // a link is as indirect as the outer of its two words
+  const linkRing = useCallback(
     (l) => {
       const sourceId = typeof l.source === 'object' ? l.source.id : l.source
       const targetId = typeof l.target === 'object' ? l.target.id : l.target
-      return ringById.get(sourceId) >= 2 || ringById.get(targetId) >= 2
+      return Math.max(ringById.get(sourceId) ?? 0, ringById.get(targetId) ?? 0)
     },
     [ringById],
   )
@@ -205,11 +206,9 @@ function GraphView({ initialWordId, onNodeNavigate, hideSearch = false }) {
   const paintNode = useMemo(
     () => (node, ctx, globalScale) => {
       const isCenter = node.id === center?.id
-      // Indirect words are real data, not noise, but a graph where every ring
-      // looks the same reads as one undifferentiated cloud -- each ring out
-      // is a little fainter (ringAlpha), not hidden.
+      // Every word at full strength; how indirect it is shows in its links'
+      // dashes (linkDash), not by fading the word.
       const r = isCenter ? Math.max(radiusForZipf(node.zipf), 10) : radiusForZipf(node.zipf)
-      ctx.globalAlpha = ringAlpha(node.ring)
       ctx.beginPath()
       ctx.arc(node.x, node.y, r, 0, 2 * Math.PI)
       ctx.fillStyle = isCenter ? cssVar('--graph-center', '#e6d200') : colorForBucket(node.color_bucket)
@@ -226,7 +225,6 @@ function GraphView({ initialWordId, onNodeNavigate, hideSearch = false }) {
       ctx.textBaseline = 'top'
       ctx.fillStyle = textColor
       ctx.fillText(node.lemma, node.x, node.y + r + 1)
-      ctx.globalAlpha = 1
     },
     [center],
   )
@@ -269,7 +267,7 @@ function GraphView({ initialWordId, onNodeNavigate, hideSearch = false }) {
           </button>
         </div>
         <div className="graph-signal-toggle" role="group" aria-label="How far out">
-          {[[1, 'Direct'], [2, '+1'], [3, '+2'], [4, '+3']].map(([d, label]) => (
+          {[[1, 'Direct'], [2, '+1'], [3, '+2'], [4, '+3'], [5, '+4']].map(([d, label]) => (
             <button key={d} type="button" className={depth === d ? 'active' : ''} onClick={() => handleDepthChange(d)}
               title={d === 1 ? 'Direct neighbors only' : `Direct neighbors and ${d - 1} level${d > 2 ? 's' : ''} of indirect ones`}>
               {label}
@@ -304,8 +302,8 @@ function GraphView({ initialWordId, onNodeNavigate, hideSearch = false }) {
             nodeLabel={nodeLabel}
             nodeCanvasObject={paintNode}
             nodeCanvasObjectMode={() => 'replace'}
-            linkColor={() => cssVar('--border', '#e5e4e7')}
-            linkLineDash={(l) => (isOuterLink(l) ? [4, 3] : null)}
+            linkColor={linkColor}
+            linkLineDash={(l) => linkDash(linkRing(l))}
             onNodeClick={handleNodeClick}
             onEngineStop={handleEngineStop}
           />
@@ -321,6 +319,7 @@ function GraphView({ initialWordId, onNodeNavigate, hideSearch = false }) {
               nodeLabel={nodeLabel}
               onNodeClick={handleNodeClick}
               onEngineStop={handleEngineStop}
+              linkRing={linkRing}
             />
           </Suspense>
         )}

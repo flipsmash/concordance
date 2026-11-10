@@ -1106,10 +1106,10 @@ def word_graph(
     signal: Literal["definition", "fasttext"] = "definition",
     k1: int = Query(8, ge=3, le=15, description="Center word's direct neighbor count."),
     k2: int = Query(6, ge=0, le=15, description="Each first-hop node's own neighbor count."),
-    depth: int = Query(2, ge=1, le=4, description="Rings out from the word: 1 = direct neighbors only, "
-                                                   "2 = their neighbors too (the default), up to 4."),
-    max_nodes: int | None = Query(None, ge=10, le=160,
-                                  description="Node cap (default grows with depth: 70, 110, 150)."),
+    depth: int = Query(2, ge=1, le=5, description="Rings out from the word: 1 = direct neighbors only, "
+                                                   "2 = their neighbors too (the default), up to 5."),
+    max_nodes: int | None = Query(None, ge=10, le=200,
+                                  description="Node cap (default grows with depth: 70, 110, 150, 190)."),
     exclude_synonyms: bool = True,
     _: dict = Depends(require_viewer),
 ) -> GraphResponse:
@@ -1181,8 +1181,8 @@ def word_graph(
         # own vector is looked up via a join on its word_id). Fewer
         # neighbors per seed the further out, and a node budget, so the web
         # grows outward instead of exploding. ---
-        cap = max_nodes or {1: 70, 2: 70, 3: 110, 4: 150}[depth]
-        fanout = {2: k2, 3: min(k2, 4), 4: min(k2, 3)}
+        cap = max_nodes or {1: 70, 2: 70, 3: 110, 4: 150, 5: 190}[depth]
+        fanout = {2: k2, 3: min(k2, 4), 4: min(k2, 3), 5: min(k2, 3)}
         seeds = [r[0] for r in ring1_rows]
         for ring in range(2, depth + 1):
             k = fanout[ring]
