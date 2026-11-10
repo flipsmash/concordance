@@ -45,17 +45,19 @@ function ForceMap({ entity }) {
   const [selected, setSelected] = useState(null)
   const [showLinks, setShowLinks] = useState(false)
   const [colourBy, setColourBy] = useState('') // word map: '' | measure | 'origin:i' | 'domain:i'
-  const colouring = useMemo(
-    () => colourWords(data, colourBy, isDark(), cssVar('--border', '#d6d4da')),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [data, colourBy, theme],
-  )
   // hover tooltip: details fetched once per term (debounced), placed by the node
   const [tip, setTip] = useState(null) // { node, x, y, detail }
   const detailCache = useRef(new Map())
   const [regionLabels, setRegionLabels] = useState([])
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [theme, setTheme] = useState(0) // bumps on a light/dark switch, to recolour
+  // after `theme`: the colours depend on it (light/dark steps)
+  const colouring = useMemo(
+    () => colourWords(data, colourBy, isDark(), cssVar('--border', '#d6d4da')),
+    // theme isn't read inside, but a light/dark switch must recompute the colours
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [data, colourBy, theme],
+  )
 
   useEffect(() => {
     setData(null)
