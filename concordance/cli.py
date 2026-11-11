@@ -2108,6 +2108,33 @@ def restore_book_cmd(
     console.print(f"[green]✓[/green] {len(ids)} book(s) restored")
 
 
+@app.command("dictcom-pron")
+def dictcom_pron_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap words checked this run (0 = all waiting)."),
+    delay: float = typer.Option(1.0, "--delay", help="Seconds between page fetches."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Look up dictionary.com's IPA for every active word with none, worst
+    audio (spelling guess) first. Stores what it finds raw (word.dictcom_ipa
+    / dictcom_ipa_uk); run `concordance ipa` and `concordance audio
+    --upgrade-guesses` afterwards (or `maintain`, which does all three) to
+    turn it into word.ipa and IPA-voiced audio. Resumable. See
+    concordance/dictcom_pron.py."""
+    from . import dictcom_pron
+
+    conn = _connect(database_url)
+    db.apply_schema(conn, schema)
+    stats = dictcom_pron.fetch_pronunciations(conn, schema, limit=limit, delay=delay,
+                                              log=lambda m: console.print(f"[dim]{m}[/dim]"))
+    conn.close()
+    found = stats.get("found_us", 0) + stats.get("found_uk_only", 0)
+    console.print(f"[green]✓[/green] dictcom-pron: {stats.get('checked', 0)} checked of {stats.get('candidates', 0)} "
+                  f"waiting — {found} with IPA ({stats.get('found_uk_only', 0)} British only), "
+                  f"{stats.get('no_entry', 0)} not in dictionary.com, {stats.get('no_ipa', 0)} entry without IPA"
+                  + (" (stopped: the site was refusing requests)" if stats.get("stopped_refused") else ""))
+
+
 @app.command("mw-pronounce")
 def mw_pronounce_cmd(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
@@ -2480,10 +2507,8 @@ def ipa(
     except FileNotFoundError as exc:
         console.print(f"[red]✗[/red] {exc}"); raise typer.Exit(code=1)
     conn.close()
-    backfilled = (stats.get("backfilled_kaikki", 0) + stats.get("backfilled_wordnik", 0)
-                  + stats.get("backfilled_local_wiktionary", 0) + stats.get("backfilled_oed", 0))
-    corrected = (stats.get("corrected_kaikki", 0) + stats.get("corrected_wordnik", 0)
-                 + stats.get("corrected_local_wiktionary", 0) + stats.get("corrected_oed", 0))
+    backfilled = sum(v for k, v in stats.items() if k.startswith("backfilled_"))
+    corrected = sum(v for k, v in stats.items() if k.startswith("corrected_"))
     console.print(f"[green]✓[/green] ipa: {stats.get('total',0)} words — "
                   f"[bold]{stats.get('already_valid',0)}[/bold] already valid, "
                   f"{stats.get('already_checked_empty',0)} already checked (confirmed no IPA "
@@ -2491,7 +2516,8 @@ def ipa(
                   f"{backfilled} backfilled ({stats.get('backfilled_kaikki',0)} kaikki, "
                   f"{stats.get('backfilled_wordnik',0)} wordnik, "
                   f"{stats.get('backfilled_local_wiktionary',0)} local wiktionary, "
-                  f"{stats.get('backfilled_oed',0)} oed), "
+                  f"{stats.get('backfilled_oed',0)} oed, "
+                  f"{stats.get('backfilled_dictionary_com',0) + stats.get('backfilled_dictionary_com_uk',0)} dictionary.com), "
                   f"{corrected} corrected, "
                   f"{stats.get('cleared_no_replacement',0)} cleared (no valid source found), "
                   f"{stats.get('unresolved',0)} still unresolved")
@@ -2703,6 +2729,7 @@ def maintain(
     skip_quizzable: bool = typer.Option(False, "--skip-quizzable"),
     skip_calibrate_difficulty: bool = typer.Option(False, "--skip-calibrate-difficulty"),
     skip_wordnik: bool = typer.Option(False, "--skip-wordnik", help="Skip the wordnik-pron fetch step."),
+    skip_dictcom: bool = typer.Option(False, "--skip-dictcom", help="Skip the dictionary.com pronunciation step."),
     skip_ipa: bool = typer.Option(False, "--skip-ipa", help="Skip the ipa backfill step."),
     skip_audio_upgrade: bool = typer.Option(False, "--skip-audio-upgrade",
                                             help="Skip re-voicing spelling-guess audio for words that now have IPA."),
@@ -2896,6 +2923,15 @@ def maintain(
     else:
         console.print("[dim]wordnik-pron skipped.[/dim]")
 
+    if not skip_dictcom:
+        from . import dictcom_pron
+        console.print("[bold]Looking up dictionary.com pronunciations…[/bold]")
+        stats = dictcom_pron.fetch_pronunciations(conn, schema, limit=limit, log=lambda m: None)
+        console.print(f"[green]✓[/green] dictcom-pron: [bold]{stats.get('checked', 0)}[/bold] checked — "
+                      f"{stats.get('found_us', 0) + stats.get('found_uk_only', 0)} with IPA")
+    else:
+        console.print("[dim]dictcom-pron skipped.[/dim]")
+
     if not skip_ipa:
         console.print("[bold]Backfilling IPA pronunciations…[/bold]")
         try:
@@ -2903,10 +2939,8 @@ def maintain(
         except FileNotFoundError as exc:
             console.print(f"[red]✗[/red] ipa: {exc}")
         else:
-            backfilled = (stats.get("backfilled_kaikki", 0) + stats.get("backfilled_wordnik", 0)
-                          + stats.get("backfilled_local_wiktionary", 0) + stats.get("backfilled_oed", 0))
-            corrected = (stats.get("corrected_kaikki", 0) + stats.get("corrected_wordnik", 0)
-                         + stats.get("corrected_local_wiktionary", 0) + stats.get("corrected_oed", 0))
+            backfilled = sum(v for k, v in stats.items() if k.startswith("backfilled_"))
+            corrected = sum(v for k, v in stats.items() if k.startswith("corrected_"))
             console.print(f"[green]✓[/green] ipa: {stats.get('total',0)} words — "
                           f"[bold]{stats.get('already_valid',0)}[/bold] already valid, "
                           f"{backfilled} backfilled, {corrected} corrected, "

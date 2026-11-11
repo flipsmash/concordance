@@ -144,8 +144,8 @@ def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None
     s = _safe_schema(schema)
 
     with conn.cursor() as cur:
-        cur.execute(f"SELECT id, lemma, ipa, wordnik_pron_raw, wordnik_pron_type, ipa_checked_at "
-                    f"FROM {s}.word ORDER BY id")
+        cur.execute(f"SELECT id, lemma, ipa, wordnik_pron_raw, wordnik_pron_type, ipa_checked_at, "
+                    f"dictcom_ipa, dictcom_ipa_uk FROM {s}.word ORDER BY id")
         all_rows = cur.fetchall()
 
     def is_valid(ipa):
@@ -176,14 +176,14 @@ def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None
     if not candidates:
         return dict(dist)
 
-    lemmas = {lemma.strip().lower() for _, lemma, _, _, _, _ in candidates}
+    lemmas = {r[1].strip().lower() for r in candidates}
     kaikki_lexicon = wiktextract.sound_lexicon(
         conn, lemmas, dump_path, progress_cb=lambda n: print(f"  ...{n} lines scanned"))
     local_lexicon = localdict.build_lexicon(conn, lemmas)
     oed_lexicon = oed_db.pronunciation_lexicon(conn, lemmas, schema=oed_schema)
 
     with conn.cursor() as cur:
-        for i, (wid, lemma, existing_ipa, wn_raw, wn_type, _checked_at) in enumerate(candidates, 1):
+        for i, (wid, lemma, existing_ipa, wn_raw, wn_type, _checked_at, dc_ipa, dc_ipa_uk) in enumerate(candidates, 1):
             if i % 5000 == 0:
                 conn.commit()
                 print(f"  ...{i}/{len(candidates)} words checked")
@@ -194,6 +194,7 @@ def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None
                 wordnik_raw=wn_raw, wordnik_type=wn_type,
                 local_entries=local_lexicon.get(lemma_lc),
                 oed_matches=oed_lexicon.get(lemma_lc),
+                dictcom_ipa=dc_ipa, dictcom_ipa_uk=dc_ipa_uk,
             )
             replacement, source = hit if hit else (None, None)
             source = source.name.lower() if source else None

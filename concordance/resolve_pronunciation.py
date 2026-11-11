@@ -55,6 +55,14 @@ do with whatever it already fetched.
                            -- a genuine conflict contributes nothing, not a
                            guess.
 
+  5. DICTIONARY_COM     -- word.dictcom_ipa, fetched by `dictcom-pron`
+                           (dictcom_pron.py): Random House's IPA as
+                           dictionary.com prints it. After the others so
+                           it only fills gaps, like OED.
+  6. DICTIONARY_COM_UK  -- word.dictcom_ipa_uk: Collins' British IPA from
+                           the same page, for words with no American entry
+                           (ipa_source 'dictionary_com_uk' -> UK voice).
+
 Every candidate is sanity-checked with audio.looks_like_english_ipa before
 it's allowed to win a tier -- a source producing garbage (or a
 wrong-language transcription) doesn't get to poison word.ipa just because
@@ -73,6 +81,8 @@ class Tier(IntEnum):
     WORDNIK = 2
     LOCAL_WIKTIONARY = 3
     OED = 4
+    DICTIONARY_COM = 5
+    DICTIONARY_COM_UK = 6
 
 
 def _wordnik_ipa(raw: str | None, rtype: str | None) -> str | None:
@@ -115,7 +125,9 @@ def resolve_ipa(
     wordnik_type: str | None = None,
     local_entries: list[tuple] | None = None,
     oed_matches: list[str] | None = None,
-    max_tier: Tier = Tier.OED,
+    dictcom_ipa: str | None = None,
+    dictcom_ipa_uk: str | None = None,
+    max_tier: Tier = Tier.DICTIONARY_COM_UK,
 ) -> tuple[str, Tier] | None:
     """Try tiers in order up to max_tier, returning (ipa, tier) for the
     first one with a valid candidate, or None if every tier up to max_tier
@@ -141,5 +153,10 @@ def resolve_ipa(
         oed_ipa = _oed_ipa(oed_matches)
         if oed_ipa:
             return oed_ipa, Tier.OED
+
+    if max_tier >= Tier.DICTIONARY_COM and dictcom_ipa and audio.looks_like_english_ipa(dictcom_ipa):
+        return dictcom_ipa, Tier.DICTIONARY_COM
+    if max_tier >= Tier.DICTIONARY_COM_UK and dictcom_ipa_uk and audio.looks_like_english_ipa(dictcom_ipa_uk):
+        return dictcom_ipa_uk, Tier.DICTIONARY_COM_UK
 
     return None

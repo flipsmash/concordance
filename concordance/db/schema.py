@@ -1281,6 +1281,17 @@ def _migration_0011_force_map(conn: psycopg.Connection, s: str) -> None:
             computed_at  timestamptz NOT NULL)""")
 
 
+def _migration_0012_dictcom_pron(conn: psycopg.Connection, s: str) -> None:
+    """dictionary.com pronunciations (dictcom_pron.py, `concordance
+    dictcom-pron`): the IPA its page gives, American (Random House) and
+    British (Collins), kept raw like wordnik_pron_raw; checked_at so runs
+    move on instead of asking again."""
+    with conn.cursor() as cur:
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS dictcom_ipa text")
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS dictcom_ipa_uk text")
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS dictcom_checked_at timestamptz")
+
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, _migration_0001_baseline),
     (2, _migration_0002_compound_verdict),
@@ -1293,6 +1304,7 @@ MIGRATIONS: list[tuple[int, object]] = [
     (9, _migration_0009_book_retirement),
     (10, _migration_0010_mw_pron),
     (11, _migration_0011_force_map),
+    (12, _migration_0012_dictcom_pron),
 ]
 
 

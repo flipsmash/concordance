@@ -23,7 +23,7 @@ from .core import DEFAULT_SCHEMA, _safe_schema
 MAINTAIN_STEPS = [
     "fill-definitions", "add-pointer-targets", "link-definitions", "classify", "normalize-pos", "ngram", "archaic",
     "difficulty", "quizdef", "quizzable", "calibrate-difficulty",
-    "wordnik-pron", "ipa", "audio-upgrade", "embed", "backfill-analogies",
+    "wordnik-pron", "dictcom-pron", "ipa", "audio-upgrade", "embed", "backfill-analogies",
 ]
 
 
@@ -83,6 +83,9 @@ def maintain_status(conn, schema: str = DEFAULT_SCHEMA) -> list[dict]:
         cur.execute(f"SELECT count(*) FROM {s}.word WHERE active AND wordnik_checked_at IS NOT NULL")
         steps.append({"name": "wordnik-pron", "done": cur.fetchone()[0], "total": active_total,
                       "note": "rate-limited (~seconds/word on the free tier) -- typically the slowest step"})
+        cur.execute(f"SELECT count(*) FROM {s}.word WHERE active AND dictcom_checked_at IS NOT NULL")
+        steps.append({"name": "dictcom-pron", "done": cur.fetchone()[0], "total": active_total,
+                      "note": "only words with no IPA are looked up, ~1 page/second"})
 
         # ipa IS NOT NULL alone overcounts: a prior compute_ipa pass clears an
         # unresolvable word to '' (empty string, not NULL) rather than leaving

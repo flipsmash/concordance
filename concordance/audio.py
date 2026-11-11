@@ -57,7 +57,7 @@ def ipa_dialect_for_source(source: str | None) -> str:
     converters are both US phoneme systems). None (legacy rows predating
     ipa_source) is treated as 'us' too -- matches current behavior exactly,
     zero change for every word already filled before this existed."""
-    return "uk" if source == "oed" else "us"
+    return "uk" if source in ("oed", "dictionary_com_uk") else "us"
 
 
 def voice_for_dialect(dialect: str) -> tuple[str, str]:
