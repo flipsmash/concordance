@@ -478,3 +478,9 @@
   color: var(--text-h);
   font-size: 14px;
 }
+
+.word-detail-ipa-note {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--text);
+}

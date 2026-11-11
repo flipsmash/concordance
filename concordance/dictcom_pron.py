@@ -136,14 +136,15 @@ def fetch_page(session: requests.Session, lemma: str, tries: int = 3) -> tuple[s
 
 
 def candidates(conn, schema: str) -> list[tuple[int, str, str | None]]:
-    """Unchecked active words with no IPA, spelling-guess audio first:
+    """Unchecked active words with no IPA (or only a derived one),
+    spelling-guess audio first:
     (id, lemma, part of speech)."""
     s = _safe_schema(schema)
     with conn.cursor() as cur:
         cur.execute(f"""SELECT w.id, w.lemma, w.part_of_speech
                         FROM {s}.word w LEFT JOIN {s}.word_audio a ON a.word_id = w.id
                         WHERE w.active AND w.dictcom_checked_at IS NULL
-                          AND coalesce(w.ipa, '') = ''
+                          AND (coalesce(w.ipa, '') = '' OR w.ipa_source = 'derived')
                         ORDER BY CASE a.source WHEN 'piper' THEN 0 WHEN 'azure_guess' THEN 1
                                                WHEN 'none' THEN 2 ELSE 3 END, w.id""")
         return cur.fetchall()

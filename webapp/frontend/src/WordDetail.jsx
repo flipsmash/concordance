@@ -363,6 +363,12 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
         <section className="word-detail-section">
           <h2>Pronunciation</h2>
           <span className="word-detail-ipa">/{word.ipa}/</span>
+          {word.ipa_source === 'derived' && (
+            <p className="word-detail-ipa-note">
+              Worked out from {word.ipa_derived_from || 'the word it is built on'} — no dictionary
+              transcribes this word, so this may be off.
+            </p>
+          )}
         </section>
       )}
 

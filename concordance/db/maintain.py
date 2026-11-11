@@ -23,7 +23,7 @@ from .core import DEFAULT_SCHEMA, _safe_schema
 MAINTAIN_STEPS = [
     "fill-definitions", "add-pointer-targets", "link-definitions", "classify", "normalize-pos", "ngram", "archaic",
     "difficulty", "quizdef", "quizzable", "calibrate-difficulty",
-    "wordnik-pron", "dictcom-pron", "ipa", "audio-upgrade", "embed", "backfill-analogies",
+    "wordnik-pron", "dictcom-pron", "ipa", "derive-ipa", "audio-upgrade", "embed", "backfill-analogies",
 ]
 
 
@@ -94,6 +94,9 @@ def maintain_status(conn, schema: str = DEFAULT_SCHEMA) -> list[dict]:
         # (fetch_wordnik_pronunciations' and compute_ipa's own WHERE clauses).
         cur.execute(f"SELECT count(*) FROM {s}.word WHERE active AND ipa IS NOT NULL AND ipa <> ''")
         steps.append({"name": "ipa", "done": cur.fetchone()[0], "total": active_total, "note": ""})
+        cur.execute(f"SELECT count(*) FROM {s}.word WHERE active AND ipa_source = 'derived'")
+        steps.append({"name": "derive-ipa", "done": cur.fetchone()[0], "total": None,
+                      "note": "words whose IPA is derived from a base word -- no meaningful fraction"})
         steps.append({"name": "audio-upgrade", "done": None, "total": None,
                       "note": "re-voices spelling-guess audio for words that gained IPA"})
 

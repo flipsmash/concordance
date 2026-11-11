@@ -2108,6 +2108,36 @@ def restore_book_cmd(
     console.print(f"[green]✓[/green] {len(ids)} book(s) restored")
 
 
+@app.command("derive-ipa")
+def derive_ipa_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap words tried (0 = all with no IPA)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be derived; write nothing."),
+    check: int = typer.Option(0, "--check", help="Instead: blind-test on N words that have real IPA."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """IPA for words no dictionary transcribes, built from the word they are
+    made from: inflections (betokeneth), stress-neutral affixes (ghosthood,
+    bloomlessness), compounds (raincape) and respellings ("Obsolete spelling
+    of shapeless"). Written as ipa_source 'derived' with how it was built;
+    a real transcription arriving later replaces it. Run `concordance audio
+    --upgrade-guesses` afterwards to voice them. See concordance/ipa_derive.py."""
+    from . import ipa_derive
+
+    conn = _connect(database_url)
+    db.apply_schema(conn, schema)
+    say = lambda m: console.print(f"[dim]{m}[/dim]")
+    if check:
+        ipa_derive.evaluate(conn, schema, sample=check, log=say)
+        conn.close()
+        return
+    stats = ipa_derive.run(conn, schema, limit=limit, dry_run=dry_run, log=say)
+    conn.close()
+    console.print(f"[green]✓[/green] derive-ipa: {stats.get('derived', 0)} of {stats.get('candidates', 0)} words "
+                  f"derived ({stats.get('affix', 0)} affix/inflection, {stats.get('compound', 0)} compound, "
+                  f"{stats.get('respelling', 0)} respelling)" + (" — dry run, nothing written" if dry_run else ""))
+
+
 @app.command("dictcom-pron")
 def dictcom_pron_cmd(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
@@ -2730,6 +2760,7 @@ def maintain(
     skip_calibrate_difficulty: bool = typer.Option(False, "--skip-calibrate-difficulty"),
     skip_wordnik: bool = typer.Option(False, "--skip-wordnik", help="Skip the wordnik-pron fetch step."),
     skip_dictcom: bool = typer.Option(False, "--skip-dictcom", help="Skip the dictionary.com pronunciation step."),
+    skip_derive_ipa: bool = typer.Option(False, "--skip-derive-ipa", help="Skip deriving IPA from base words."),
     skip_ipa: bool = typer.Option(False, "--skip-ipa", help="Skip the ipa backfill step."),
     skip_audio_upgrade: bool = typer.Option(False, "--skip-audio-upgrade",
                                             help="Skip re-voicing spelling-guess audio for words that now have IPA."),
@@ -2948,6 +2979,15 @@ def maintain(
                           f"{stats.get('unresolved',0)} still unresolved")
     else:
         console.print("[dim]ipa skipped.[/dim]")
+
+    if not skip_derive_ipa:
+        from . import ipa_derive
+        console.print("[bold]Deriving IPA from base words…[/bold]")
+        stats = ipa_derive.run(conn, schema, limit=limit, log=lambda m: None)
+        console.print(f"[green]✓[/green] derive-ipa: [bold]{stats.get('derived', 0)}[/bold] of "
+                      f"{stats.get('candidates', 0)} words without IPA derived")
+    else:
+        console.print("[dim]derive-ipa skipped.[/dim]")
 
     if not skip_audio_upgrade:
         # audio follows IPA: a word that gained IPA (this run's ipa step,

@@ -783,6 +783,10 @@ class WordDetail(BaseModel):
     ngram_peak_year: int | None
 
     audio_source: str | None  # 'commons'|'mw'|'azure'|'piper'|'azure_guess'|'none'|None (no row)
+    # where `ipa` came from ('kaikki', 'oed', 'dictionary_com', ...); 'derived'
+    # = built from a base word's IPA (ipa_derive.py), how in ipa_derived_from
+    ipa_source: str | None = None
+    ipa_derived_from: str | None = None
 
     # For a word no dictionary defines: validity_score's assessment, shown
     # instead of a bare blank definition.
@@ -821,7 +825,7 @@ def word_detail(word_id: int, _: dict = Depends(require_viewer)) -> WordDetail:
                        w.quiz_definition, w.quiz_def_source,
                        n.peak, n.recent, n.recency_ratio, n.peak_year,
                        a.source, w.validity_label, w.validity_notes, w.suggested_correction,
-                       o.root_lang_name, o.family, o.route, o.method
+                       o.root_lang_name, o.family, o.route, o.method, w.ipa_source, w.ipa_derived_from
                 FROM {SCHEMA}.word w
                 LEFT JOIN {SCHEMA}.word_difficulty d ON d.word_id = w.id
                 LEFT JOIN {SCHEMA}.word_ngram n ON n.word_id = w.id
@@ -838,7 +842,7 @@ def word_detail(word_id: int, _: dict = Depends(require_viewer)) -> WordDetail:
          quizzable, quizzable_reason, quiz_definition, quiz_def_source,
          ngram_peak, ngram_recent, ngram_recency_ratio, ngram_peak_year,
          audio_source, validity_label, validity_notes, suggested_correction,
-         origin_lang, origin_family, origin_route, origin_method) = row
+         origin_lang, origin_family, origin_route, origin_method, ipa_source, ipa_derived_from) = row
 
         cur.execute(
             f"""SELECT c.code, c.name, wc.is_primary, wc.confidence, top.name
@@ -904,6 +908,7 @@ def word_detail(word_id: int, _: dict = Depends(require_viewer)) -> WordDetail:
         quiz_definition=quiz_definition, quiz_def_source=quiz_def_source,
         ngram_peak=ngram_peak, ngram_recent=ngram_recent, ngram_recency_ratio=ngram_recency_ratio,
         ngram_peak_year=ngram_peak_year, audio_source=audio_source,
+        ipa_source=ipa_source, ipa_derived_from=ipa_derived_from,
         validity_label=validity_label, validity_notes=validity_notes,
         suggested_correction=suggested_correction,
         categories=categories, books=books, definition_links=definition_links,

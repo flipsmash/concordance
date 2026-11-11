@@ -101,7 +101,8 @@ def candidates(conn, schema: str) -> list[tuple[int, str, str | None, str | None
     (Commons, MW) aren't candidates."""
     s = _safe_schema(schema)
     with conn.cursor() as cur:
-        cur.execute(f"""SELECT w.id, w.lemma, w.ipa, w.part_of_speech, a.source
+        cur.execute(f"""SELECT w.id, w.lemma, CASE WHEN w.ipa_source = 'derived' THEN NULL ELSE w.ipa END,
+                               w.part_of_speech, a.source
                         FROM {s}.word w LEFT JOIN {s}.word_audio a ON a.word_id = w.id
                         WHERE w.active AND w.mw_pron_checked_at IS NULL
                           AND coalesce(a.source, '') NOT IN ('commons', 'mw')
@@ -168,10 +169,11 @@ def pronounce(conn, schema: str, *, limit: int = 0, reserve: int = API_RESERVE,
                 if not (ipa or "").strip() or not audio.looks_like_english_ipa(ipa):
                     new = next((x for x in (mw_to_ipa(p.respelling) for p in prs) if x), None)
                     if new and audio.looks_like_english_ipa(new):
-                        cur.execute(f"UPDATE {s}.word SET ipa = %s, ipa_source = 'mw' WHERE id = %s", (new, wid))
+                        cur.execute(f"UPDATE {s}.word SET ipa = %s, ipa_source = 'mw', ipa_derived_from = NULL WHERE id = %s",
+                                    (new, wid))
                         stats["ipa_added"] += 1
                         # no recording, but now IPA: voice that rather than keep the spelling guess
-                        if not recorded and source in (None, "piper", "azure_guess"):
+                        if not recorded and source in (None, "piper", "azure_guess", "piper_ipa"):
                             phonemes = audio.ipa_to_piper_phonemes(new)
                             clip = audio.synthesize_piper_ipa(phonemes) if phonemes else None
                             if clip:

@@ -144,8 +144,9 @@ def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None
     s = _safe_schema(schema)
 
     with conn.cursor() as cur:
-        cur.execute(f"SELECT id, lemma, ipa, wordnik_pron_raw, wordnik_pron_type, ipa_checked_at, "
-                    f"dictcom_ipa, dictcom_ipa_uk FROM {s}.word ORDER BY id")
+        cur.execute(f"SELECT id, lemma, CASE WHEN ipa_source = 'derived' THEN NULL ELSE ipa END, "
+                    f"wordnik_pron_raw, wordnik_pron_type, ipa_checked_at, "
+                    f"dictcom_ipa, dictcom_ipa_uk, ipa_source = 'derived' FROM {s}.word ORDER BY id")
         all_rows = cur.fetchall()
 
     def is_valid(ipa):
@@ -183,7 +184,8 @@ def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None
     oed_lexicon = oed_db.pronunciation_lexicon(conn, lemmas, schema=oed_schema)
 
     with conn.cursor() as cur:
-        for i, (wid, lemma, existing_ipa, wn_raw, wn_type, _checked_at, dc_ipa, dc_ipa_uk) in enumerate(candidates, 1):
+        for i, (wid, lemma, existing_ipa, wn_raw, wn_type, _checked_at, dc_ipa, dc_ipa_uk,
+                is_derived) in enumerate(candidates, 1):
             if i % 5000 == 0:
                 conn.commit()
                 print(f"  ...{i}/{len(candidates)} words checked")
@@ -201,6 +203,21 @@ def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None
 
             if had_valid_existing and not replacement:
                 dist["already_valid"] += 1  # nothing to do, no change
+                continue
+            if is_derived:
+                # a derived pronunciation (ipa_derive.py) stands in until a real
+                # source has the word; it is never cleared for lack of one
+                if replacement:
+                    cur.execute(f"UPDATE {s}.word SET ipa=%s, ipa_source=%s, ipa_derived_from=NULL WHERE id=%s",
+                                (replacement, source, wid))
+                    dist[f"replaced_derived_{source}"] += 1
+                    # its clip voices the derived IPA: hand it back to the audio
+                    # upgrade (which re-voices spelling-guess clips) for the real one
+                    cur.execute(f"UPDATE {s}.word_audio SET source='piper' WHERE word_id=%s AND source='piper_ipa'",
+                                (wid,))
+                else:
+                    dist["unresolved"] += 1
+                cur.execute(f"UPDATE {s}.word SET ipa_checked_at=now() WHERE id=%s", (wid,))
                 continue
             if not (existing_ipa or "").strip() and replacement:
                 cur.execute(f"UPDATE {s}.word SET ipa=%s, ipa_source=%s WHERE id=%s", (replacement, source, wid))

@@ -1292,6 +1292,13 @@ def _migration_0012_dictcom_pron(conn: psycopg.Connection, s: str) -> None:
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS dictcom_checked_at timestamptz")
 
 
+def _migration_0013_ipa_derived_from(conn: psycopg.Connection, s: str) -> None:
+    """How a derived pronunciation (ipa_source 'derived', ipa_derive.py) was
+    built, e.g. "bloomless + -ness" -- shown on the word page."""
+    with conn.cursor() as cur:
+        cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS ipa_derived_from text")
+
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, _migration_0001_baseline),
     (2, _migration_0002_compound_verdict),
@@ -1305,6 +1312,7 @@ MIGRATIONS: list[tuple[int, object]] = [
     (10, _migration_0010_mw_pron),
     (11, _migration_0011_force_map),
     (12, _migration_0012_dictcom_pron),
+    (13, _migration_0013_ipa_derived_from),
 ]
 
 
