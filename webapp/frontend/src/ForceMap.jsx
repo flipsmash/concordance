@@ -40,7 +40,7 @@ function ForceMap({ entity }) {
   const [region, setRegion] = useState('')
   const [query, setQuery] = useState('')
   const [found, setFound] = useState(null)
-  // the term whose links are shown: hovered, else the one clicked
+  // hovering only shows a term's details; clicking selects it (links + focus)
   const [hovered, setHovered] = useState(null)
   const [selected, setSelected] = useState(null)
   const [showLinks, setShowLinks] = useState(false)
@@ -218,7 +218,7 @@ function ForceMap({ entity }) {
     const renderer = sigmaRef.current
     if (!renderer) return
     const graph = renderer.getGraph()
-    const focus = hovered ?? selected ?? found
+    const focus = selected ?? found
     viewState.current = {
       focus,
       near: focus ? new Set(graph.neighbors(focus)) : null,
@@ -231,7 +231,7 @@ function ForceMap({ entity }) {
       text: cssVar('--text-h', '#08060d'),
     }
     renderer.refresh()
-  }, [region, found, theme, data, hovered, selected, showLinks, colouring])
+  }, [region, found, theme, data, selected, showLinks, colouring])
 
 
   function search(e) {
@@ -349,7 +349,7 @@ function ForceMap({ entity }) {
         <p className="muted force-map-caption">
           {data.nodes.key.length.toLocaleString()} {NOUNS[entity]}, each pulled toward the ones it shares the most
           with{entity === 'word' ? ' in meaning' : ' in rare vocabulary'}, so neighbours sit close. Drag to move, scroll
-          or pinch to zoom; names fill in as you zoom in. Point at one to see its links; click it to keep them and open it. Laid out {new Date(data.computed_at).toLocaleDateString()}.
+          or pinch to zoom; names fill in as you zoom in. Point at one for its details; click it to select it, see its links and open it. Laid out {new Date(data.computed_at).toLocaleDateString()}.
         </p>
       )}
     </div>
