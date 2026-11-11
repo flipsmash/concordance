@@ -2005,6 +2005,10 @@ def dedupe_books_cmd(
     contained: bool = typer.Option(False, "--contained", help="Second pass instead: in multi-volume works with a "
                                    "Complete book, remove each volume (or partial compilation) whose text a larger "
                                    "copy of the work already holds (95%+ of its words)."),
+    by_text: bool = typer.Option(False, "--by-text", help="Third pass instead: compare the archived TEXTS "
+                                 "(sampled 8-word runs): the same text under different titles, volumes of a work "
+                                 "its whole edition holds, and compilations the books they contain cover."),
+    report: Optional[Path] = typer.Option(None, "--report", help="With --by-text: also write the findings as CSV."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Take duplicate books out of the collection -- conservatively: same
@@ -2016,6 +2020,9 @@ def dedupe_books_cmd(
 
     conn = _connect(database_url)
     db.apply_schema(conn, schema)
+    if by_text:
+        _dedupe_by_text(conn, schema, apply, report)
+        return
     if contained:
         pairs = dd.find_contained(conn, schema)
         console.print(f"{len(pairs)} book(s) another copy of the same work already contains")
@@ -2051,6 +2058,76 @@ def dedupe_books_cmd(
     conn.close()
     console.print(f"[green]✓[/green] removed {n} duplicate(s); undo any with `concordance restore-book <id>` "
                   "(ids: SELECT id, title FROM book_retirement)")
+
+
+def _dedupe_by_text(conn, schema: str, apply: bool, report: Optional[Path]) -> None:
+    """dedupe-books --by-text; see dedupe_books.py's third pass."""
+    import csv
+
+    from . import dedupe_books as dd
+
+    say = lambda m: console.print(f"[dim]{m}[/dim]")
+    sk = dd.sketches(conn, schema, log=say)
+    overlaps = dd.text_overlaps(sk)
+    books = dd._books(conn, schema)
+    same = dd.find_same_text(books, overlaps)
+    gone = {d.id: keeper.id for keeper, dups in same for d in dups}
+    remaining = {i: b for i, b in books.items() if i not in gone}
+    found = dd.find_containers(remaining, overlaps, sk, gone)
+    splits = [f for f in found if f[0] == "split"]
+    comps = sorted((f for f in found if f[0] == "compilation"), key=lambda f: -(f[1].word_count or 0))
+    rows = []
+    console.print(f"[bold]{len(same)}[/bold] group(s) of the same text under different titles")
+    for keeper, dups in same:
+        console.print(f"  keep {keeper.title!r} ({keeper.author}, #{keeper.id})")
+        for d in dups:
+            console.print(f"    remove {d.title!r} ({d.author}, #{d.id})")
+            rows.append(("same text", d.id, d.title, d.author, keeper.id, keeper.title, ""))
+    console.print(f"[bold]{len(splits)}[/bold] whole edition(s) holding their own volumes")
+    for _, whole, vols in splits:
+        console.print(f"  keep {whole.title!r} (#{whole.id}); remove {', '.join(repr(v.title) for v in vols)}")
+        rows += [("volume of a whole edition", v.id, v.title, v.author, whole.id, whole.title, "") for v in vols]
+    console.print(f"[bold]{len(comps)}[/bold] compilation(s) the books they contain cover")
+    for _, comp, parts, cov in comps:
+        console.print(f"  remove {comp.title!r} ({comp.author}, #{comp.id}) — {cov:.1%} covered by {len(parts)}: "
+                      + ", ".join(repr(p.title) for p in parts[:6]) + (" …" if len(parts) > 6 else ""))
+        rows.append(("compilation", comp.id, comp.title, comp.author, parts[0].id, parts[0].title,
+                     f"{cov:.3f} covered by " + " | ".join(f"#{p.id} {p.title}" for p in parts)))
+    if report:
+        report.parent.mkdir(parents=True, exist_ok=True)
+        with open(report, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["kind", "remove_id", "remove_title", "remove_author", "keep_id", "keep_title", "note"])
+            w.writerows(rows)
+        console.print(f"[dim]wrote {report}[/dim]")
+    if not apply:
+        console.print("[dim]dry run — rerun with --apply to remove them.[/dim]")
+        conn.close()
+        return
+    n = 0
+    for keeper, dups in same:
+        for d in dups:
+            dd.retire(conn, schema, keeper, d, by="dedupe-books --by-text",
+                      reason=f"same text as #{keeper.id} {keeper.title!r}")
+            n += 1
+    for _, whole, vols in splits:
+        for v in vols:
+            dd.retire(conn, schema, whole, v, by="dedupe-books --by-text",
+                      reason=f"a volume of #{whole.id} {whole.title!r}, which holds its text")
+            n += 1
+    for _, comp, parts, cov in comps:
+        live = [p for p in parts if dd._exists(conn, schema, p.id)]
+        if not live or not dd._exists(conn, schema, comp.id):
+            continue
+        spread = dd.spread_links(conn, schema, comp, live)
+        dd.retire(conn, schema, live[0], comp, by="dedupe-books --by-text", spread=spread,
+                  reason=f"compilation {cov:.1%} covered by {len(live)} book(s) it contains: "
+                         + ", ".join(f"#{p.id}" for p in live))
+        n += 1
+    conn.commit()
+    _refresh_book_aggregates(conn, schema)
+    conn.close()
+    console.print(f"[green]✓[/green] removed {n}; undo any with `concordance restore-book <id>`")
 
 
 @app.command("retire-book")
