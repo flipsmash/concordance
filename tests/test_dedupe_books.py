@@ -156,6 +156,7 @@ def test_title_pieces():
     assert not dd._piece_of("Being a Boy", "The Complete Writings of Charles Dudley Warner — Volume 4")
     assert not dd._piece_of("Ballads and Poems of Tragic Life", "Poems (Complete)")      # one shared word
     assert not dd._piece_of("The Physiology of Marriage, Complete", "Analytical Studies")  # "Complete" alone
+    assert not dd._piece_of("My friend the murderer", "My friend the murderer, and other mysteries and adventures")
 
 
 def test_by_text_finds_retitled_copies_volumes_and_covered_compilations(tmp_path):
@@ -233,3 +234,19 @@ def test_retiring_a_compilation_spreads_its_links_and_restores_exactly(tmp_path)
         cur.execute(f"DROP SCHEMA {s} CASCADE")
     conn.commit()
     conn.close()
+
+
+def test_a_smaller_edition_inside_a_fuller_one_goes_but_not_another_translation(tmp_path):
+    cary, notes, longfellow = _story(10), _story(11, 12000), _story(12)
+    texts = {1: ("Divine Comedy, Cary's Translation, Complete", "Dante Alighieri", cary + " " + notes),
+             2: ("The divine comedy", "Dante Alighieri", cary),
+             3: ("Divine Comedy, Longfellow's Translation, Complete", "Dante Alighieri", longfellow),
+             4: ("Commedia", "Someone Else", cary)}            # another author: not the same work
+    sk, books = {}, {}
+    for bid, (title, author, text) in texts.items():
+        p = tmp_path / f"{bid}.txt"
+        p.write_text(text)
+        sk[bid] = dd.sketch_text(str(p))
+        books[bid] = dd.Book(bid, title, author, len(text.split()), linked_words=1)
+    found = dd.find_containers(books, dd.text_overlaps(sk), sk)
+    assert [(f[1].id, f[2].id) for f in found if f[0] == "edition"] == [(1, 2)]

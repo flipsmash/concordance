@@ -2076,6 +2076,7 @@ def _dedupe_by_text(conn, schema: str, apply: bool, report: Optional[Path]) -> N
     found = dd.find_containers(remaining, overlaps, sk, gone)
     splits = [f for f in found if f[0] == "split"]
     comps = sorted((f for f in found if f[0] == "compilation"), key=lambda f: -(f[1].word_count or 0))
+    editions = [f for f in found if f[0] == "edition"]
     rows = []
     console.print(f"[bold]{len(same)}[/bold] group(s) of the same text under different titles")
     for keeper, dups in same:
@@ -2093,6 +2094,10 @@ def _dedupe_by_text(conn, schema: str, apply: bool, report: Optional[Path]) -> N
                       + ", ".join(repr(p.title) for p in parts[:6]) + (" …" if len(parts) > 6 else ""))
         rows.append(("compilation", comp.id, comp.title, comp.author, parts[0].id, parts[0].title,
                      f"{cov:.3f} covered by " + " | ".join(f"#{p.id} {p.title}" for p in parts)))
+    console.print(f"[bold]{len(editions)}[/bold] smaller edition(s) wholly inside a fuller one")
+    for _, fuller, small in editions:
+        console.print(f"  keep {fuller.title!r} (#{fuller.id}); remove {small.title!r} (#{small.id})")
+        rows.append(("smaller edition", small.id, small.title, small.author, fuller.id, fuller.title, ""))
     if report:
         report.parent.mkdir(parents=True, exist_ok=True)
         with open(report, "w", newline="") as f:
@@ -2114,6 +2119,11 @@ def _dedupe_by_text(conn, schema: str, apply: bool, report: Optional[Path]) -> N
         for v in vols:
             dd.retire(conn, schema, whole, v, by="dedupe-books --by-text",
                       reason=f"a volume of #{whole.id} {whole.title!r}, which holds its text")
+            n += 1
+    for _, fuller, small in editions:
+        if dd._exists(conn, schema, small.id) and dd._exists(conn, schema, fuller.id):
+            dd.retire(conn, schema, fuller, small, by="dedupe-books --by-text",
+                      reason=f"a smaller edition wholly inside #{fuller.id} {fuller.title!r}")
             n += 1
     for _, comp, parts, cov in comps:
         live = [p for p in parts if dd._exists(conn, schema, p.id)]

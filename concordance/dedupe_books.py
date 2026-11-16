@@ -286,6 +286,8 @@ SAME_TEXT = 0.8          # both ways: the same text
 INSIDE = 0.8             # one way: A is inside B
 SPLIT_PART = 0.9         # a volume of a work its whole edition holds
 COVERED = 0.95           # a compilation its contained books cover this much of
+EDITION_BACK = 0.5       # a fuller edition is at least this much the smaller one
+_EDITION_WORDS = {"translation", "translated", "edition", "illustrated", "volume", "vol", "works", "complete"}
 SKETCH_CACHE = "data/book_sketches.pkl"
 _P = 1099511628211
 _WORD = re.compile(r"[a-z]+")
@@ -445,16 +447,32 @@ def find_containers(books: dict[int, Book], overlaps, sk: dict, gone: dict[int, 
           whole stays and its volumes go (like the --contained pass);
       ("compilation", container, [books], coverage) -- `container` holds
           distinct works that, together, cover COVERED of its text: the
-          compilation goes and they stay.
+          compilation goes and they stay;
+      ("edition", fuller, smaller) -- a smaller edition of the same work
+          (same real author, a title word in common) wholly inside a fuller
+          one that is mostly it (notes, an extra story): the smaller goes.
+          "The divine comedy" inside "Divine Comedy, Cary's Translation,
+          Complete"; not a translation by someone else, which shares no text.
 
     A container whose parts are distinct works but don't cover it (an
     "Entire Works" holding things no other book has) is left alone."""
     import numpy as np
     gone = gone or {}
     inside: dict[int, dict[int, float]] = defaultdict(dict)
+    editions: dict[int, Book] = {}          # smaller edition id -> the fuller one
     for a, b, ab, ba in overlaps:
         a, b = gone.get(a, a), gone.get(b, b)
         if a == b or a not in books or b not in books:
+            continue
+        for small, big, s_in, b_in in ((a, b, ab, ba), (b, a, ba, ab)):
+            if (s_in >= SPLIT_PART and EDITION_BACK <= b_in < SAME_TEXT
+                    and not _VOLUME_MARK.search(books[small].title)       # a volume is a split's business
+                    and _same_work(books[small], books[big])):
+                if small not in editions or (books[big].word_count or 0) > (editions[small].word_count or 0):
+                    editions[small] = books[big]
+    for a, b, ab, ba in overlaps:
+        a, b = gone.get(a, a), gone.get(b, b)
+        if a == b or a not in books or b not in books or a in editions or b in editions:
             continue
         if ab >= INSIDE and ba < SAME_TEXT:
             inside[b][a] = max(ab, inside[b].get(a, 0))
@@ -497,7 +515,28 @@ def find_containers(books: dict[int, Book], overlaps, sk: dict, gone: dict[int, 
         mine = [books[v] for v in vols if volume_of.get(v) == big]
         if mine:
             out.append(("split", books[big], sorted(mine, key=lambda b: b.title)))
-    return out + comps
+    # an edition's fuller copy can itself be a smaller edition: keep the fullest
+    def fullest(b: Book) -> Book:
+        seen = set()
+        while b.id in editions and b.id not in seen:
+            seen.add(b.id)
+            b = editions[b.id]
+        return b
+    retired = {v.id for _, _, vols in out for v in vols}
+    eds = [("edition", fullest(books[small]), books[small]) for small in editions
+           if small not in retired and fullest(books[small]).id != small]
+    return out + comps + eds
+
+
+def _same_work(a: Book, b: Book) -> bool:
+    """Same real author and a significant title word in common."""
+    from .db.books import PLACEHOLDER_AUTHORS
+    author = _norm(a.author)
+    if not author or author != _norm(b.author) or author in {_norm(x) for x in PLACEHOLDER_AUTHORS}:
+        return False
+    def words(t):
+        return set(_title_tokens(re.split(r"[;:(]", t)[0])) - _EDITION_WORDS
+    return bool(words(a.title) & words(b.title))
 
 
 def _title_tokens(title: str) -> list[str]:
@@ -518,6 +557,8 @@ def _piece_of(part: str, whole: str) -> bool:
     or the same opening words ("Petty Troubles of Married Life, Second Part")?"""
     if _VOLUME_MARK.search(part):
         return True
+    if re.search(r"\b(?:and|with) other\b", whole, re.I):
+        return False        # "X, and Other Stories" is named after a story, not split from it
     p, w = _title_tokens(part), _title_tokens(whole)
     if not p or not w:
         return False
