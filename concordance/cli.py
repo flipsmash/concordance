@@ -2009,6 +2009,9 @@ def dedupe_books_cmd(
                                  "(sampled 8-word runs): the same text under different titles, volumes of a work "
                                  "its whole edition holds, and compilations the books they contain cover."),
     report: Optional[Path] = typer.Option(None, "--report", help="With --by-text: also write the findings as CSV."),
+    spelling_blind: bool = typer.Option(False, "--spelling-blind", help="Report only: books whose texts match once "
+                                        "spelling is ignored (old vs modernized editions: 'vnfold your selfe' / "
+                                        "'unfold yourself') but not as written. Nothing is removed."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Take duplicate books out of the collection -- conservatively: same
@@ -2020,6 +2023,9 @@ def dedupe_books_cmd(
 
     conn = _connect(database_url)
     db.apply_schema(conn, schema)
+    if spelling_blind:
+        _spelling_blind_report(conn, schema)
+        return
     if by_text:
         _dedupe_by_text(conn, schema, apply, report)
         return
@@ -2058,6 +2064,30 @@ def dedupe_books_cmd(
     conn.close()
     console.print(f"[green]✓[/green] removed {n} duplicate(s); undo any with `concordance restore-book <id>` "
                   "(ids: SELECT id, title FROM book_retirement)")
+
+
+def _spelling_blind_report(conn, schema: str) -> None:
+    """dedupe-books --spelling-blind: pairs alike only when spelling is ignored."""
+    from . import dedupe_books as dd
+
+    say = lambda m: console.print(f"[dim]{m}[/dim]")
+    books = dd._books(conn, schema)
+    plain = dd.sketches(conn, schema, log=say)
+    blind = dd.sketches(conn, schema, spelling_blind=True, log=say)
+    conn.close()
+    as_written = {}
+    for a, b, ab, ba in dd.text_overlaps({k: v for k, v in plain.items() if k in books}):
+        as_written[(a, b)], as_written[(b, a)] = (ab, ba), (ba, ab)
+    found = []
+    for a, b, ab, ba in dd.text_overlaps({k: v for k, v in blind.items() if k in books}, min_share=0.5):
+        pa, pb = as_written.get((a, b), (0.0, 0.0))
+        if max(pa, pb) < 0.5 and (min(ab, ba) >= 0.5 or max(ab, ba) >= 0.8):
+            found.append((min(ab, ba), a, b, ab, ba, pa, pb))
+    console.print(f"[bold]{len(found)}[/bold] pair(s) alike only when spelling is ignored "
+                  "(share of each in the other: spelling-blind / as written)")
+    for _, a, b, ab, ba, pa, pb in sorted(found, reverse=True):
+        console.print(f"  {ab:.0%}/{ba:.0%} vs {pa:.0%}/{pb:.0%}  #{a} {books[a].title!r} ({books[a].author})"
+                      f"  |  #{b} {books[b].title!r} ({books[b].author})")
 
 
 def _dedupe_by_text(conn, schema: str, apply: bool, report: Optional[Path]) -> None:

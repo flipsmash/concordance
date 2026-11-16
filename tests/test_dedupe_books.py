@@ -250,3 +250,17 @@ def test_a_smaller_edition_inside_a_fuller_one_goes_but_not_another_translation(
         books[bid] = dd.Book(bid, title, author, len(text.split()), linked_words=1)
     found = dd.find_containers(books, dd.text_overlaps(sk), sk)
     assert [(f[1].id, f[2].id) for f in found if f[0] == "edition"] == [(1, 2)]
+
+
+def test_spelling_blind_sketches_match_old_and_modern_spelling(tmp_path):
+    import numpy as np
+    assert dd.skeleton("vnfold") == dd.skeleton("unfold") and dd.skeleton("call'd") == dd.skeleton("called")
+    old = tmp_path / "old.txt"
+    new = tmp_path / "new.txt"
+    base = _story(20, 8000).split()
+    old.write_text(" ".join(w.replace("u", "v") + "e" for w in base))      # vnto-style respelling
+    new.write_text(" ".join(base))
+    plain = [dd.sketch_text(str(p)) for p in (old, new)]
+    blind = [dd.sketch_text(str(p), spelling_blind=True) for p in (old, new)]
+    assert len(np.intersect1d(*plain)) == 0
+    assert len(np.intersect1d(*blind)) / len(blind[1]) > 0.9

@@ -289,8 +289,10 @@ COVERED = 0.95           # a compilation its contained books cover this much of
 EDITION_BACK = 0.5       # a fuller edition is at least this much the smaller one
 _EDITION_WORDS = {"translation", "translated", "edition", "illustrated", "volume", "vol", "works", "complete"}
 SKETCH_CACHE = "data/book_sketches.pkl"
+SKELETON_CACHE = "data/book_sketches_spelling_blind.pkl"
 _P = 1099511628211
 _WORD = re.compile(r"[a-z]+")
+_SPELLED_WORD = re.compile(r"[a-z]+(?:'[a-z]+)*")     # keeps call'd whole for its skeleton
 _ORD = r"(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|last)"
 _NUM = r"(?:\d+|[ivxlc]+|one|two|three|four|five|six|seven|eight|nine|ten)"
 _VOLUME_MARK = re.compile(
@@ -299,9 +301,24 @@ _VOLUME_MARK = re.compile(
 _TITLE_FILLER = {"the", "a", "an", "complete", "of", "and"}
 
 
-def sketch_text(path: str):
+_SKELETON_DROP = re.compile(r"[aeiouy']")
+_DOUBLED = re.compile(r"(.)\1+")
+SKELETON_SHINGLE = 6
+
+
+def skeleton(word: str) -> str:
+    """A word's consonants, spelling-blind: u/v and i/j folded, vowels and
+    apostrophes dropped, doubled letters single ("vnfold" and "unfold" ->
+    "nfld"; "selfe" -> "slf"; "call'd" and "called" -> "cld")."""
+    w = word.replace("v", "u").replace("j", "i")
+    return _DOUBLED.sub(r"\1", _SKELETON_DROP.sub("", w))
+
+
+def sketch_text(path: str, *, spelling_blind: bool = False):
     """The sampled 8-word-run hashes of one archived text (numpy uint64,
-    sorted, unique); None if the file can't be read."""
+    sorted, unique); None if the file can't be read. spelling_blind: 6-word
+    runs of consonant skeletons instead, so an old-spelling edition matches
+    a modernized one."""
     import zlib
 
     import numpy as np
@@ -309,14 +326,19 @@ def sketch_text(path: str):
         text = open(path, errors="replace").read().lower()
     except OSError:
         return None
-    toks = _WORD.findall(text)
-    n = len(toks) - SHINGLE + 1
+    shingle = SHINGLE
+    if spelling_blind:
+        toks = [k for k in (skeleton(t) for t in _SPELLED_WORD.findall(text.replace("&", " and "))) if k]
+        shingle = SKELETON_SHINGLE
+    else:
+        toks = _WORD.findall(text)
+    n = len(toks) - shingle + 1
     if n <= 0:
         return np.zeros(0, np.uint64)
     h = np.fromiter((zlib.crc32(t.encode()) for t in toks), dtype=np.uint64, count=len(toks))
     acc = np.zeros(n, dtype=np.uint64)
     with np.errstate(over="ignore"):
-        for j in range(SHINGLE):
+        for j in range(shingle):
             acc = acc * np.uint64(_P) + h[j: n + j]
         acc ^= acc >> np.uint64(29)                     # mix, so `% SAMPLE` samples evenly
         acc *= np.uint64(0xBF58476D1CE4E5B9)
@@ -325,11 +347,12 @@ def sketch_text(path: str):
 
 
 def _sketch_job(args):
-    bid, path = args
-    return bid, sketch_text(path)
+    bid, path, blind = args
+    return bid, sketch_text(path, spelling_blind=blind)
 
 
-def sketches(conn, schema: str, *, cache_path: str = SKETCH_CACHE, workers: int = 8, log=print) -> dict:
+def sketches(conn, schema: str, *, cache_path: str = SKETCH_CACHE, workers: int = 8, log=print,
+             spelling_blind: bool = False) -> dict:
     """{book id: sketch} for every book with an archived .txt, reusing the
     cache for files unchanged since (path, size, mtime)."""
     import os
@@ -339,6 +362,8 @@ def sketches(conn, schema: str, *, cache_path: str = SKETCH_CACHE, workers: int 
     with conn.cursor() as cur:
         cur.execute(f"SELECT id, archive_path FROM {s}.book WHERE archive_path LIKE '%%.txt'")
         rows = cur.fetchall()
+    if spelling_blind and cache_path == SKETCH_CACHE:
+        cache_path = SKELETON_CACHE
     try:
         with open(cache_path, "rb") as f:
             cache = pickle.load(f)
@@ -355,7 +380,7 @@ def sketches(conn, schema: str, *, cache_path: str = SKETCH_CACHE, workers: int 
         if hit and hit[0] == stamps[bid]:
             out[bid] = hit[1]
         else:
-            todo.append((bid, path))
+            todo.append((bid, path, spelling_blind))
     if todo:
         log(f"  sketching {len(todo):,} text(s) ({len(out):,} cached)")
         with Pool(workers) as pool:
