@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import CategoryLeaderList from './CategoryLeaderList'
 import CategoryOverlapGraph from './CategoryOverlapGraph'
+import { CategoryGenreFilter, useCategoryGenre, withGenre } from './categoryGenre'
 import { colorForBucket } from './domainColors'
 import './Browse.css'
 import './Categories.css'
@@ -16,6 +17,7 @@ const API_BASE = ''
 // rather than an empty grid.
 function CategorySubfieldDetail() {
   const { bucket, code, subcode } = useParams()
+  const [genre, setGenre] = useCategoryGenre()
   const [subfieldName, setSubfieldName] = useState('')
   const [subsubfields, setSubsubfields] = useState(null)
   const [error, setError] = useState('')
@@ -37,11 +39,11 @@ function CategorySubfieldDetail() {
 
   useEffect(() => {
     setSubsubfields(null)
-    fetch(`${API_BASE}/api/browse/category-counts?parent=${subcode}`)
+    fetch(withGenre(`${API_BASE}/api/browse/category-counts?parent=${subcode}`, genre))
       .then((res) => res.json())
       .then(setSubsubfields)
       .catch(() => setSubsubfields([]))
-  }, [subcode])
+  }, [subcode, genre])
 
   const color = colorForBucket(bucket)
 
@@ -49,7 +51,7 @@ function CategorySubfieldDetail() {
     <div className="browse-page">
       <header className="browse-header category-detail-header" style={{ borderColor: color }}>
         <div>
-          <Link to={`/app/categories/${bucket}/${code}`} className="category-breadcrumb">
+          <Link to={withGenre(`/app/categories/${bucket}/${code}`, genre)} className="category-breadcrumb">
             ← Back to field
           </Link>
           <h1>
@@ -61,7 +63,10 @@ function CategorySubfieldDetail() {
 
       {error && <div className="error-banner">{error}</div>}
 
-      <Link to={`/app/words?top_code=${subcode}`} className="browse-quiz-link">
+      <CategoryGenreFilter genre={genre} onChange={setGenre} />
+
+
+      <Link to={withGenre(`/app/words?top_code=${subcode}`, genre, 'all_genre')} className="browse-quiz-link">
         Browse the words in this sub-field →
       </Link>
 
@@ -76,7 +81,7 @@ function CategorySubfieldDetail() {
             {subsubfields.map((f) => (
               <Link
                 key={f.code}
-                to={`/app/categories/${bucket}/${code}/${subcode}/${f.code}`}
+                to={withGenre(`/app/categories/${bucket}/${code}/${subcode}/${f.code}`, genre)}
                 className="category-tile category-tile-sub"
                 style={{ borderColor: color }}
               >
@@ -90,10 +95,10 @@ function CategorySubfieldDetail() {
 
       <section className="browse-facets viz-section">
         <h2 className="viz-heading">How much do these sub-divisions overlap?</h2>
-        <CategoryOverlapGraph parent={subcode} basePath={`/app/categories/${bucket}/${code}/${subcode}`} />
+        <CategoryOverlapGraph parent={subcode} basePath={`/app/categories/${bucket}/${code}/${subcode}`} genre={genre} />
       </section>
 
-      <CategoryLeaderList code={subcode} />
+      <CategoryLeaderList code={subcode} genre={genre} />
     </div>
   )
 }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ForceGraph2D from 'react-force-graph-2d'
 import { useNavigate } from 'react-router-dom'
+import { withGenre } from './categoryGenre'
 import { colorForBucket } from './domainColors'
 import { cssVar, ZOOM_MS, ZOOM_PADDING } from './graphUtils'
 import './GraphView.css'
@@ -47,7 +48,7 @@ function endpointId(endpoint) {
 // per K); this is a small, complete graph of ALL of one level's siblings
 // at once, no center node, no top-K control -- different enough that
 // forcing a shared abstraction would cost more than it saves.
-function CategoryOverlapGraph({ bucket, parent, basePath }) {
+function CategoryOverlapGraph({ bucket, parent, basePath, genre = '' }) {
   const navigate = useNavigate()
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
@@ -78,6 +79,7 @@ function CategoryOverlapGraph({ bucket, parent, basePath }) {
     const params = new URLSearchParams()
     if (bucket) params.set('bucket', bucket)
     if (parent) params.set('parent', parent)
+    if (genre) params.set('genre', genre)
     fetch(`${API_BASE}/api/browse/category-overlap?${params}`)
       .then((res) => {
         if (!res.ok) throw new Error(`request failed (${res.status})`)
@@ -85,7 +87,7 @@ function CategoryOverlapGraph({ bucket, parent, basePath }) {
       })
       .then(setData)
       .catch((err) => setError(err.message || 'failed to load overlap'))
-  }, [bucket, parent])
+  }, [bucket, parent, genre])
 
   // The 6-bucket top level's sibling "codes" are bucket keys themselves --
   // /api/browse/words takes those as `domain`. Every other level's
@@ -153,6 +155,7 @@ function CategoryOverlapGraph({ bucket, parent, basePath }) {
     const key = isTopLevel ? 'all_domain' : 'all_top_code'
     params.append(key, codeA)
     params.append(key, codeB)
+    if (genre) params.append('all_genre', genre)
     return `/app/words?${params}`
   }
 
@@ -203,7 +206,7 @@ function CategoryOverlapGraph({ bucket, parent, basePath }) {
   )
 
   function handleNodeClick(node) {
-    navigate(`${basePath}/${encodeURIComponent(node.id)}`)
+    navigate(withGenre(`${basePath}/${encodeURIComponent(node.id)}`, genre))
   }
 
   function handleLinkClick(link) {

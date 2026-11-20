@@ -58,6 +58,7 @@ def browse_domains(
     archaic: list[str] = Query([]),
     pos: list[str] = Query([]),
     quizzable_only: bool = False,
+    genre: str | None = None,
     _: dict = Depends(_main.require_viewer),
 ) -> list[DomainBucketCount]:
     """The 6 named buckets only, as a bare list -- the shape the faceted
@@ -66,7 +67,8 @@ def browse_domains(
     by the work-detail chart; that one is a separate endpoint specifically so
     this one's response shape never has to change under an existing caller."""
     base_filters, base_params = _build_word_filters(
-        author, book_id, [], difficulty_min, difficulty_max, archaic, pos, quizzable_only
+        author, book_id, [], difficulty_min, difficulty_max, archaic, pos, quizzable_only,
+        all_genre=[genre] if genre else [],
     )
     where = " AND ".join(base_filters)
     with _main.get_conn() as conn, conn.cursor() as cur:

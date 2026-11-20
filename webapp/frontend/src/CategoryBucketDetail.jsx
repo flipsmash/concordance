@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import CategoryLeaderList from './CategoryLeaderList'
 import CategoryOverlapGraph from './CategoryOverlapGraph'
+import { CategoryGenreFilter, useCategoryGenre, withGenre } from './categoryGenre'
 import { colorForBucket } from './domainColors'
 import './Browse.css'
 import './Categories.css'
@@ -13,6 +14,7 @@ const API_BASE = ''
 // Science & Technology...), plus the bucket-wide leaders/word-list actions.
 function CategoryBucketDetail() {
   const { bucket } = useParams()
+  const [genre, setGenre] = useCategoryGenre()
   const [bucketName, setBucketName] = useState('')
   const [fields, setFields] = useState(null)
   const [error, setError] = useState('')
@@ -30,14 +32,14 @@ function CategoryBucketDetail() {
   useEffect(() => {
     setFields(null)
     setError('')
-    fetch(`${API_BASE}/api/browse/category-counts?bucket=${bucket}`)
+    fetch(withGenre(`${API_BASE}/api/browse/category-counts?bucket=${bucket}`, genre))
       .then((res) => {
         if (!res.ok) throw new Error(`request failed (${res.status})`)
         return res.json()
       })
       .then(setFields)
       .catch((err) => setError(err.message || 'failed to load fields'))
-  }, [bucket])
+  }, [bucket, genre])
 
   const color = colorForBucket(bucket)
 
@@ -45,7 +47,7 @@ function CategoryBucketDetail() {
     <div className="browse-page">
       <header className="browse-header category-detail-header" style={{ borderColor: color }}>
         <div>
-          <Link to="/app/categories" className="category-breadcrumb">
+          <Link to={withGenre('/app/categories', genre)} className="category-breadcrumb">
             ← All categories
           </Link>
           <h1>
@@ -55,7 +57,9 @@ function CategoryBucketDetail() {
         </div>
       </header>
 
-      <Link to={`/app/words?domain=${bucket}`} className="browse-quiz-link">
+      <CategoryGenreFilter genre={genre} onChange={setGenre} />
+
+      <Link to={withGenre(`/app/words?domain=${bucket}`, genre, 'all_genre')} className="browse-quiz-link">
         Browse the words in this category →
       </Link>
 
@@ -67,7 +71,7 @@ function CategoryBucketDetail() {
           {fields && fields.map((f) => (
             <Link
               key={f.code}
-              to={`/app/categories/${bucket}/${f.code}`}
+              to={withGenre(`/app/categories/${bucket}/${f.code}`, genre)}
               className="category-tile category-tile-sub"
               style={{ borderColor: color }}
             >
@@ -80,10 +84,10 @@ function CategoryBucketDetail() {
 
       <section className="browse-facets viz-section">
         <h2 className="viz-heading">How much do these fields overlap?</h2>
-        <CategoryOverlapGraph bucket={bucket} basePath={`/app/categories/${bucket}`} />
+        <CategoryOverlapGraph bucket={bucket} basePath={`/app/categories/${bucket}`} genre={genre} />
       </section>
 
-      <CategoryLeaderList bucket={bucket} />
+      <CategoryLeaderList bucket={bucket} genre={genre} />
     </div>
   )
 }

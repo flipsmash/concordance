@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import CategoryLeaderList from './CategoryLeaderList'
+import { CategoryGenreFilter, useCategoryGenre, withGenre } from './categoryGenre'
 import { colorForBucket } from './domainColors'
 import './Browse.css'
 import './Categories.css'
@@ -16,6 +17,7 @@ const API_BASE = ''
 // checked against the actual data.
 function CategorySubsubsubfieldDetail() {
   const { bucket, code, subcode, subsubcode, subsubsubcode } = useParams()
+  const [genre, setGenre] = useCategoryGenre()
   const [name, setName] = useState('')
   const [error, setError] = useState('')
 
@@ -40,7 +42,7 @@ function CategorySubsubsubfieldDetail() {
     <div className="browse-page">
       <header className="browse-header category-detail-header" style={{ borderColor: color }}>
         <div>
-          <Link to={`/app/categories/${bucket}/${code}/${subcode}/${subsubcode}`} className="category-breadcrumb">
+          <Link to={withGenre(`/app/categories/${bucket}/${code}/${subcode}/${subsubcode}`, genre)} className="category-breadcrumb">
             ← Back to sub-sub-field
           </Link>
           <h1>
@@ -52,11 +54,14 @@ function CategorySubsubsubfieldDetail() {
 
       {error && <div className="error-banner">{error}</div>}
 
-      <Link to={`/app/words?top_code=${subsubsubcode}`} className="browse-quiz-link">
+      <CategoryGenreFilter genre={genre} onChange={setGenre} />
+
+
+      <Link to={withGenre(`/app/words?top_code=${subsubsubcode}`, genre, 'all_genre')} className="browse-quiz-link">
         Browse the words in this category →
       </Link>
 
-      <CategoryLeaderList code={subsubsubcode} />
+      <CategoryLeaderList code={subsubsubcode} genre={genre} />
     </div>
   )
 }

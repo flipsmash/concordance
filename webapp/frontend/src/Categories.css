@@ -145,3 +145,22 @@
   border-radius: 6px;
   overflow: hidden;
 }
+
+/* Genre filter (categoryGenre.jsx) -- same look as the Origins page's. */
+.category-genre-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  margin: 0 0 12px;
+}
+
+.category-genre-filter select {
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text-h);
+  font: inherit;
+  max-width: 100%;
+}

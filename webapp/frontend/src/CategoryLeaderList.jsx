@@ -18,7 +18,7 @@ const ENTITY_TABS = [
 // not raw word count -- see that endpoint's docstring for why a raw-count
 // ranking would put the same prolific authors/long books at the top of
 // every single category.
-function CategoryLeaderList({ bucket, code }) {
+function CategoryLeaderList({ bucket, code, genre = '' }) {
   const navigate = useNavigate()
   const [entity, setEntity] = useState('book')
   const [items, setItems] = useState(null)
@@ -30,6 +30,7 @@ function CategoryLeaderList({ bucket, code }) {
     const params = new URLSearchParams({ entity, page_size: '10' })
     if (bucket) params.set('bucket', bucket)
     if (code) params.set('top_code', code)
+    if (genre) params.set('genre', genre)
     fetch(`${API_BASE}/api/browse/category-leaders?${params}`)
       .then((res) => {
         if (!res.ok) throw new Error(`request failed (${res.status})`)
@@ -37,7 +38,7 @@ function CategoryLeaderList({ bucket, code }) {
       })
       .then((data) => setItems(data.items))
       .catch((err) => setError(err.message || 'failed to load leaders'))
-  }, [entity, bucket, code])
+  }, [entity, bucket, code, genre])
 
   function handleClick(item) {
     if (entity === 'book') navigate(`/app/authors/${encodeURIComponent(item.subtitle || '')}/${item.id}`)
@@ -64,7 +65,7 @@ function CategoryLeaderList({ bucket, code }) {
       {items === null && !error && <div className="page-loading">Loading…</div>}
       {items !== null && items.length === 0 && !error && (
         <p className="category-empty">
-          No {entity === 'book' ? 'books' : 'authors'} meet the minimum word count yet.
+          No {entity === 'book' ? 'books' : 'authors'}{genre ? ` in ${genre}` : ''} meet the minimum word count yet.
         </p>
       )}
 
@@ -78,7 +79,7 @@ function CategoryLeaderList({ bucket, code }) {
                 {item.subtitle && <span className="category-leader-subtitle"> · {item.subtitle}</span>}
               </span>
               <span className="category-leader-stats">
-                {Math.round(item.share * 100)}% of vocabulary · {item.lift.toFixed(1)}× corpus average
+                {Math.round(item.share * 100)}% of vocabulary · {item.lift.toFixed(1)}× {genre ? `${genre} average` : 'corpus average'}
               </span>
             </li>
           ))}

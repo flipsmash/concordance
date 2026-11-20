@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import CategoryOverlapGraph from './CategoryOverlapGraph'
 import { CATEGORY_TREE_BLURB, CategoryTreeView } from './CategoryTree'
+import { CategoryGenreFilter, useCategoryGenre, withGenre } from './categoryGenre'
 import { colorForBucket } from './domainColors'
 import './Browse.css'
 import './Categories.css'
@@ -14,18 +15,21 @@ const API_BASE = ''
 // /api/browse/domains (unfiltered) rather than a new endpoint -- that's
 // already the exact {bucket, name, word_count} shape this page needs.
 function CategoriesOverview() {
+  const [genre, setGenre] = useCategoryGenre()
   const [buckets, setBuckets] = useState(null)
   const [error, setError] = useState('')
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/browse/domains`)
+    setBuckets(null)
+    setError('')
+    fetch(withGenre(`${API_BASE}/api/browse/domains`, genre))
       .then((res) => {
         if (!res.ok) throw new Error(`request failed (${res.status})`)
         return res.json()
       })
       .then(setBuckets)
       .catch((err) => setError(err.message || 'failed to load categories'))
-  }, [])
+  }, [genre])
 
   return (
     <div className="browse-page">
@@ -36,6 +40,7 @@ function CategoriesOverview() {
         The corpus's vocabulary, tagged across six broad discipline categories -- pick one to see
         its finer fields, and the authors, books, and words that lean on it most.
       </p>
+      <CategoryGenreFilter genre={genre} onChange={setGenre} />
 
       {error && <div className="error-banner">{error}</div>}
       {!buckets && !error && <div className="page-loading">Loading…</div>}
@@ -44,7 +49,7 @@ function CategoriesOverview() {
         {buckets && buckets.map((b) => (
           <Link
             key={b.bucket}
-            to={`/app/categories/${b.bucket}`}
+            to={withGenre(`/app/categories/${b.bucket}`, genre)}
             className="category-tile"
             style={{ borderColor: colorForBucket(b.bucket) }}
           >
@@ -57,12 +62,15 @@ function CategoriesOverview() {
 
       <section className="browse-facets viz-section">
         <h2 className="viz-heading">How much do these categories overlap?</h2>
-        <CategoryOverlapGraph basePath="/app/categories" />
+        <CategoryOverlapGraph basePath="/app/categories" genre={genre} />
       </section>
 
       <section className="browse-facets viz-section">
         <h2 className="viz-heading">Categories by meaning</h2>
-        <p className="viz-description">{CATEGORY_TREE_BLURB}</p>
+        <p className="viz-description">
+          {CATEGORY_TREE_BLURB}
+          {genre && ' (Always the whole collection, not filtered by genre.)'}
+        </p>
         <CategoryTreeView />
       </section>
     </div>

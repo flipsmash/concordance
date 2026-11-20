@@ -88,6 +88,19 @@ _SORT_TITLE_EXPR = "regexp_replace(lower(b.title), '^(the|a|an)\\s+', '')"
 
 # --- shared filter builder ----------------------------------------------------
 
+def _genre_word_sql(genre: str | None, word_col: str = "w.id") -> tuple[str, list]:
+    """` AND <word_col> appears in a book tagged `genre`` -- the Categories
+    drilldown's genre filter, appended to a WHERE that already has a word
+    alias. Empty (no-op) when no genre is given. Genre is book-level, so it
+    joins through word_book/book_genre, same as _build_word_filters'
+    all_genre."""
+    if not genre:
+        return "", []
+    return (f""" AND EXISTS (SELECT 1 FROM {_main.SCHEMA}.word_book gwb
+                    JOIN {_main.SCHEMA}.book_genre gbg ON gbg.book_id = gwb.book_id
+                    WHERE gwb.word_id = {word_col} AND gbg.genre = %s)""", [genre])
+
+
 def _subtree_or_sql(codes: list[str]) -> tuple[str, list]:
     """OR of usas.subtree_sql(code) fragments -- "this word's category is
     exactly one of `codes`, or a real descendant of one of them." Used both

@@ -14,7 +14,7 @@ from concordance import usas, usas_domains
 from concordance.db import PLACEHOLDER_AUTHORS
 from webapp.backend import main as _main
 
-from .common import _ALL_CODES, _TOP_CODES, _TOP_CODE_NAMES, _subtree_or_sql, router
+from .common import _ALL_CODES, _TOP_CODES, _TOP_CODE_NAMES, _genre_word_sql, _subtree_or_sql, router
 
 
 # --- /api/browse/category-counts --------------------------------------------------
@@ -26,7 +26,7 @@ class CategoryCount(BaseModel):
     word_count: int
 
 
-def _child_subtree_counts(cur, children: list[dict]) -> dict[str, int]:
+def _child_subtree_counts(cur, children: list[dict], genre: str | None = None) -> dict[str, int]:
     """Whole-subtree word count for each of `children` (siblings, one level
     down from a common parent) -- one query per child, not a single GROUP
     BY: each child's subtree boundary (usas.subtree_sql) isn't a uniform
@@ -34,6 +34,7 @@ def _child_subtree_counts(cur, children: list[dict]) -> dict[str, int]:
     level-0 case where `left(c.code, 1)` alone is that uniform expression.
     Never more than 15 queries (the max real child count of any code)."""
     counts = {}
+    genre_sql, genre_params = _genre_word_sql(genre)
     for child in children:
         exact, like = usas.subtree_sql(child["code"])
         cur.execute(
@@ -41,8 +42,8 @@ def _child_subtree_counts(cur, children: list[dict]) -> dict[str, int]:
                 FROM {_main.SCHEMA}.word w
                 JOIN {_main.SCHEMA}.word_category wc ON wc.word_id = w.id
                 JOIN {_main.SCHEMA}.category c ON c.id = wc.category_id
-                WHERE w.active AND (c.code = %s OR c.code LIKE %s)""",
-            (exact, like),
+                WHERE w.active AND (c.code = %s OR c.code LIKE %s){genre_sql}""",
+            (exact, like, *genre_params),
         )
         counts[child["code"]] = cur.fetchone()[0]
     return counts
@@ -52,6 +53,7 @@ def _child_subtree_counts(cur, children: list[dict]) -> dict[str, int]:
 def browse_category_counts(
     bucket: str | None = None,
     parent: str | None = None,
+    genre: str | None = None,
     _: dict = Depends(_main.require_viewer),
 ) -> list[CategoryCount]:
     """Word count per USAS category, one tier below either `bucket` (a 6-hue
@@ -78,7 +80,7 @@ def browse_category_counts(
             raise HTTPException(404, f"unknown category code {parent!r}")
         children = usas.children_of(parent)
         with _main.get_conn() as conn, conn.cursor() as cur:
-            counts = _child_subtree_counts(cur, children)
+            counts = _child_subtree_counts(cur, children, genre)
         return [
             CategoryCount(code=c["code"], name=c["name"], bucket=usas_domains.bucket_for(c["code"]),
                           word_count=counts.get(c["code"], 0))
@@ -88,6 +90,7 @@ def browse_category_counts(
     if bucket is not None and bucket not in usas_domains.DOMAIN_BUCKETS:
         raise HTTPException(404, f"unknown bucket {bucket!r}")
     codes = usas_domains.DOMAIN_BUCKETS[bucket]["codes"] if bucket else _TOP_CODES
+    genre_sql, genre_params = _genre_word_sql(genre)
 
     with _main.get_conn() as conn, conn.cursor() as cur:
         cur.execute(
@@ -95,9 +98,9 @@ def browse_category_counts(
                 FROM {_main.SCHEMA}.word w
                 JOIN {_main.SCHEMA}.word_category wc ON wc.word_id = w.id
                 JOIN {_main.SCHEMA}.category c ON c.id = wc.category_id
-                WHERE w.active AND left(c.code, 1) = ANY(%s)
+                WHERE w.active AND left(c.code, 1) = ANY(%s){genre_sql}
                 GROUP BY left(c.code, 1)""",
-            (codes,),
+            (codes, *genre_params),
         )
         counts = dict(cur.fetchall())
 
@@ -168,6 +171,7 @@ def _overlap_matrix(pairs: list[tuple[int, str]], siblings: list[dict],
 def browse_category_overlap(
     bucket: str | None = None,
     parent: str | None = None,
+    genre: str | None = None,
     _: dict = Depends(_main.require_viewer),
 ) -> CategoryOverlap:
     """How much a Categories-drilldown level's sibling categories' word sets
@@ -188,6 +192,7 @@ def browse_category_overlap(
     if bucket is not None and parent is not None:
         raise HTTPException(400, "at most one of bucket or parent may be given")
 
+    genre_sql, genre_params = _genre_word_sql(genre)
     with _main.get_conn() as conn, conn.cursor() as cur:
         if parent is not None:
             if parent not in _ALL_CODES:
@@ -206,8 +211,8 @@ def browse_category_overlap(
                 f"""SELECT w.id, c.code FROM {_main.SCHEMA}.word w
                     JOIN {_main.SCHEMA}.word_category wc ON wc.word_id = w.id
                     JOIN {_main.SCHEMA}.category c ON c.id = wc.category_id
-                    WHERE w.active AND ({" OR ".join(or_clauses)})""",
-                params,
+                    WHERE w.active AND ({" OR ".join(or_clauses)}){genre_sql}""",
+                params + genre_params,
             )
             # A code's children aren't a uniform prefix expression across
             # siblings of different code lengths (same reason
@@ -235,8 +240,8 @@ def browse_category_overlap(
             f"""SELECT w.id, left(c.code, 1) FROM {_main.SCHEMA}.word w
                 JOIN {_main.SCHEMA}.word_category wc ON wc.word_id = w.id
                 JOIN {_main.SCHEMA}.category c ON c.id = wc.category_id
-                WHERE w.active AND left(c.code, 1) = ANY(%s)""",
-            (top_codes,),
+                WHERE w.active AND left(c.code, 1) = ANY(%s){genre_sql}""",
+            (top_codes, *genre_params),
         )
         rows = cur.fetchall()
         # bucket=X: the fetched top-level code IS the sibling code directly.
@@ -275,6 +280,7 @@ def browse_category_leaders(
     min_words: int = Query(0, ge=0, description="Overrides the entity's own default floor (50 for books, 100 for authors) if higher."),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    genre: str | None = None,
     _: dict = Depends(_main.require_viewer),
 ) -> CategoryLeaderPage:
     """Ranked "who/what leans on this category's vocabulary the most" list --
@@ -317,6 +323,13 @@ def browse_category_leaders(
     default_floor = 50 if entity == "book" else 100
     floor = max(min_words, default_floor)
 
+    # With a genre, rank only books tagged with it (each on its whole
+    # vocabulary), or authors on just their books tagged with it -- lift is
+    # then "leans on this category more than a typical <genre> book/author".
+    genre_book_sql = (f" AND b.id IN (SELECT book_id FROM {_main.SCHEMA}.book_genre WHERE genre = %s)"
+                      if genre else "")
+    genre_params = [genre] if genre else []
+
     with _main.get_conn() as conn, conn.cursor() as cur:
         if entity == "book":
             cur.execute(
@@ -325,6 +338,7 @@ def browse_category_leaders(
                         FROM {_main.SCHEMA}.book b
                         JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
                         JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id AND w.active
+                        WHERE true{genre_book_sql}
                     ),
                     book_totals AS (
                         SELECT id, title, author, count(DISTINCT word_id) AS total
@@ -343,7 +357,7 @@ def browse_category_leaders(
                     SELECT bt.id::text, bt.title, bt.author, bt.total, coalesce(bc.cat_count, 0)
                     FROM book_totals bt
                     LEFT JOIN book_cat bc ON bc.id = bt.id""",
-                (floor, *subtree_params),
+                (*genre_params, floor, *subtree_params),
             )
         else:
             cur.execute(
@@ -352,7 +366,7 @@ def browse_category_leaders(
                         FROM {_main.SCHEMA}.book b
                         JOIN {_main.SCHEMA}.word_book wb ON wb.book_id = b.id
                         JOIN {_main.SCHEMA}.word w ON w.id = wb.word_id AND w.active
-                        WHERE b.author IS NOT NULL AND b.author != ALL(%s)
+                        WHERE b.author IS NOT NULL AND b.author != ALL(%s){genre_book_sql}
                     ),
                     author_totals AS (
                         SELECT author, count(DISTINCT word_id) AS total
@@ -371,7 +385,7 @@ def browse_category_leaders(
                     SELECT at.author, at.author, NULL::text, at.total, coalesce(ac.cat_count, 0)
                     FROM author_totals at
                     LEFT JOIN author_cat ac ON ac.author = at.author""",
-                (list(PLACEHOLDER_AUTHORS), floor, *subtree_params),
+                (list(PLACEHOLDER_AUTHORS), *genre_params, floor, *subtree_params),
             )
         rows = cur.fetchall()
 
