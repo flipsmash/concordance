@@ -34,7 +34,25 @@ app = FastAPI(title="Concordance Review API")
 # Compress JSON responses: the full-corpus map alone is several MB of plain
 # JSON (~29k titles) and compresses ~5x; small responses are left alone.
 from fastapi.middleware.gzip import GZipMiddleware  # noqa: E402
-app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+
+class _JsonGZipMiddleware(GZipMiddleware):
+    """GZip, but never for byte-range requests or word audio. Starlette's
+    GZipMiddleware compresses a 206 range response while leaving its
+    Content-Range in raw-file bytes, so the browser's <audio> element gets a
+    body that doesn't match the range it asked for and won't play. mp3 doesn't
+    shrink under gzip anyway."""
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            has_range = any(k == b"range" for k, _ in scope.get("headers", []))
+            if has_range or scope.get("path", "").endswith("/audio"):
+                await self.app(scope, receive, send)
+                return
+        await super().__call__(scope, receive, send)
+
+
+app.add_middleware(_JsonGZipMiddleware, minimum_size=1000)
 
 SCHEMA = cdb.DEFAULT_SCHEMA
 SORT_COLUMNS = {
