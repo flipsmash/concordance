@@ -600,7 +600,16 @@ def book_text(book_id: int, _: dict = Depends(_main.require_viewer)):
     full_path = (_ARCHIVE_ROOT / Path(row[0]).name).resolve()
     if not full_path.is_file():
         raise HTTPException(status_code=404, detail="archive file missing on disk")
-    return FileResponse(full_path, media_type="text/plain", filename=full_path.name)
+    # Shown in the browser tab rather than downloaded: plain text (archived
+    # texts are UTF-8/ASCII -- the charset stops browsers guessing Latin-1)
+    # and PDF render inline. Browsers can't render EPUB, so it stays a
+    # download, now under its real media type.
+    suffix = full_path.suffix.lower()
+    if suffix == ".epub":
+        return FileResponse(full_path, media_type="application/epub+zip", filename=full_path.name)
+    media_type = "application/pdf" if suffix == ".pdf" else "text/plain; charset=utf-8"
+    return FileResponse(full_path, media_type=media_type, filename=full_path.name,
+                        content_disposition_type="inline")
 
 
 # --- /api/browse/books/{id}/related -----------------------------------------
