@@ -1299,6 +1299,18 @@ def _migration_0013_ipa_derived_from(conn: psycopg.Connection, s: str) -> None:
         cur.execute(f"ALTER TABLE {s}.word ADD COLUMN IF NOT EXISTS ipa_derived_from text")
 
 
+def _migration_0014_analogy_anchor_review(conn: psycopg.Connection, s: str) -> None:
+    """Whether a verified relation edge makes a good analogy ANCHOR (the
+    A:B pair shown as the example) -- `concordance review-analogy-anchors`:
+    'ok' or 'rejected' (minor WordNet sense, rare word, near-synonym pair,
+    relation not obvious), with why. NULL = not reviewed yet; analogy_select
+    never uses 'rejected' and prefers 'ok'."""
+    with conn.cursor() as cur:
+        cur.execute(f"ALTER TABLE {s}.word_relation_edge ADD COLUMN IF NOT EXISTS anchor_status text")
+        cur.execute(f"ALTER TABLE {s}.word_relation_edge ADD COLUMN IF NOT EXISTS anchor_note text")
+        cur.execute(f"ALTER TABLE {s}.word_relation_edge ADD COLUMN IF NOT EXISTS anchor_checked_at timestamptz")
+
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, _migration_0001_baseline),
     (2, _migration_0002_compound_verdict),
@@ -1313,6 +1325,7 @@ MIGRATIONS: list[tuple[int, object]] = [
     (11, _migration_0011_force_map),
     (12, _migration_0012_dictcom_pron),
     (13, _migration_0013_ipa_derived_from),
+    (14, _migration_0014_analogy_anchor_review),
 ]
 
 

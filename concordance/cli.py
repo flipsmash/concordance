@@ -2890,7 +2890,7 @@ def maintain(
     """Run the full post-ingest maintenance chain in dependency order:
     fill-definitions -> classify -> normalize-pos -> ngram -> archaic ->
     compounds -> word-origins -> difficulty -> quizdef -> quizzable -> calibrate-difficulty ->
-    wordnik-pron -> ipa -> embed -> backfill-analogies.
+    wordnik-pron -> ipa -> embed -> backfill-analogies (+ review-analogy-anchors).
     This is the whole documented sequence from the README's
     "Backfilling definitions" / "Enrichment & scoring" / "Definition-quality
     cleanup" / "Pronunciation audio" / "Semantic distance" sections, chained
@@ -3138,6 +3138,10 @@ def maintain(
             stats = analogies.backfill_analogies(conn, schema, cfg, limit=limit)
         console.print(f"[green]✓[/green] backfill-analogies: [bold]{stats['terms_scanned']}[/bold] terms scanned "
                       f"-> [bold]{stats['edges_verified']}[/bold]/{stats['edges_found']} edges verified")
+        with console.status("[bold]Reviewing new analogy example pairs…"):
+            stats = analogies.review_anchors(conn, schema, cfg, limit=limit, log=lambda m: None)
+        console.print(f"[green]✓[/green] review-analogy-anchors: [bold]{stats['ok']}[/bold] ok, "
+                      f"{stats['rejected_rule'] + stats['rejected_model']} rejected of {stats['reviewed']}")
     else:
         console.print("[dim]backfill-analogies skipped.[/dim]")
 
@@ -3182,6 +3186,39 @@ def backfill_analogies_cmd(
     console.print(f"[green]✓[/green] backfill-analogies: [bold]{stats['terms_scanned']}[/bold] terms scanned "
                   f"-> [bold]{stats['edges_found']}[/bold] candidate edges "
                   f"([bold]{stats['edges_verified']}[/bold] verified, {stats['edges_rejected']} rejected)")
+
+
+@app.command("review-analogy-anchors")
+def review_analogy_anchors_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    model: Optional[Path] = typer.Option(None, "--model", "-m", help="Model for the review (defaults to the 14B)."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap edges reviewed this run (0 = all)."),
+    recheck: bool = typer.Option(False, "--recheck", help="Review already-reviewed edges again."),
+    batch_size: int = typer.Option(20, "--batch-size", help="Pairs per model call."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Decide which verified relation edges make good analogy EXAMPLE pairs
+    (the A:B in "A is to B as C is to ___"): rules reject abbreviations,
+    same-word pairs, rare words and minor WordNet senses; the local model
+    rejects pairs whose relation isn't obvious or that are near-synonyms.
+    Writes word_relation_edge.anchor_status/anchor_note; the quiz never uses a
+    rejected anchor. Resumable (only unreviewed edges unless --recheck); also
+    runs inside `maintain` after backfill-analogies."""
+    from . import analogies
+    from .gpu_lock import gpu_lock
+
+    conn = _connect(database_url)
+    db.apply_schema(conn, schema)
+    cfg = Config()
+    if model:
+        cfg.model_path = str(model)
+    with gpu_lock(database_url, on_wait=lambda: console.print("[yellow]Waiting for the GPU…[/yellow]")):
+        stats = analogies.review_anchors(conn, schema, cfg, limit=limit, recheck=recheck, batch_size=batch_size,
+                                         log=lambda m: console.print(m))
+    conn.close()
+    console.print(f"[green]✓[/green] review-analogy-anchors: [bold]{stats['ok']}[/bold] ok, "
+                  f"{stats['rejected_rule']} rejected by rules, {stats['rejected_model']} by the model "
+                  f"({stats['reviewed']} reviewed)")
 
 
 @app.command("maintain-status")

@@ -32,6 +32,7 @@ actually a valid synonym of the correct answer isn't wrong, it's a second correc
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, replace
 
 # Cosine-distance band for the "semantic near-miss" strategy: too close (< _SEMANTIC_BAND_MIN)
@@ -524,11 +525,73 @@ def _random_ordinary_candidates(cur, schema: str, d_pos: str, exclude_lemmas: se
     return out
 
 
+def _option_key(lemma: str) -> str:
+    return re.sub(r"[^a-z]", "", lemma.lower())
+
+
+def _one_edit_apart(a: str, b: str) -> bool:
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b)) == 1
+    short, long_ = sorted((a, b), key=len)
+    return any(long_[:i] + long_[i + 1:] == short for i in range(len(long_)))
+
+
+_INITIALS_SKIP = {"of", "the", "and", "for", "in", "on", "to", "a", "an"}
+
+
+def _initials(lemma: str) -> set[str]:
+    """Initials of a multiword name, with and without its small words:
+    weapon of mass destruction -> {'wmd', 'womd'}."""
+    words = [w for w in re.split(r"[\s-]+", lemma.lower()) if w]
+    if len(words) < 2:
+        return set()
+    return {"".join(w[0] for w in words), "".join(w[0] for w in words if w not in _INITIALS_SKIP)}
+
+
+def _is_abbreviation(lemma: str) -> bool:
+    """'w.m.d.', 'u.s.', 'e.g.' -- dotted initials make a poor option and
+    usually restate another one (weapon of mass destruction)."""
+    return bool(re.fullmatch(r"(?:[a-z]\.){2,}[a-z]?\.?", lemma.lower().replace(" ", "")))
+
+
+def _options_clash(a: str, b: str) -> bool:
+    """Two option labels that are really one word -- a spelling variant
+    (artifact/artefact), an inflection (eu/eus), overlapping multiword
+    names (academic term/academic session, component/component part), or an
+    abbreviation and its expansion (w.m.d./weapon of mass destruction).
+    Shown together they flag each other as wrong."""
+    ka, kb = _option_key(a), _option_key(b)
+    if not ka or not kb or ka == kb:
+        return True
+    if ka in _initials(b) or kb in _initials(a):
+        return True
+    if min(len(ka), len(kb)) >= 3 and _one_edit_apart(ka, kb):
+        return True
+    short, long_ = sorted((ka, kb), key=len)
+    if long_.startswith(short) and len(long_) - len(short) <= 2:
+        return True
+    wa, wb = set(a.lower().split()), set(b.lower().split())
+    return (len(wa) > 1 or len(wb) > 1) and bool(wa & wb)
+
+
+def _lemma_synonyms(cur, schema: str, lemma: str, cache: dict[str, set[str]]) -> set[str]:
+    lc = lemma.lower()
+    if lc not in cache:
+        cur.execute(f"SELECT synonym_lemmas FROM {schema}.wn_relation_term WHERE lemma_lc = %s", (lc,))
+        cache[lc] = {x.lower() for row in cur.fetchall() for x in (row[0] or [])} - {lc}
+    return cache[lc]
+
+
 def select_analogy_distractors(conn, schema: str, style: str, d_pos: str, a_lemma: str, b_lemma: str,
                                 c_word_id: int, d_term_id: int, exclusion_lemmas: set[str],
                                 trap_lemmas: list[str], count: int,
                                 exclude_word_ids: set[int] | None = None,
-                                d_word_id: int | None = None) -> DistractorResult:
+                                d_word_id: int | None = None,
+                                anchor_synonyms: set[str] | None = None,
+                                d_lemma: str | None = None,
+                                prompt_lemmas: list[str] | None = None) -> DistractorResult:
     """`count` wrong D-options for an analogy item. `d_pos` is the canonical
     POS (noun/verb/adjective/adverb) of the correct answer D, used to
     POS-match every strategy. `c_word_id` feeds the vocab_only style's
@@ -545,72 +608,71 @@ def select_analogy_distractors(conn, schema: str, style: str, d_pos: str, a_lemm
     _select_candidates uses for mc/true_false/matching (see
     _NEAR_SYNONYM_DISTANCE_FLOOR): a trap/plausibility candidate that
     happens to mean the same thing as D is just as bad a distractor here as
-    it would be anywhere else."""
-    exclude_ids = set(exclude_word_ids or set())
+    it would be anywhere else.
+
+    No option may restate the anchor (`anchor_synonyms`), and no two options
+    (D included, via `d_lemma`) may be variants or synonyms of each other
+    (_options_clash) -- three spellings of one wrong word mark all of them
+    wrong. Nor may an option be spelled like a word already in the prompt
+    (`prompt_lemmas`: A, B, C) -- 'cue'/'clew' beside CLUE."""
+    exclude_ids = set(exclude_word_ids or set()) | {c_word_id}  # never offer C itself
     exclusion_lemmas = {l.lower() for l in exclusion_lemmas}
+    anchor_synonyms = {l.lower() for l in (anchor_synonyms or set())}
     picked: list[dict] = []
+
+    syn_cache: dict[str, set[str]] = {}
 
     def _too_close(cands: list[dict]) -> set[int]:
         if d_word_id is None:
             return set()
-        return _too_similar_ids(conn, schema, d_word_id, [c["id"] for c in cands])
+        return _too_similar_ids(conn, schema, d_word_id, [c["id"] for c in cands if c.get("id")])
 
     with conn.cursor() as cur:
-        trap_batch = _trap_candidates(cur, schema, trap_lemmas, d_pos, exclude_ids, count)
-        too_close = _too_close(trap_batch)
-        for c in trap_batch:
-            if c["lemma"].lower() in exclusion_lemmas or c["lemma"].lower() in {p["lemma"].lower() for p in picked}:
-                continue
-            if c["id"] in too_close:
-                continue
-            picked.append(c)
-            if c["id"]:
-                exclude_ids.add(c["id"])
-            if len(picked) >= count:
-                break
-
-        remaining = count - len(picked)
-        degraded = False
-        if remaining > 0:
-            if style == "vocab_only":
-                more = _embedding_offset_candidates(cur, schema, a_lemma, b_lemma, c_word_id, d_pos,
-                                                     exclusion_lemmas, exclude_ids, remaining)
-            else:
-                more = _sibling_fanout_candidates(cur, schema, d_term_id, d_pos, exclusion_lemmas,
-                                                   exclude_ids, remaining)
-            too_close = _too_close(more)
-            for c in more:
-                if c["lemma"].lower() in {p["lemma"].lower() for p in picked}:
+        def _take(cands: list[dict], check_exclusion: bool = True) -> None:
+            too_close = _too_close(cands)
+            for c in cands:
+                if len(picked) >= count:
+                    return
+                lc = c["lemma"].lower()
+                if check_exclusion and lc in exclusion_lemmas:
                     continue
-                if c["id"] in too_close:
+                if lc in anchor_synonyms or (c.get("id") and c["id"] in too_close):
+                    continue
+                if _is_abbreviation(c["lemma"]):
+                    continue
+                shown = [p["lemma"] for p in picked] + ([d_lemma] if d_lemma else [])
+                if any(_options_clash(c["lemma"], s) for s in shown + list(prompt_lemmas or [])):
+                    continue
+                syns = _lemma_synonyms(cur, schema, c["lemma"], syn_cache)
+                if any(s.lower() in syns or lc in _lemma_synonyms(cur, schema, s, syn_cache) for s in shown):
                     continue
                 picked.append(c)
-                if c["id"]:
+                if c.get("id"):
                     exclude_ids.add(c["id"])
-            remaining = count - len(picked)
 
-        if remaining > 0:
+        _take(_trap_candidates(cur, schema, trap_lemmas, d_pos, exclude_ids, count * 2))
+
+        degraded = False
+        if len(picked) < count:
+            remaining = count - len(picked)
+            if style == "vocab_only":
+                more = _embedding_offset_candidates(cur, schema, a_lemma, b_lemma, c_word_id, d_pos,
+                                                     exclusion_lemmas, exclude_ids, remaining * 2)
+            else:
+                more = _sibling_fanout_candidates(cur, schema, d_term_id, d_pos, exclusion_lemmas,
+                                                   exclude_ids, remaining * 2)
+            _take(more, check_exclusion=False)
+
+        if len(picked) < count:
+            remaining = count - len(picked)
             if style == "vocab_only":
                 cfg = DistractorConfig(strategy_weights={"orthographic": 0, "semantic": 0, "domain": 0, "antonym": 0})
-                more = _random_candidates(conn, schema, d_pos, cfg, exclude_ids, [], False, remaining)
-                too_close = _too_close(more)
+                more = _random_candidates(conn, schema, d_pos, cfg, exclude_ids, [], False, remaining * 2)
                 for c in more:
                     c["strategy"] = "random"
-                    if c["lemma"].lower() in exclusion_lemmas or c["lemma"].lower() in {p["lemma"].lower() for p in picked}:
-                        continue
-                    if c["id"] in too_close:
-                        continue
-                    picked.append(c)
-                    exclude_ids.add(c["id"])
             else:
-                more = _random_ordinary_candidates(cur, schema, d_pos, exclusion_lemmas, remaining)
-                too_close = _too_close(more)
-                for c in more:
-                    if c["lemma"].lower() in {p["lemma"].lower() for p in picked}:
-                        continue
-                    if c["id"] in too_close:
-                        continue
-                    picked.append(c)
-            degraded = degraded or (len(picked) < count)
+                more = _random_ordinary_candidates(cur, schema, d_pos, exclusion_lemmas, remaining * 2)
+            _take(more)
+            degraded = len(picked) < count
 
     return DistractorResult(candidates=picked[:count], degraded=degraded or len(picked) < count)

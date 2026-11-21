@@ -56,6 +56,7 @@ relation variety at all (see _build_matchers).
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
 from wordfreq import zipf_frequency
@@ -892,3 +893,176 @@ def backfill_analogies(conn, schema: str, cfg, limit: int = 0, batch_size: int =
         "fanout_rows": total_fanout,
         "sibling_rows": sibling_rows,
     }
+
+
+# --- anchor review (review-analogy-anchors) ------------------------------------
+#
+# An edge that is a true relation can still be a bad EXAMPLE pair: the A:B
+# shown in "A is to B as C is to ___" has to make the relation obvious at a
+# glance, or the test-taker solves for the wrong relation. Live items showed
+# minor WordNet senses (CLEAN:WEIGHTLIFTING, RESPECT:ITEM), near-synonyms
+# passing as hypernyms (PUB:TAVERN, SIZE:MAGNITUDE), abbreviations (TX:US,
+# U:NUCLEOTIDE) and inflections (HUMANS:HUMAN). Cheap rules catch the
+# mechanical cases; the local model judges the rest. Like verify_candidates,
+# silence means reject.
+
+_ANCHOR_SHAPE = re.compile(r"^[a-z][a-z' -]*[a-z]$")
+_ANCHOR_SHORT_OK = {"go", "be", "do", "ox", "ax", "up"}
+
+_ANCHOR_SYSTEM_COMMON = (
+    "You are choosing EXAMPLE pairs for vocabulary analogy questions of the form "
+    "'A is to B as C is to ___'. The example pair (a, b) must teach the relationship at a glance. "
+    "Judge ok=true ONLY if ALL hold: (1) the described relation clearly holds between the two words "
+    "in their most common everyday meanings (the definitions show the sense meant -- reject if that "
+    "sense is not the word's usual one); (2) an ordinary adult reader would see the relation "
+    "immediately from the two words alone; (3) a and b are not near-synonyms or two names for the "
+    "same thing, unless the relation_description says similar meaning is the relation; (4) neither "
+    "word is an abbreviation, a proper name, or jargon only a specialist knows. When in doubt, reject. "
+    'Output ONLY a JSON array, one object per input, in order: [{"i": <int>, "ok": <true|false>}].'
+)
+
+_ANCHOR_SYSTEM_VOCAB = (
+    "You are choosing EXAMPLE pairs for advanced-vocabulary analogy questions of the form "
+    "'A is to B as C is to ___'. Both words are rare on purpose. Judge ok=true ONLY if ALL hold: "
+    "(1) the described relation clearly and specifically holds between the two words as defined; "
+    "(2) someone who knows both words would see that relation immediately; (3) a and b are not "
+    "near-synonyms or two names for the same thing, unless the relation_description says similar "
+    "meaning is the relation. When in doubt, reject. "
+    'Output ONLY a JSON array, one object per input, in order: [{"i": <int>, "ok": <true|false>}].'
+)
+
+
+def _anchor_rule_verdict(wn, a: dict, b: dict, ordinary: bool) -> str | None:
+    """A rejection reason from the cheap rules, or None to send it to the model."""
+    from .analogy_select import shares_stem
+
+    for t in (a, b):
+        lc = t["lemma"].lower()
+        if not (_ANCHOR_SHAPE.match(lc) and (len(lc) >= 3 or lc in _ANCHOR_SHORT_OK)):
+            return "abbreviation or symbol"
+    if a["pos"] == b["pos"] and shares_stem(a["lemma"], b["lemma"]):
+        return "same word in another form"
+    if ordinary:
+        if not (a["is_common"] and b["is_common"]):
+            return "rare word"
+        if wn is not None:
+            for t in (a, b):
+                if not t["synset"]:
+                    continue
+                try:
+                    names = [n.replace("_", " ").lower() for n in wn.synset(t["synset"]).lemma_names()]
+                except Exception:  # noqa: BLE001 -- unknown synset name: skip this check
+                    names = []
+                lc = t["lemma"].lower()
+                if any(n != lc and " " not in n and n.startswith(lc) for n in names):
+                    return f"clipped form ({lc})"  # info -> information, auto -> automobile
+                synsets = wn.synsets(t["lemma"].replace(" ", "_"), "a" if t["wn_pos"] in ("a", "s") else t["wn_pos"])
+                if not synsets or synsets[0].name() != t["synset"]:
+                    return f"minor sense of {t['lemma']}"
+    return None
+
+
+def _anchor_query(llm, batch: list[dict], vocab: bool) -> str:
+    items = [{"i": i, "relation_description": _RELATION_TYPE_DESCRIPTIONS.get(e["relation_type"], e["relation_type"]),
+              "a": e["a"]["lemma"], "a_def": (e["a"]["gloss"] or "")[:200],
+              "b": e["b"]["lemma"], "b_def": (e["b"]["gloss"] or "")[:200]}
+             for i, e in enumerate(batch)]
+    out = llm.create_chat_completion(
+        messages=[{"role": "system", "content": _ANCHOR_SYSTEM_VOCAB if vocab else _ANCHOR_SYSTEM_COMMON},
+                  {"role": "user", "content": json.dumps(items, ensure_ascii=False)}],
+        temperature=0.0,
+        max_tokens=len(batch) * 12 + 64,
+    )
+    return out["choices"][0]["message"]["content"]
+
+
+def review_anchors(conn, schema: str, cfg, limit: int = 0, recheck: bool = False, batch_size: int = 20,
+                   llm=None, log=print) -> dict:
+    """Mark every verified edge that could serve as an anchor (both terms
+    ordinary, or both vocab -- the two anchor pools analogy_select draws
+    from) anchor_status 'ok'/'rejected' with anchor_note saying why.
+    Resumable: only unreviewed edges unless `recheck`. Commits per batch."""
+    wn = _load_wordnet()
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT e.id, e.relation_type, e.pos_a, e.pos_b, ta.word_id IS NULL,
+                       ta.lemma, ta.wn_pos, ta.synset_name, ta.gloss, ta.is_common,
+                       tb.lemma, tb.wn_pos, tb.synset_name, tb.gloss, tb.is_common
+                FROM {schema}.word_relation_edge e
+                JOIN {schema}.wn_relation_term ta ON ta.id = e.term_a_id
+                JOIN {schema}.wn_relation_term tb ON tb.id = e.term_b_id
+                WHERE e.verification_status = 'verified'
+                  AND (ta.word_id IS NULL) = (tb.word_id IS NULL)
+                  {"" if recheck else "AND e.anchor_status IS NULL"}
+                ORDER BY e.id""" + (" LIMIT %s" if limit else ""),
+            (limit,) if limit else (),
+        )
+        rows = cur.fetchall()
+
+    edges = []
+    for (eid, rtype, pos_a, pos_b, ordinary, la, wa, sa, ga, ca, lb, wb, sb, gb, cb) in rows:
+        edges.append({"id": eid, "relation_type": rtype, "ordinary": ordinary,
+                      "a": {"lemma": la, "pos": pos_a, "wn_pos": wa, "synset": sa, "gloss": ga, "is_common": ca},
+                      "b": {"lemma": lb, "pos": pos_b, "wn_pos": wb, "synset": sb, "gloss": gb, "is_common": cb}})
+
+    stats = {"reviewed": 0, "ok": 0, "rejected_rule": 0, "rejected_model": 0}
+
+    def _write(cur, updates: list[tuple[str, str | None, int]]) -> None:
+        cur.executemany(f"""UPDATE {schema}.word_relation_edge
+                            SET anchor_status = %s, anchor_note = %s, anchor_checked_at = now() WHERE id = %s""",
+                        updates)
+
+    to_model: dict[bool, list[dict]] = {True: [], False: []}
+    rule_updates = []
+    for e in edges:
+        reason = _anchor_rule_verdict(wn, e["a"], e["b"], e["ordinary"])
+        if reason:
+            rule_updates.append(("rejected", reason, e["id"]))
+        else:
+            to_model[e["ordinary"]].append(e)
+    with conn.cursor() as cur:
+        _write(cur, rule_updates)
+    conn.commit()
+    stats["rejected_rule"] = len(rule_updates)
+    stats["reviewed"] += len(rule_updates)
+    n_model = len(to_model[True]) + len(to_model[False])
+    log(f"[review-analogy-anchors] {len(edges)} edges: {len(rule_updates)} rejected by rules, "
+        f"{n_model} to the model")
+
+    if n_model:
+        own_llm = llm is None
+        llm = llm or _load_llm(cfg)
+        try:
+            done = 0
+            for ordinary, pool in to_model.items():
+                for i in range(0, len(pool), batch_size):
+                    batch = pool[i:i + batch_size]
+                    verdicts = None
+                    for _ in range(_MAX_VERIFY_PASSES):
+                        try:
+                            verdicts = _parse_verify_response(_anchor_query(llm, batch, vocab=not ordinary))
+                            break
+                        except Exception:  # noqa: BLE001 -- a flaky call shouldn't end the run
+                            verdicts = None
+                    by_i = {v["i"]: v for v in (verdicts or []) if isinstance(v, dict) and isinstance(v.get("i"), int)}
+                    updates = []
+                    for j, e in enumerate(batch):
+                        v = by_i.get(j)
+                        if v is not None and bool(v.get("ok", False)):
+                            updates.append(("ok", None, e["id"]))
+                            stats["ok"] += 1
+                        else:
+                            note = "model: unclear example" if v is not None else "model: no verdict"
+                            updates.append(("rejected", note, e["id"]))
+                            stats["rejected_model"] += 1
+                    with conn.cursor() as cur:
+                        _write(cur, updates)
+                    conn.commit()
+                    stats["reviewed"] += len(batch)
+                    done += len(batch)
+                    if done % (batch_size * 10) == 0 or done == n_model:
+                        log(f"[review-analogy-anchors]   ...{done}/{n_model} judged ({stats['ok']} ok so far)")
+        finally:
+            if own_llm:
+                llm.close()
+    return stats

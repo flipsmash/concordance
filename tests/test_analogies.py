@@ -331,3 +331,140 @@ def test_select_analogy_edge_strips_wordnet_root_lemmas_from_trap_pool():
     finally:
         with conn.cursor() as cur:
             cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+
+
+# --- item quality rules (2026-11-20) -------------------------------------------
+
+def test_shares_stem_flags_spelling_giveaways_only():
+    for c, d in [("torpidity", "torpid"), ("dogal", "doge"), ("imperfect", "perfect"),
+                 ("functioning", "function"), ("insane", "insanity")]:
+        assert asel.shares_stem(c, d), (c, d)
+    for c, d in [("dryad", "nymph"), ("photomicrographs", "picture"), ("monolith", "stone")]:
+        assert not asel.shares_stem(c, d), (c, d)
+
+
+def test_options_clash_variants_and_overlapping_names():
+    from concordance import distractors as dx
+
+    assert dx._options_clash("artifact", "artefact")
+    assert dx._options_clash("academic term", "academic session")
+    assert dx._options_clash("component", "component part")
+    assert dx._options_clash("cue", "clue")
+    assert not dx._options_clash("primate", "placental")
+    assert dx._options_clash("w.m.d.", "weapon of mass destruction")
+    assert dx._options_clash("wmd", "weapon of mass destruction")
+    assert dx._is_abbreviation("w.m.d.") and dx._is_abbreviation("u.s.")
+    assert not dx._is_abbreviation("weapon") and not dx._is_abbreviation("st. john")
+
+
+def test_taxon_answers_detected_by_gloss_or_synonym():
+    assert asel._is_taxon("New World lizards", ["family iguania", "iguanidae"])
+    assert asel._is_taxon("genus of deciduous trees", [])
+    assert not asel._is_taxon("a committee having supervisory powers", ["commission"])
+    assert not asel._is_taxon("a social class", ["working class"])
+
+
+def test_anchor_rules_reject_mechanical_bad_examples():
+    a = lambda lemma, pos="noun", common=True: {"lemma": lemma, "pos": pos, "wn_pos": "n", "synset": None,
+                                                "gloss": "", "is_common": common}
+    assert an._anchor_rule_verdict(None, a("tx"), a("us"), True) == "abbreviation or symbol"
+    assert an._anchor_rule_verdict(None, a("u.s.a."), a("america"), True) == "abbreviation or symbol"
+    assert an._anchor_rule_verdict(None, a("humans"), a("human"), True) == "same word in another form"
+    assert an._anchor_rule_verdict(None, a("pub"), a("tavern", common=False), True) == "rare word"
+    assert an._anchor_rule_verdict(None, a("walk", "verb"), a("go", "verb"), True) is None
+    # vocab<->vocab anchors are rare on purpose -- no rarity rule for them
+    assert an._anchor_rule_verdict(None, a("spinney", common=False), a("copse", common=False), False) is None
+
+
+def _edge(cur, schema, a_id, b_id, rtype, family, pos_a="noun", pos_b="noun", anchor_status=None):
+    cur.execute(
+        f"""INSERT INTO {schema}.word_relation_edge
+                (term_a_id, term_b_id, relation_type, relation_family, pos_a, pos_b, source,
+                 verification_status, anchor_status)
+            VALUES (%s,%s,%s,%s,%s,%s,'test','verified',%s)""",
+        (a_id, b_id, rtype, family, pos_a, pos_b, anchor_status),
+    )
+
+
+@pg
+def test_anchor_must_match_relation_type_and_pos_and_not_be_rejected():
+    """The anchor has to test the same relation the question does: a
+    holonym_member question never gets a holonym_part anchor, an adj->noun
+    question never a noun->adj one, and a rejected anchor is never used."""
+    schema = "cc_test_analogies_anchor_match"
+    conn = db.connect(_URL)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    db.apply_schema(conn, schema)
+    try:
+        with conn.cursor() as cur:
+            def term(lemma, word_id=None, pos="n"):
+                cur.execute(f"""INSERT INTO {schema}.wn_relation_term (word_id, lemma, wn_pos, synset_name, gloss, is_common)
+                                VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
+                            (word_id, lemma, pos, f"{lemma}.{pos}.01", f"{lemma} gloss", word_id is None))
+                return cur.fetchone()[0]
+
+            wid = _seed_word(cur, schema, "wolfling", "a young wolf")
+            t_c, t_d = term("wolfling", wid), term("pack")
+            _edge(cur, schema, t_c, t_d, "holonym_member", "part_of")
+            # same family, wrong type; right type, wrong POS order; right type, rejected
+            _edge(cur, schema, term("finger"), term("hand"), "holonym_part", "part_of")
+            _edge(cur, schema, term("bee", pos="n"), term("swarming", pos="a"), "holonym_member", "part_of",
+                  pos_b="adjective")
+            _edge(cur, schema, term("tx"), term("us"), "holonym_member", "part_of", anchor_status="rejected")
+            assert asel.select_analogy_edge(conn, schema, wid, exclude_ids=set()) is None
+
+            _edge(cur, schema, term("sailor"), term("crew"), "holonym_member", "part_of", anchor_status="ok")
+            assembly = asel.select_analogy_edge(conn, schema, wid, exclude_ids=set())
+            assert assembly is not None
+            assert (assembly.a_lemma, assembly.b_lemma) == ("sailor", "crew")
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+
+
+@pg
+def test_traps_are_most_specific_first_not_alphabetical():
+    """Regression: traps used to be sorted alphabetically and cut, so the
+    near-root 'act'/'action' won on almost every is_a item. Now a lemma
+    carried by many terms' fanout ranks below a specific one."""
+    schema = "cc_test_analogies_trap_rank"
+    conn = db.connect(_URL)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    db.apply_schema(conn, schema)
+    asel._generality_cache.clear()
+    try:
+        with conn.cursor() as cur:
+            def term(lemma, word_id=None):
+                cur.execute(f"""INSERT INTO {schema}.wn_relation_term (word_id, lemma, wn_pos, synset_name, gloss, is_common)
+                                VALUES (%s, %s, 'n', %s, %s, %s) RETURNING id""",
+                            (word_id, lemma, f"{lemma}.n.01", f"{lemma} gloss", word_id is None))
+                return cur.fetchone()[0]
+
+            def fan(term_id, lemma, pos="n"):
+                cur.execute(f"""INSERT INTO {schema}.wn_relation_fanout (term_id, relation_type, target_lemma, target_pos)
+                                VALUES (%s, 'hypernym', %s, %s)""", (term_id, lemma, pos))
+
+            wid = {l: _seed_word(cur, schema, l, f"{l} def") for l in ("fetter", "shackle", "gauntlet", "vambrace")}
+            t = {l: term(l, wid[l]) for l in wid}
+            _edge(cur, schema, t["fetter"], t["shackle"], "hypernym", "is_a")
+            _edge(cur, schema, t["gauntlet"], t["vambrace"], "hypernym", "is_a")
+            for lemma in ("armor", "act", "action", "activity"):
+                fan(t["gauntlet"], lemma)
+            fan(t["gauntlet"], "armored", pos="a")  # wrong POS for a noun answer
+            # 'act'/'action'/'activity' sit in 60 other terms' fanout -> generic
+            for i in range(60):
+                filler = term(f"filler{i}")
+                for lemma in ("act", "action", "activity"):
+                    fan(filler, lemma)
+
+        assembly = asel.select_analogy_edge(conn, schema, wid["fetter"], exclude_ids=set())
+        assert assembly is not None
+        assert assembly.trap_lemmas == ["armor"]
+    finally:
+        asel._generality_cache.clear()
+        with conn.cursor() as cur:
+            cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")

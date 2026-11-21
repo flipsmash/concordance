@@ -582,7 +582,8 @@ def _build_analogy_payload(conn, target: dict, body: QuizStartRequest,
     comes from _select_analogy_targets, already guaranteed to have >=1
     verified edge, but the SPECIFIC edge analogy_select picks still might
     have no usable anchor, so this can still legitimately return None."""
-    assembly = asel.select_analogy_edge(conn, _main.SCHEMA, target["id"], exclude_ids)
+    assembly = asel.select_analogy_edge(conn, _main.SCHEMA, target["id"], exclude_ids,
+                                        option_count=body.analogy_choice_count)
     if assembly is None:
         return None
 
@@ -591,6 +592,8 @@ def _build_analogy_payload(conn, target: dict, body: QuizStartRequest,
         conn, _main.SCHEMA, assembly.style, assembly.d_pos, assembly.a_lemma, assembly.b_lemma,
         assembly.target_word_id, assembly.d_term_id, assembly.exclusion_lemmas, assembly.trap_lemmas,
         distractor_count, exclude_word_ids=exclude_ids, d_word_id=assembly.d_word_id,
+        anchor_synonyms=assembly.anchor_synonyms, d_lemma=assembly.d_lemma,
+        prompt_lemmas=[assembly.a_lemma, assembly.b_lemma, assembly.c_lemma],
     )
     if len(result.candidates) < distractor_count:
         if not result.candidates:
@@ -748,7 +751,9 @@ def start_quiz(body: QuizStartRequest, user: dict = Depends(_main.require_user))
         # blending "analogy" with other types would silently return fewer than
         # body.length questions once the small analogy-eligible pool ran dry
         # while random.choice(body.types) kept picking it anyway.
-        analogy_pool = (_select_analogy_targets(conn, body, body.length + 10, used_ids, user["id"])
+        # 2x + 20: a target's edges can all be skipped by analogy_select's
+        # quality rules (spelling giveaways, taxa, no matching anchor).
+        analogy_pool = (_select_analogy_targets(conn, body, body.length * 2 + 20, used_ids, user["id"])
                          if "analogy" in body.types else [])
         analogy_idx = 0
 
