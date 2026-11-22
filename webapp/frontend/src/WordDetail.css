@@ -61,15 +61,11 @@
   flex-shrink: 0;
 }
 
-/* Forces the admin Delete pill onto its own row, right-aligned under the
-   action pills, every time -- never squeezed in beside Surprise me. */
+/* Forces the admin Delete pill onto its own row, at the left under the
+   word, every time -- never squeezed in beside Surprise me. */
 .word-detail-break {
   flex-basis: 100%;
   height: 0;
-}
-
-.word-detail-header .word-detail-delete {
-  margin-left: auto;
 }
 
 .word-detail-header .add-to-set-menu {
