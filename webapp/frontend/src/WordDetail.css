@@ -51,6 +51,25 @@
 
 .word-detail-audio {
   height: 32px;
+  /* gives up width before anything wraps, so 🎲 Surprise me stays on the
+     first row */
+  flex: 0 1 300px;
+  min-width: 140px;
+}
+
+.word-detail-surprise {
+  flex-shrink: 0;
+}
+
+/* Forces the admin Delete pill onto its own row, right-aligned under the
+   action pills, every time -- never squeezed in beside Surprise me. */
+.word-detail-break {
+  flex-basis: 100%;
+  height: 0;
+}
+
+.word-detail-header .word-detail-delete {
+  margin-left: auto;
 }
 
 .word-detail-header .add-to-set-menu {

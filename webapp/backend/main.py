@@ -292,6 +292,7 @@ def list_words(
     q: str | None = None,
     letter: str | None = Query(None, min_length=1, max_length=1),
     undefined_only: bool = False,
+    no_ipa_only: bool = False,
     _: dict = Depends(require_admin),
 ) -> WordPage:
     order_col = SORT_COLUMNS[sort]
@@ -310,6 +311,8 @@ def list_words(
         params.append(variant_flag)
     if undefined_only:
         filters.append("coalesce(w.definition, '') = ''")
+    if no_ipa_only:
+        filters.append("coalesce(w.ipa, '') = ''")
     if letter:
         filters.append("w.lemma_lc LIKE %s")
         params.append(f"{letter.lower()}%")

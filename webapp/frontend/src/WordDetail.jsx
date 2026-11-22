@@ -277,6 +277,7 @@ function WordDetail({ backTo = '/app/admin/accepted', showBackLink = true }) {
         >
           {surpriseLoading ? '…' : '🎲 Surprise me'}
         </button>
+        {user?.is_admin && <span className="word-detail-break" aria-hidden="true" />}
         {user?.is_admin && (
           <button
             type="button"

@@ -31,6 +31,7 @@ function AcceptedView() {
   const [q, setQ] = useState('')
   const [letter, setLetter] = useState('')
   const [undefinedOnly, setUndefinedOnly] = useState(false)
+  const [noIpaOnly, setNoIpaOnly] = useState(false)
   const [selected, setSelected] = useState(() => new Set())
 
   useEffect(() => {
@@ -62,6 +63,7 @@ function AcceptedView() {
     extraParams: {
       pos, validity_label: validityLabel, variant_flag: variantFlag, q, letter,
       undefined_only: undefinedOnly ? 'true' : '',
+      no_ipa_only: noIpaOnly ? 'true' : '',
     },
   })
 
@@ -125,6 +127,11 @@ function AcceptedView() {
     resetPage()
   }
 
+  function handleNoIpaOnlyChange(value) {
+    setNoIpaOnly(value)
+    resetPage()
+  }
+
   function handleLetterChange(value) {
     setLetter((current) => (current === value ? '' : value))
     resetPage()
@@ -182,6 +189,14 @@ function AcceptedView() {
             onChange={(e) => handleUndefinedOnlyChange(e.target.checked)}
           />{' '}
           Undefined only
+        </label>
+        <label className="pos-filter">
+          <input
+            type="checkbox"
+            checked={noIpaOnly}
+            onChange={(e) => handleNoIpaOnlyChange(e.target.checked)}
+          />{' '}
+          No IPA only
         </label>
         <span className="count">
           {total.toLocaleString()} active term{total === 1 ? '' : 's'}
