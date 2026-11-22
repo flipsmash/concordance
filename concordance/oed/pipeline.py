@@ -216,11 +216,126 @@ def _flush_pronunciation(conn: psycopg.Connection, batch: list[tuple[int, fitz.P
     for entry_id, _headword, _page, _bbox in batch:
         p1 = result1.get(entry_id)
         p2 = result2.get(entry_id)
-        ipa, needs_review = pronunciation.resolve_pronunciation(p1, p2, raw_ocr.get(entry_id))
+        ipa, needs_review, source = pronunciation.resolve(p1, p2, raw_ocr.get(entry_id))
         oed_db.update_pronunciation(
             conn, entry_id, pronunciation_raw=raw_ocr.get(entry_id), pass1=p1, pass2=p2,
-            ipa=ipa, source="vision_llm" if ipa else None, needs_review=needs_review, schema=cfg.schema,
+            ipa=ipa, source=source, needs_review=needs_review, schema=cfg.schema,
         )
+
+
+def pronounce_third(path: Path, conn: psycopg.Connection, cfg: OedConfig, console: Console,
+                    transcriber: pronunciation.Transcriber, *, limit: int = 0,
+                    vocab_schema: str | None = None, headwords: set[str] | None = None) -> dict:
+    """`oed-pronounce --third-pass`: one more reading, at a different zoom and
+    grid layout from both earlier passes, for this volume's unresolved
+    entries that print a stressed pronunciation bracket (the only ones
+    resolve_third can settle). Accepted only when it matches an earlier pass
+    and the bracket's stressed syllable -> source 'vision_llm_pass3'.
+    Resumable: an entry with a stored pass3 is not read again."""
+    import random as _random
+
+    existing = oed_db.get_volume(conn, oed_db.file_hash(path), cfg.schema)
+    if not existing:
+        raise RuntimeError(f"{path.name}: not ingested")
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""select id, headword, page_number, headword_bbox, pronunciation_raw from {cfg.schema}.entry
+                where volume_id = %s and headword_bbox is not null and entry_type <> 'pointer'
+                  and coalesce(pronunciation_ipa, '') = '' and pronunciation_pass3 is null
+                  and (pronunciation_pass1 is not null or pronunciation_pass2 is not null)"""
+            + (f""" and headword_norm in (select lower(btrim(lemma)) from {vocab_schema}.word
+                                          where active and coalesce(ipa, '') = '')""" if vocab_schema else "")
+            + (" and headword_norm = any(%s)" if headwords is not None else "")
+            + " order by page_number, id",
+            (existing["id"], *([sorted(headwords)] if headwords is not None else [])))
+        rows = [r for r in cur.fetchall() if "'" in (pronunciation.printed_bracket(r[4]) or "")]
+    if limit:
+        rows = rows[:limit]
+    doc = fitz.open(path)
+    accepted = done = 0
+
+    def flush(batch):
+        nonlocal accepted, done
+        items = [(eid, hw, pronunciation.render_crop(doc[pg], pronunciation.crop_rect(list(bb), doc[pg].rect, cfg),
+                                                      cfg, zoom=cfg.render_zoom * 1.6))
+                 for eid, hw, pg, bb, _raw in batch]
+        _random.shuffle(items)
+        composite, cells = pronunciation.build_composite(items, cfg, cols=cfg.composite_cols + 2)
+        result = transcriber.transcribe(composite, cells)
+        with conn.cursor() as cur:
+            for eid, _hw, _pg, _bb, raw in batch:
+                p3 = result.get(eid) or ""
+                cur.execute(f"select pronunciation_pass1, pronunciation_pass2 from {cfg.schema}.entry where id = %s",
+                            (eid,))
+                p1, p2 = cur.fetchone()
+                ipa = pronunciation.resolve_third(p1, p2, p3, raw)
+                if ipa:
+                    accepted += 1
+                    cur.execute(f"""update {cfg.schema}.entry set pronunciation_pass3 = %s, pronunciation_ipa = %s,
+                                    pronunciation_source = 'vision_llm_pass3', pronunciation_needs_review = false
+                                    where id = %s""", (p3, ipa, eid))
+                else:
+                    cur.execute(f"update {cfg.schema}.entry set pronunciation_pass3 = %s where id = %s", (p3, eid))
+        conn.commit()
+        done += len(batch)
+
+    batch: list = []
+    for row in rows:
+        batch.append(row)
+        if len(batch) >= cfg.composite_batch_size:
+            flush(batch)
+            batch = []
+            if done % 200 == 0:
+                console.print(f"[dim]{path.name}: {done}/{len(rows)} read a third time, {accepted} settled[/dim]")
+    if batch:
+        flush(batch)
+    return {"read": done, "accepted": accepted}
+
+
+def reresolve_pronunciations(conn: psycopg.Connection, cfg: OedConfig, *, dry_run: bool = False) -> dict:
+    """`oed-reresolve`: re-run pronunciation.resolve (and resolve_third where a
+    third reading exists) over every entry already transcribed, using the
+    stored passes -- no GPU. Picks up rule changes: the bracket tie-breaker
+    resolves disagreements, and readings of entries that print no
+    pronunciation are withdrawn. Manually set pronunciations are left alone,
+    and an accepted reading is never swapped for a different one."""
+    from collections import Counter
+
+    stats: Counter = Counter()
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""select id, pronunciation_pass1, pronunciation_pass2, pronunciation_pass3, pronunciation_raw,
+                       pronunciation_ipa, pronunciation_source
+                from {cfg.schema}.entry
+                where (pronunciation_pass1 is not null or pronunciation_pass2 is not null)
+                  and coalesce(pronunciation_source, '') <> 'manual'""")
+        rows = cur.fetchall()
+        updates = []
+        for eid, p1, p2, p3, raw, old_ipa, old_source in rows:
+            stats["checked"] += 1
+            if old_ipa:
+                # An accepted reading is only ever withdrawn, never re-picked:
+                # older runs accepted some pairs under earlier rules, and
+                # those stand unless the page prints no pronunciation at all.
+                if raw is not None and pronunciation.printed_bracket(raw) is None:
+                    stats["withdrawn"] += 1
+                    updates.append((None, None, True, eid))
+                continue
+            ipa, needs_review, source = pronunciation.resolve(p1, p2, raw)
+            if ipa is None and p3:
+                third = pronunciation.resolve_third(p1, p2, p3, raw)
+                if third:
+                    ipa, needs_review, source = third, False, "vision_llm_pass3"
+            if not ipa:
+                continue
+            stats[f"new_{source}"] += 1
+            updates.append((ipa, source, needs_review, eid))
+        if updates and not dry_run:
+            cur.executemany(f"""update {cfg.schema}.entry set pronunciation_ipa = %s, pronunciation_source = %s,
+                                pronunciation_needs_review = %s where id = %s""", updates)
+    if not dry_run:
+        conn.commit()
+    return dict(stats)
 
 
 def _prune_out_of_order(conn: psycopg.Connection, volume_id: int, cfg: OedConfig,

@@ -96,3 +96,34 @@ def test_resolve_pronunciation_leading_char_crosscheck_still_applies_to_reconcil
     assert p._reconcile_close("bɒnd", "ˈbɒnd") == "ˈbɒnd"  # sanity: reconciles on its own
     assert ipa is None
     assert needs_review is True
+
+
+# --- printed-bracket check, tie-breaker, third reading -------------------------
+
+def test_no_printed_pronunciation_never_resolves():
+    # stress mark in the headword only: both passes can only have guessed
+    assert p.resolve("rɪˈfɒsɪleɪt", "rɪˈfɒsɪleɪt", raw_ocr="re'focillate, v. Now rare. [ad. late L.") == (None, True, None)
+    # without OCR text the old behaviour stands
+    assert p.resolve("ˈtenθ", "ˈtenθ")[0] == "ˈtenθ"
+
+
+def test_tiebreak_picks_the_pass_the_bracket_supports():
+    raw = "philosophist (fi'lDsafist). Now rare. [f."
+    ipa, needs_review, source = p.resolve("fɪˈlɒsəfɪst", "ˈfɪləʊsəfə", raw)
+    assert (ipa, needs_review, source) == ("fɪˈlɒsəfɪst", False, "vision_llm_tiebreak")
+
+
+def test_tiebreak_declines_suffix_brackets_and_close_calls():
+    assert p.tiebreak_by_bracket("-ˈɒmɪtə(r", "ˈɒmɪtə", "anthropometer (-'omit3(r)). [f.") is None
+    # both passes fit the stress about equally: no margin, no pick
+    assert p.tiebreak_by_bracket("ˈtetrənt", "ˈtɛtrənt", "tetrant ('tstrant). [ad. L.") is None
+
+
+def test_curly_apostrophe_counts_as_stress():
+    assert p.printed_bracket("profert (’praufst). Law.") == "'praufst"
+
+
+def test_third_reading_must_match_a_pass_and_the_stress():
+    raw = "assurgency (3's3:d3ansi). [f. assurgent"
+    assert p.resolve_third("əˈsɜːdʒənsi", "əˈsɜːrsənsɪ", "əˈsɜːdʒənsi", raw) == "əˈsɜːdʒənsi"
+    assert p.resolve_third("əˈsɜːdʒənsi", "əˈsɜːrsənsɪ", "ˈæsədʒənsi", raw) is None

@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS {s}.entry (
     pronunciation_pass1     text,
     pronunciation_pass2     text,
     pronunciation_ipa       text,
-    pronunciation_source    text CHECK (pronunciation_source IN ('vision_llm', 'manual')),
+    pronunciation_source    text CHECK (pronunciation_source IN ('vision_llm', 'vision_llm_tiebreak', 'vision_llm_pass3', 'manual')),
     pronunciation_needs_review boolean NOT NULL DEFAULT true,
 
     created_at         timestamptz NOT NULL DEFAULT now()
@@ -169,6 +169,19 @@ def apply_schema(conn: psycopg.Connection, schema: str = DEFAULT_SCHEMA) -> None
                     f"ON {schema}.entry (concordance_match)")
         cur.execute(f"CREATE INDEX IF NOT EXISTS entry_concordance_match_todo_idx ON {schema}.entry (id) "
                     f"WHERE lemma AND (concordance_match_checked_at IS NULL OR concordance_match = 'unique')")
+
+        # A third, differently laid-out vision reading for entries whose two
+        # passes disagreed (`oed-pronounce --third-pass`), and the sources
+        # that pick between passes (pronunciation.resolve/resolve_third).
+        cur.execute(f"ALTER TABLE {schema}.entry ADD COLUMN IF NOT EXISTS pronunciation_pass3 text")
+        cur.execute("SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                    "WHERE conrelid = %s::regclass AND conname = 'entry_pronunciation_source_check'",
+                    (f"{schema}.entry",))
+        row = cur.fetchone()
+        if row and "vision_llm_pass3" not in row[0]:
+            cur.execute(f"ALTER TABLE {schema}.entry DROP CONSTRAINT entry_pronunciation_source_check")
+            cur.execute(f"ALTER TABLE {schema}.entry ADD CONSTRAINT entry_pronunciation_source_check CHECK "
+                        f"(pronunciation_source IN ('vision_llm', 'vision_llm_tiebreak', 'vision_llm_pass3', 'manual'))")
     conn.commit()
 
 

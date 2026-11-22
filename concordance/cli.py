@@ -2677,6 +2677,9 @@ def oed_pronounce(
     vocab_only: bool = typer.Option(False, "--vocab-only",
                                     help="Only entries for active vocab words that still have no pronunciation "
                                          "(what oed-ipa can use) -- hours instead of days."),
+    third_pass: bool = typer.Option(False, "--third-pass",
+                                    help="Instead: a third reading for entries whose two passes disagree and that "
+                                         "print a stressed pronunciation; --limit caps entries in total."),
     schema: str = typer.Option("oed", "--schema", help="Postgres schema for the oed tables."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
@@ -2686,7 +2689,7 @@ def oed_pronounce(
     from .oed import db as oed_db
     from .oed import pronunciation as _pron
     from .oed.config import OedConfig
-    from .oed.pipeline import pronounce_missing
+    from .oed.pipeline import pronounce_missing, pronounce_third
 
     dictionaries_dir = Path("dictionaries")
     volumes = list(paths) if paths else (sorted(dictionaries_dir.glob("*.pdf"))
@@ -2700,19 +2703,31 @@ def oed_pronounce(
     if isinstance(transcriber, _pron.StubTranscriber):
         console.print(f"[red]✗[/red] no local vision model configured ({cfg.vision_model_path})")
         raise typer.Exit(code=1)
-    total = 0
+    total = settled = 0
     for i, vol_path in enumerate(volumes, 1):
         console.rule(f"[bold]{i}/{len(volumes)} · {vol_path.name}")
+        vocab_schema = db.DEFAULT_SCHEMA if vocab_only else None
         try:
-            s = pronounce_missing(vol_path, conn, cfg, console, transcriber, limit=limit,
-                                  vocab_schema=db.DEFAULT_SCHEMA if vocab_only else None)
+            if third_pass:
+                if limit and total >= limit:
+                    break
+                s = pronounce_third(vol_path, conn, cfg, console, transcriber,
+                                    limit=(limit - total) if limit else 0, vocab_schema=vocab_schema)
+                total += s["read"]
+                settled += s["accepted"]
+                console.print(f"{s['read']} read a third time, {s['accepted']} settled")
+                continue
+            s = pronounce_missing(vol_path, conn, cfg, console, transcriber, limit=limit, vocab_schema=vocab_schema)
         except Exception as exc:  # noqa: BLE001
             console.print(f"[red]✗[/red] {exc}")
             continue
         total += s["pronounced"]
         console.print(f"{s['pronounced']} pronounced")
     conn.close()
-    console.print(f"[green]✓[/green] oed-pronounce: [bold]{total}[/bold] entries transcribed")
+    if third_pass:
+        console.print(f"[green]✓[/green] oed-pronounce --third-pass: {total} read, [bold]{settled}[/bold] settled")
+    else:
+        console.print(f"[green]✓[/green] oed-pronounce: [bold]{total}[/bold] entries transcribed")
 
 
 def _upgrade_guessed_audio(conn, schema: str, dump_path: Optional[str] = None, limit: int = 0) -> None:
@@ -2722,6 +2737,32 @@ def _upgrade_guessed_audio(conn, schema: str, dump_path: Optional[str] = None, l
     console.print(f"[green]✓[/green] audio upgrade: {stats.get('candidates', 0)} spelling-guess words with IPA — "
                   + (", ".join(f"{v} {k}" for k, v in voiced.items()) or "none re-voiced")
                   + (f", {stats['kept_guess']} kept (unusable IPA)" if stats.get("kept_guess") else ""))
+
+
+@app.command("oed-reresolve")
+def oed_reresolve_cmd(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Count what would change; write nothing."),
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    oed_schema: str = typer.Option("oed", "--oed-schema", help="Postgres schema for the oed tables."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Re-resolve 0 Dict pronunciations from their stored readings (no GPU):
+    the printed-bracket tie-breaker settles disagreeing passes, readings of
+    entries that print no pronunciation are withdrawn, and word.ipa taken
+    from a withdrawn reading is cleared with its IPA-voiced clip. Follow with
+    `oed-ipa`, `derive-ipa`, `audio` and `audio --upgrade-guesses`."""
+    from .oed import db as oed_db
+    from .oed.config import OedConfig
+    from .oed.pipeline import reresolve_pronunciations
+
+    conn = _connect(database_url)
+    oed_db.apply_schema(conn, oed_schema)
+    stats = reresolve_pronunciations(conn, OedConfig(schema=oed_schema), dry_run=dry_run)
+    console.print(f"entries: {stats}")
+    words = db.clear_unsupported_oed_ipa(conn, schema, oed_schema, dry_run=dry_run)
+    conn.close()
+    console.print(f"[green]✓[/green] oed-reresolve{' (dry run)' if dry_run else ''}: "
+                  f"{words['cleared']} words lose a 0 Dict pronunciation, {words['audio_dropped']} clips dropped")
 
 
 @app.command("oed-ipa")
@@ -3308,14 +3349,14 @@ def audio(
     upgrade_guesses: bool = typer.Option(
         False, "--upgrade-guesses",
         help="Only words whose audio is a spelling-only guess (Piper) but that now have a valid IPA: "
-             "retry recordings / Azure IPA synthesis, keeping the guess if nothing better comes back."),
+             "retry recordings / local Piper IPA synthesis, keeping the guess if nothing better comes back."),
     limit: int = typer.Option(0, "--limit", "-l", help="Cap number of words processed."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
     """Pronunciation audio: Commons recordings where they exist, else a real
     Merriam-Webster recording (needs MW_DICTIONARY_API_KEY -- shares the same
-    1000/day cap as MW definition lookups), else Azure IPA-guided synthesis
-    where a transcription is known, else local Piper grapheme-only synthesis
+    1000/day cap as MW definition lookups), else local Piper speaking the
+    word's IPA where a transcription is known, else Piper from the spelling
     (needs models/piper/, see audio.PIPER_MODEL_PATH). Only a word Piper
     itself can't produce anything for is left at 'none'."""
     conn = _connect(database_url)

@@ -597,3 +597,28 @@ def synthesize_unverified_guesses(conn, schema: str = DEFAULT_SCHEMA, limit: int
             time.sleep(delay)
     conn.commit()
     return dict(dist)
+
+
+def clear_unsupported_oed_ipa(conn, schema: str = DEFAULT_SCHEMA, oed_schema: str = "oed",
+                              *, dry_run: bool = False) -> dict:
+    """word.ipa taken from the 0 Dict (ipa_source 'oed') whose headword no
+    longer has any resolved pronunciation there (e.g. `oed-reresolve`
+    withdrew a reading of an entry that prints none). Clears the IPA and the
+    clip voiced from it (Piper-from-IPA / legacy Azure); real recordings
+    (Commons, MW) stay. `derive-ipa` and `audio` then fill them again."""
+    s = _safe_schema(schema)
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT w.id FROM {s}.word w
+                        WHERE w.ipa_source = 'oed' AND NOT EXISTS (
+                            SELECT 1 FROM {oed_schema}.entry e
+                            WHERE e.headword_norm = lower(btrim(w.lemma)) AND coalesce(e.pronunciation_ipa, '') <> '')""")
+        ids = [r[0] for r in cur.fetchall()]
+        if not ids or dry_run:
+            return {"cleared": len(ids), "audio_dropped": 0}
+        cur.execute(f"UPDATE {s}.word SET ipa = NULL, ipa_source = NULL, ipa_derived_from = NULL WHERE id = ANY(%s)",
+                    (ids,))
+        cur.execute(f"DELETE FROM {s}.word_audio WHERE word_id = ANY(%s) AND source IN ('piper_ipa', 'azure')",
+                    (ids,))
+        dropped = cur.rowcount
+    conn.commit()
+    return {"cleared": len(ids), "audio_dropped": dropped}

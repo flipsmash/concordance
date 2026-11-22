@@ -401,41 +401,183 @@ def _reconcile_close(n1: str, n2: str) -> str | None:
     return None
 
 
-def resolve_pronunciation(pass1: str | None, pass2: str | None,
-                           raw_ocr: str | None = None) -> tuple[str | None, bool]:
-    """(ipa_or_None, needs_review). Agreement (after whitespace/paren
-    normalization) on two valid-IPA-charset reads is the primary gate —
-    matches the pilot's double-pass design, not a single-pass allowlist
-    check. Falls back to _reconcile_close's two narrow, individually-safe
-    equivalences when verbatim agreement fails (see its docstring for why
-    this stops well short of a general fuzzy match). On top of that: a
-    real, measured failure mode (see module docstring) is BOTH passes
-    sharing the same bias — dropping a real, visible leading unstressed
-    vowel before the first stress mark — which pass-agreement alone can't
-    catch since it's not independent noise. raw_ocr (unreliable for exact
-    glyphs, but structurally informative) is cross-checked for this one
-    specific pattern: if it clearly shows a leading character before the
-    stress mark and the agreed transcription doesn't, that overrides an
-    otherwise-clean agreement back to needs_review=True rather than
-    trusting a bias both passes share."""
+# --- Printed-pronunciation check and OCR-bracket tie-breaker ----------------
+#
+# The baked OCR text is never TRUSTED as a transcription (module docstring),
+# but it answers two structural questions well (measured 2026-11-21):
+#   1. Does the page print a pronunciation at all? Rare/obsolete entries
+#      often carry only a stress mark in the headword ("re'focillate") and no
+#      bracket -- the vision model then invents IPA from the spelling, and two
+#      passes inventing the same string used to count as agreement (2,679
+#      accepted entries, 536 feeding word.ipa).
+#   2. Which syllable is stressed? On accepted entries the bracket's stress
+#      syllable matches the agreed IPA 90% of the time, so when the passes
+#      disagree it can pick between them: picked readings matched other
+#      dictionaries (stress + consonant skeleton) 91% of the time, vs 87.5%
+#      for ordinary two-pass agreement and 56% for an arbitrary pass.
+# Only ever CHOOSES an existing pass -- never edits one to fit the OCR.
+
+_BRACKET_RE = re.compile(r"\(([^()]{1,40}(?:\([^()]{0,3}\)[^()]{0,20})?)\)")
+_BRACKET_MAX_START = 60
+_IPA_VOWELS = set("aeiouæœɑɒɔəɛɜɪɨɵʊʌɚɝyøʏ")
+_OCR_VOWELS = set("aeiouAD3yE0")
+_IPA_CONS_CLASS = {"θ": "T", "ð": "T", "ʃ": "S", "ʒ": "S", "ŋ": "N", "ɹ": "r", "ɡ": "g", "j": "y", "ʍ": "w"}
+TIEBREAK_MIN_RATIO = 0.75
+TIEBREAK_MARGIN = 0.1
+
+
+def printed_bracket(raw_ocr: str | None) -> str | None:
+    """The pronunciation bracket right after the headword in the OCR text,
+    or None when the entry prints none (OCR text present but no bracket)."""
+    if not raw_ocr:
+        return None
+    m = _BRACKET_RE.search(raw_ocr)
+    if not m or m.start() > _BRACKET_MAX_START:
+        return None
+    return m.group(1).replace("\u2019", "'").replace("\u2018", "'")
+
+
+def _ipa_coarse(ipa: str) -> str:
+    s = ipa.strip().strip("()").replace("'", "ˈ").replace("(r", "").replace("(", "").replace(")", "")
+    for a, b in (("t͡ʃ", "C"), ("d͡ʒ", "J"), ("tʃ", "C"), ("dʒ", "J")):
+        s = s.replace(a, b)
+    out: list[str] = []
+    for ch in s:
+        if ch in _IPA_VOWELS:
+            if not out or out[-1] != "V":
+                out.append("V")
+        elif ch == "ˈ":
+            out.append("'")
+        elif ch == "ˌ":
+            out.append(".")
+        elif ch in "ːˑ ,-.\u0303\u0361":
+            continue
+        else:
+            out.append(_IPA_CONS_CLASS.get(ch, ch))
+    return "".join(out)
+
+
+def _ocr_coarse(bracket: str) -> str:
+    """The OCR's ASCII stand-ins mapped onto the same coarse alphabet:
+    D=ɒ, 3=ə, j/J=ʃ, dj/d3=dʒ, '=ˈ, .=ˌ, :=ː."""
+    b = bracket.split(",")[0].replace("(r)", "").replace("(", "").replace(")", "")
+    b = re.sub(r"d[j3J]", "J", b)
+    b = re.sub(r"t[jJ]", "C", b)
+    out: list[str] = []
+    for ch in b:
+        if ch in _OCR_VOWELS:
+            if not out or out[-1] != "V":
+                out.append("V")
+        elif ch == "'":
+            out.append("'")
+        elif ch == ".":
+            if out:
+                out.append(".")
+        elif ch in ": -":
+            continue
+        elif ch in "jJ":
+            out.append("S")
+        elif ch == "S":
+            out.append("T")
+        else:
+            out.append(ch.lower())
+    return "".join(out)
+
+
+def _stress_syllable(coarse: str) -> int | None:
+    i = coarse.find("'")
+    return None if i < 0 else coarse[:i].count("V")
+
+
+def tiebreak_by_bracket(pass1: str | None, pass2: str | None, raw_ocr: str | None) -> str | None:
+    """Pick whichever disagreeing pass the printed bracket supports: same
+    stressed syllable, coarse similarity >= TIEBREAK_MIN_RATIO, and clearly
+    ahead of the other pass if that one also fits the stress. None when the
+    bracket can't decide (no bracket/stress mark, a suffix-only bracket like
+    "-'omit3(r)", neither pass fitting)."""
+    b = printed_bracket(raw_ocr)
+    if not b or "'" not in b or b.lstrip().startswith("-"):
+        return None
+    target = _ocr_coarse(b)
+    want = _stress_syllable(target)
+    scored = []
+    for p in (pass1, pass2):
+        q = (p or "").strip().strip("()").strip()
+        if not q or q.startswith("-") or q.endswith("-") or "," in q or not valid_ipa(q):
+            continue
+        c = _ipa_coarse(q)
+        ratio = difflib.SequenceMatcher(None, c, target, autojunk=False).ratio()
+        scored.append((ratio, _stress_syllable(c) == want, q))
+    if not scored:
+        return None
+    scored.sort(key=lambda x: -x[0])
+    best = scored[0]
+    if not best[1] or best[0] < TIEBREAK_MIN_RATIO:
+        return None
+    if len(scored) == 2 and scored[1][1] and best[0] - scored[1][0] < TIEBREAK_MARGIN:
+        return None
+    return best[2]
+
+
+def resolve(pass1: str | None, pass2: str | None,
+            raw_ocr: str | None = None) -> tuple[str | None, bool, str | None]:
+    """(ipa_or_None, needs_review, source). Two passes agreeing (or
+    _reconcile_close-equivalent) -> 'vision_llm', subject to the
+    leading-character cross-check; otherwise the bracket tie-breaker ->
+    'vision_llm_tiebreak'. When the OCR text is known (raw_ocr not None) and
+    shows no printed pronunciation, nothing resolves: the passes could only
+    have guessed from the spelling."""
     def norm(s: str | None) -> str | None:
         if s is None:
             return None
         return s.strip().strip("()").strip()
 
+    if raw_ocr is not None and printed_bracket(raw_ocr) is None:
+        return None, True, None
     n1, n2 = norm(pass1), norm(pass2)
     if not (n1 and n2):
-        return None, True
+        picked = tiebreak_by_bracket(n1, n2, raw_ocr) if (n1 or n2) else None
+        return (picked, False, "vision_llm_tiebreak") if picked else (None, True, None)
 
     if n1 == n2 and valid_ipa(n1):
         resolved = n1
     else:
         resolved = _reconcile_close(n1, n2)
         if resolved is None:
-            return None, True
+            picked = tiebreak_by_bracket(n1, n2, raw_ocr)
+            return (picked, False, "vision_llm_tiebreak") if picked else (None, True, None)
 
     raw_says = _raw_suggests_leading_char(raw_ocr)
     ipa_says = _ipa_has_leading_char(resolved)
     if raw_says is True and ipa_says is False:
-        return None, True
-    return resolved, False
+        return None, True, None
+    return resolved, False, "vision_llm"
+
+
+def resolve_third(pass1: str | None, pass2: str | None, pass3: str | None,
+                  raw_ocr: str | None) -> str | None:
+    """A third, independently laid-out reading settles a disagreement only
+    when it matches one earlier pass (exactly or _reconcile_close-equivalent)
+    AND that reading fits the printed bracket's stressed syllable."""
+    b = printed_bracket(raw_ocr)
+    if not b or "'" not in b:
+        return None
+    want = _stress_syllable(_ocr_coarse(b))
+    n3 = (pass3 or "").strip().strip("()").strip()
+    if not n3 or not valid_ipa(n3) or n3.startswith("-"):
+        return None
+    for p in (pass1, pass2):
+        q = (p or "").strip().strip("()").strip()
+        if not q:
+            continue
+        agreed = n3 if q == n3 else _reconcile_close(q, n3)
+        if agreed and _stress_syllable(_ipa_coarse(agreed)) == want:
+            return agreed
+    return None
+
+
+def resolve_pronunciation(pass1: str | None, pass2: str | None,
+                           raw_ocr: str | None = None) -> tuple[str | None, bool]:
+    """(ipa_or_None, needs_review) -- resolve() without the source."""
+    ipa, needs_review, _source = resolve(pass1, pass2, raw_ocr)
+    return ipa, needs_review

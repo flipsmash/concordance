@@ -141,6 +141,7 @@ from .audio import (  # noqa: F401
     download_commons_direct_finds,
     compute_audio,
     synthesize_unverified_guesses,
+    clear_unsupported_oed_ipa,
 )
 from .maintain import (  # noqa: F401
     MAINTAIN_STEPS,
