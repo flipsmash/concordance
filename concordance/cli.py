@@ -2674,6 +2674,9 @@ def ipa(
 def oed_pronounce(
     paths: Optional[list[Path]] = typer.Argument(None, help="Volume PDF(s). Omit for every .pdf in dictionaries/ and dictionaries/done/."),
     limit: int = typer.Option(0, "--limit", "-l", help="Cap entries per volume (0 = all)."),
+    vocab_only: bool = typer.Option(False, "--vocab-only",
+                                    help="Only entries for active vocab words that still have no pronunciation "
+                                         "(what oed-ipa can use) -- hours instead of days."),
     schema: str = typer.Option("oed", "--schema", help="Postgres schema for the oed tables."),
     database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
 ) -> None:
@@ -2701,7 +2704,8 @@ def oed_pronounce(
     for i, vol_path in enumerate(volumes, 1):
         console.rule(f"[bold]{i}/{len(volumes)} · {vol_path.name}")
         try:
-            s = pronounce_missing(vol_path, conn, cfg, console, transcriber, limit=limit)
+            s = pronounce_missing(vol_path, conn, cfg, console, transcriber, limit=limit,
+                                  vocab_schema=db.DEFAULT_SCHEMA if vocab_only else None)
         except Exception as exc:  # noqa: BLE001
             console.print(f"[red]✗[/red] {exc}")
             continue

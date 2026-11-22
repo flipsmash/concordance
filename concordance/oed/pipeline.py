@@ -389,12 +389,17 @@ def rescan_job(path: Path, database_url: str, cfg: OedConfig, page_limit: int | 
 
 
 def pronounce_missing(path: Path, conn: psycopg.Connection, cfg: OedConfig, console: Console,
-                      transcriber: pronunciation.Transcriber, *, limit: int = 0) -> dict:
+                      transcriber: pronunciation.Transcriber, *, limit: int = 0,
+                      vocab_schema: str | None = None) -> dict:
     """`oed-pronounce`: the GPU half of `--rescan` -- run the usual double-pass
     pronunciation (_flush_pronunciation) for this volume's entries that were
     never attempted and carry a stored headword_bbox. Pointers have no
     pronunciation to read. Resumable: each written batch stops being "never
-    attempted", so an interrupted run picks up where it left off."""
+    attempted", so an interrupted run picks up where it left off.
+
+    `vocab_schema`: only entries whose headword is an active vocab word in
+    that schema still lacking a pronunciation -- the few thousand that feed
+    word.ipa (via oed-ipa) instead of the whole dictionary."""
     existing = oed_db.get_volume(conn, oed_db.file_hash(path), cfg.schema)
     if not existing:
         raise RuntimeError(f"{path.name}: not ingested")
@@ -402,8 +407,10 @@ def pronounce_missing(path: Path, conn: psycopg.Connection, cfg: OedConfig, cons
         cur.execute(
             f"""select id, headword, page_number, headword_bbox from {cfg.schema}.entry
                 where volume_id = %s and headword_bbox is not null and entry_type <> 'pointer'
-                  and pronunciation_raw is null and pronunciation_pass1 is null and pronunciation_pass2 is null
-                order by page_number, id""" + (f" limit {int(limit)}" if limit else ""),
+                  and pronunciation_raw is null and pronunciation_pass1 is null and pronunciation_pass2 is null"""
+            + (f""" and headword_norm in (select lower(btrim(lemma)) from {vocab_schema}.word
+                                          where active and coalesce(ipa, '') = '')""" if vocab_schema else "")
+            + " order by page_number, id" + (f" limit {int(limit)}" if limit else ""),
             (existing["id"],))
         rows = cur.fetchall()
     doc = fitz.open(path)

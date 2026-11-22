@@ -7,7 +7,7 @@ from pathlib import Path
 
 import psycopg
 
-from ..model import RejectReason, normalize_pos
+from ..model import RejectReason, bare_ipa, normalize_pos
 from .core import DEFAULT_SCHEMA, _safe_schema
 
 
@@ -79,7 +79,7 @@ def sync_master(csv_path: Path, conn: psycopg.Connection,
                         updated_at=now()
                     RETURNING id, definition""",
                 (word, r.get("as_seen"), definition, normalize_pos(r.get("part_of_speech")),
-                 r.get("ipa"), r.get("sentence"), r.get("chapter"), _synonyms(r.get("synonyms", "")),
+                 bare_ipa(r.get("ipa")), r.get("sentence"), r.get("chapter"), _synonyms(r.get("synonyms", "")),
                  r.get("etymology"), r.get("source"), (r.get("date_added") or ""),
                  is_blank, is_blank),
             )
@@ -195,7 +195,7 @@ def sync_book_results(conn, book_title: str, kept: list, rejected: list,
                         updated_at=now()
                     RETURNING id, definition""",
                 (c.lemma, rep.surface if rep else "", definition,
-                 normalize_pos(c.part_of_speech or c.pos), c.ipa,
+                 normalize_pos(c.part_of_speech or c.pos), bare_ipa(c.ipa),
                  rep.sentence if rep else "", rep.chapter if rep else "",
                  list(c.synonyms), c.etymology,
                  c.definition_source or ", ".join(c.validity_sources),

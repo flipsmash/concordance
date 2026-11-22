@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import requests
 
+from ..model import bare_ipa
 from .core import DEFAULT_SCHEMA, _safe_schema
 from .definitions import _POS_TO_TAGGER
 
@@ -209,7 +210,7 @@ def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None
                 # source has the word; it is never cleared for lack of one
                 if replacement:
                     cur.execute(f"UPDATE {s}.word SET ipa=%s, ipa_source=%s, ipa_derived_from=NULL WHERE id=%s",
-                                (replacement, source, wid))
+                                (bare_ipa(replacement), source, wid))
                     dist[f"replaced_derived_{source}"] += 1
                     # its clip voices the derived IPA: hand it back to the audio
                     # upgrade (which re-voices spelling-guess clips) for the real one
@@ -220,10 +221,10 @@ def compute_ipa(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = None
                 cur.execute(f"UPDATE {s}.word SET ipa_checked_at=now() WHERE id=%s", (wid,))
                 continue
             if not (existing_ipa or "").strip() and replacement:
-                cur.execute(f"UPDATE {s}.word SET ipa=%s, ipa_source=%s WHERE id=%s", (replacement, source, wid))
+                cur.execute(f"UPDATE {s}.word SET ipa=%s, ipa_source=%s WHERE id=%s", (bare_ipa(replacement), source, wid))
                 dist[f"backfilled_{source}"] += 1
             elif (existing_ipa or "").strip() and not had_valid_existing and replacement:
-                cur.execute(f"UPDATE {s}.word SET ipa=%s, ipa_source=%s WHERE id=%s", (replacement, source, wid))
+                cur.execute(f"UPDATE {s}.word SET ipa=%s, ipa_source=%s WHERE id=%s", (bare_ipa(replacement), source, wid))
                 dist[f"corrected_{source}"] += 1
             elif (existing_ipa or "").strip() and not had_valid_existing:
                 cur.execute(f"UPDATE {s}.word SET ipa=NULL, ipa_source=NULL WHERE id=%s", (wid,))
@@ -311,7 +312,7 @@ def backfill_ipa_from_oed(conn, schema: str = DEFAULT_SCHEMA, oed_schema: str = 
             if not audio.looks_like_english_ipa(candidate_ipa):
                 dist["failed_sanity_check"] += 1
                 continue
-            cur.execute(f"UPDATE {s}.word SET ipa=%s, ipa_source='oed' WHERE id=%s", (candidate_ipa, wid))
+            cur.execute(f"UPDATE {s}.word SET ipa=%s, ipa_source='oed' WHERE id=%s", (bare_ipa(candidate_ipa), wid))
             dist["backfilled"] += 1
     conn.commit()
     return dict(dist)
@@ -380,9 +381,10 @@ def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = No
     same cached, quota-respecting mw.lookup_api every other MW caller uses,
     so a word already looked up during fill_definitions'/maintain's Tier.MW
     costs nothing extra here, a genuinely fresh one still costs one of the
-    shared 1000/day API calls), else Azure IPA-guided synthesis where a
-    transcription is known (ours, kaikki's, or Wordnik's — backfilling
-    word.ipa along the way), else local Piper grapheme-only synthesis (no
+    shared 1000/day API calls), else local Piper speaking the word's IPA
+    where a transcription is known (ours, kaikki's, or Wordnik's —
+    backfilling word.ipa along the way; Azure synthesis was dropped in
+    2026-11 -- audio is made locally only), else local Piper grapheme-only synthesis (no
     IPA needed -- see audio.synthesize_piper's docstring for why this stays
     off Azure), else a 'none' placeholder so re-runs don't keep re-parsing
     the dump for words with nothing to find (in practice this should now be
@@ -430,15 +432,6 @@ def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = No
     lexicon = wiktextract.sound_lexicon(
         conn, lemmas, dump_path, progress_cb=lambda n: print(f"  ...{n} lines scanned"))
 
-    key, region = audio.azure_credentials()
-    if key and region and not audio.synthesize_azure("test", "tɛst", key, region):
-        # one probe, not a failed request per word: the key stopped working
-        # (HTTP 401) in Nov 2026; Piper's IPA-guided tier stands in
-        print("  (Azure isn't answering — using local Piper with each word's IPA instead)")
-        key = region = None
-    elif not (key and region):
-        print("  (no AZURE_SPEECH_KEY/AZURE_SPEECH_REGION in .env — IPA-guided audio from local Piper)")
-
     # NOT gated on mw_module.quota_exhausted() here, unlike
     # fill_definitions/pipeline.py's batch-level pre-check: mw.lookup_api
     # already checks its on-disk cache BEFORE it ever looks at the quota
@@ -466,7 +459,7 @@ def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = No
             if kaikki_ipa and not audio.looks_like_english_ipa(kaikki_ipa):
                 kaikki_ipa = None
             if kaikki_ipa and not (existing_ipa or "").strip():
-                cur.execute(f"UPDATE {s}.word SET ipa=%s, ipa_source='kaikki' WHERE id=%s", (kaikki_ipa, wid))
+                cur.execute(f"UPDATE {s}.word SET ipa=%s, ipa_source='kaikki' WHERE id=%s", (bare_ipa(kaikki_ipa), wid))
                 existing_ipa = kaikki_ipa
                 ipa_source = "kaikki"
 
@@ -505,20 +498,8 @@ def compute_audio(conn, schema: str = DEFAULT_SCHEMA, dump_path: str | None = No
                         row = ("mw", str(dest), None, mw_audio_url,
                                "Merriam-Webster recording; verify terms before public reuse")
                         dist["mw"] += 1
-            if row is None and (existing_ipa or "").strip() and key and region:
-                dialect = audio.ipa_dialect_for_source(ipa_source)
-                voice, lang = audio.voice_for_dialect(dialect)
-                keep_optional = dialect == "us"
-                clip = audio.synthesize_azure(lemma, existing_ipa, key, region,
-                                               voice=voice, lang=lang, keep_optional=keep_optional)
-                if clip:
-                    dest = audio.AUDIO_DIR / f"{lemma_lc}.mp3"
-                    dest.write_bytes(clip)
-                    ipa_used = audio.normalize_ipa(existing_ipa, keep_optional=keep_optional)
-                    row = ("azure", str(dest), ipa_used, voice, None)
-                    dist["azure"] += 1
             if row is None and (existing_ipa or "").strip():
-                # Azure's stand-in: the local Piper voice speaking the word's
+                # Local synthesis only (Azure dropped 2026-11): the Piper voice speaking the word's
                 # own IPA (audio.ipa_to_piper_phonemes refuses any symbol the
                 # voice wasn't trained on, so a refusal falls through below)
                 dialect = audio.ipa_dialect_for_source(ipa_source)

@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from ..model import RejectReason, normalize_pos
+from ..model import RejectReason, bare_ipa, normalize_pos
 from .core import DEFAULT_SCHEMA, _safe_schema
 from .sync import _invalidate_definition_dependents
 
@@ -207,7 +207,7 @@ def fill_definitions(conn, schema: str = DEFAULT_SCHEMA, *, limit: int = 0,
                             updated_at=now()
                         WHERE id=%s""",
                     (cand.definition, cand.definition_source, normalize_pos(cand.part_of_speech),
-                     cand.ipa, cand.etymology, bool(cand.synonyms), list(cand.synonyms),
+                     bare_ipa(cand.ipa), cand.etymology, bool(cand.synonyms), list(cand.synonyms),
                      flag_reason, flag_note, flag_reason, wid))
                 stats["defined"] += 1
             else:
@@ -306,7 +306,7 @@ def refill_definitions(conn, schema: str = DEFAULT_SCHEMA, limit: int = 0) -> di
                             updated_at=now()
                         WHERE id=%s""",
                     (cand.definition, cand.definition_source, normalize_pos(cand.part_of_speech),
-                     cand.ipa, cand.etymology, bool(cand.synonyms), list(cand.synonyms),
+                     bare_ipa(cand.ipa), cand.etymology, bool(cand.synonyms), list(cand.synonyms),
                      variant[0].value if variant else None, variant[1] if variant else None,
                      variant[0].value if variant else None, wid))
                 stats["filled"] += 1

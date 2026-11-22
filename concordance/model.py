@@ -107,6 +107,15 @@ _POS_ALIASES = {
 }
 
 
+def bare_ipa(ipa: str | None) -> str:
+    """IPA without its enclosing /slashes/ or [brackets] -- the page adds the
+    slashes itself, so a stored '/ˈbɛlfɹi/' showed as '//ˈbɛlfɹi//'."""
+    text = (ipa or "").strip()
+    while len(text) >= 2 and (text[0], text[-1]) in (("/", "/"), ("[", "]")):
+        text = text[1:-1].strip()
+    return text
+
+
 def normalize_pos(pos: str | None) -> str:
     """Fold any spelling/case/abbreviation variant to the canonical label.
     Blank/unrecognized input stays '' (this project's existing "no value"

@@ -1311,6 +1311,20 @@ def _migration_0014_analogy_anchor_review(conn: psycopg.Connection, s: str) -> N
         cur.execute(f"ALTER TABLE {s}.word_relation_edge ADD COLUMN IF NOT EXISTS anchor_checked_at timestamptz")
 
 
+def _migration_0015_bare_ipa(conn: psycopg.Connection, s: str) -> None:
+    """Strip enclosing /slashes/ or [brackets] from stored word.ipa -- the
+    word page adds its own slashes, so these showed as //…//. Writers now
+    store bare IPA (model.bare_ipa)."""
+    from ..model import bare_ipa
+
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT id, ipa FROM {s}.word
+                        WHERE ipa ~ '^\\s*[/\\[]' OR ipa ~ '[/\\]]\\s*$'""")
+        rows = [(bare_ipa(ipa), wid) for wid, ipa in cur.fetchall() if bare_ipa(ipa) != ipa]
+        if rows:
+            cur.executemany(f"UPDATE {s}.word SET ipa = %s WHERE id = %s", rows)
+
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, _migration_0001_baseline),
     (2, _migration_0002_compound_verdict),
@@ -1326,6 +1340,7 @@ MIGRATIONS: list[tuple[int, object]] = [
     (12, _migration_0012_dictcom_pron),
     (13, _migration_0013_ipa_derived_from),
     (14, _migration_0014_analogy_anchor_review),
+    (15, _migration_0015_bare_ipa),
 ]
 
 
