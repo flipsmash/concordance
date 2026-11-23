@@ -468,3 +468,98 @@ def test_traps_are_most_specific_first_not_alphabetical():
         asel._generality_cache.clear()
         with conn.cursor() as cur:
             cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+
+
+@pg
+def test_contrast_options_come_from_cs_side_and_never_complete_the_family():
+    """Wrong options are C's own neighbours through another relation (its
+    sibling, its narrower kind) plus one of D's siblings; a neighbour that
+    completes the tested family -- C's other hypernym on a definition-
+    pattern kind_of item -- is a right answer and is excluded."""
+    schema = "cc_test_analogies_contrast"
+    conn = db.connect(_URL)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    db.apply_schema(conn, schema)
+    try:
+        with conn.cursor() as cur:
+            def term(lemma, word_id=None):
+                cur.execute(f"""INSERT INTO {schema}.wn_relation_term (word_id, lemma, wn_pos, synset_name, gloss, is_common)
+                                VALUES (%s, %s, 'n', %s, %s, %s) RETURNING id""",
+                            (word_id, lemma, f"{lemma}.n.01", f"{lemma} gloss", word_id is None))
+                return cur.fetchone()[0]
+
+            def fan(term_id, rtype, lemma):
+                cur.execute(f"""INSERT INTO {schema}.wn_relation_fanout (term_id, relation_type, target_lemma, target_pos)
+                                VALUES (%s, %s, %s, 'n')""", (term_id, rtype, lemma))
+
+            wid = _seed_word(cur, schema, "celandine", "a plant with yellow flowers")
+            t_c, t_d = term("celandine", wid), term("herb")
+            _edge(cur, schema, t_c, t_d, "definition_pattern_kind_of", "is_a")
+            _edge(cur, schema, term("cure"), term("medication"), "hypernym", "is_a", anchor_status="ok")
+            fan(t_c, "hypernym", "plant")                 # WordNet ancestor: a second right answer
+            fan(t_c, "contrast_hypernym", "plant")
+            fan(t_c, "sibling_of_hypernym_parent", "buttercup")
+            fan(t_c, "contrast_hyponym", "lesser celandine")
+            fan(t_d, "sibling_of_hypernym_parent", "shrub")
+
+        a = asel.select_analogy_edge(conn, schema, wid, exclude_ids=set())
+        assert a is not None
+        assert "plant" in a.exclusion_lemmas
+        got = dict(a.contrast_lemmas)
+        assert "plant" not in got
+        assert got["buttercup"] == "contrast_sibling"
+        assert got["lesser celandine"] == "contrast_narrower"
+        assert got["shrub"] == "d_sibling"
+        assert a.anchor_edge_id is not None and a.tested_edge_id is not None
+        assert a.relation_family == "is_a"
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+
+
+def test_explanation_names_the_shared_relation():
+    assert asel.explain("hypernym", "Cure", "medication", "CELANDINE", "herb") == (
+        "In both pairs the first is a kind of the second: cure → medication, celandine → herb.")
+    assert "opposites" in asel.explain("antonym", "hot", "cold", "wet", "dry")
+
+
+def test_bank_check_rules():
+    """solve must pick D with nothing else fitting; a majority of blind
+    picks of D marks the item associative."""
+    from concordance import analogy_bank as ab
+
+    def item():
+        return {"target_word_id": 1, "a_lemma": "cure", "b_lemma": "medication", "c_lemma": "celandine",
+                "options": [{"label": x, "strategy": "s"} for x in ("buttercup", "shrub", "petal")]
+                + [{"label": "herb", "strategy": "answer"}]}
+
+    class FakeLLM:
+        def __init__(self, solve_also=(), blind_right=True):
+            self.solve_also, self.blind_right = solve_also, blind_right
+
+        def create_chat_completion(self, messages, **_):
+            import json as _json
+            items = _json.loads(messages[1]["content"])
+            out = []
+            for it in items:
+                herb = next(int(k) for k, v in it["options"].items() if v == "herb")
+                if "a" in it:
+                    also = [int(k) for k, v in it["options"].items() if v in self.solve_also]
+                    out.append({"i": it["i"], "answer": herb, "also": also})
+                else:
+                    other = next(int(k) for k, v in it["options"].items() if v != "herb")
+                    out.append({"i": it["i"], "answer": herb if self.blind_right else other})
+            return {"choices": [{"message": {"content": _json.dumps(out)}}]}
+
+    a, b, c = item(), item(), item()
+    ab.check_items(FakeLLM(blind_right=False), [a], {1: "a plant"})
+    ab.check_items(FakeLLM(blind_right=True), [b], {1: "a plant"})
+    ab.check_items(FakeLLM(solve_also=("shrub",)), [c], {1: "a plant"})
+    assert a["status"] == "ok" and a["blind_hits"] == 0
+    assert b["status"] == "associative" and b["blind_hits"] == 2
+    assert c["status"] == "failed" and "shrub" in c["check_note"]
+    p = ab.payload_fields({**item(), "style": "one_hard_term", "relation_type": "hypernym", "relation_family": "is_a",
+                           "tested_edge_id": 1, "anchor_edge_id": 2, "d_lemma": "herb"})
+    assert next(o["label"] for o in p["options"] if o["key"] == p["correct_option_key"]) == "herb"

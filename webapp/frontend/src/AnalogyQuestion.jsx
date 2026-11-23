@@ -43,6 +43,7 @@ function AnalogyQuestion({ question, result, disabled, onSelect }) {
           {result.is_correct ? 'Correct.' : `Not quite -- the answer was "${result.correct_label}".`}
         </p>
       )}
+      {result?.explanation && <p className="analogy-explanation">{result.explanation}</p>}
     </div>
   )
 }

@@ -671,6 +671,14 @@ def verify_candidates(cfg, candidates: list[RelationCandidate], batch_size: int 
 
 # --- sibling fanout (one-hard-term distractor plausibility) -------------------
 
+def _common_lemma_words(synset) -> set[str]:
+    """_lemma_words minus names: WordNet capitalises people, places and
+    Latin taxa (Daniel, Trondheim_Fjord, genus_Ondatra, Althea_officinalis)
+    -- useless as wrong options -- while marsh_mallow in the same synset stays."""
+    return {lem.name().replace("_", " ").lower() for lem in synset.lemmas()
+            if not any(part[:1].isupper() for part in lem.name().split("_"))}
+
+
 def compute_sibling_fanout(conn, schema: str, wn, d_term: dict) -> int:
     """For a term_b that just became a usable D under a verified is_a-family
     edge: its own synsets' hypernyms' hyponyms (co-hyponyms / "siblings"),
@@ -686,7 +694,7 @@ def compute_sibling_fanout(conn, schema: str, wn, d_term: dict) -> int:
         for sibling in parent.hyponyms():
             if sibling.name() == synset.name():
                 continue
-            for lw in _lemma_words(sibling):
+            for lw in _common_lemma_words(sibling):
                 if lw != lemma_lc:
                     siblings.add((lw, sibling.pos()))
     count = 0
@@ -699,6 +707,87 @@ def compute_sibling_fanout(conn, schema: str, wn, d_term: dict) -> int:
             )
             count += 1
     return count
+
+
+# --- contrast neighbourhood (analogy wrong options from C's own side) ---------
+#
+# A wrong option drawn from C's own neighbourhood through a DIFFERENT
+# relation than the one tested (CELANDINE's sibling buttercup, its part
+# petal, its more specific kind lesser celandine) can only be ruled out by
+# reading the relation off the example pair -- options from the anchor's
+# side can be ruled out just by being unrelated to C. Direct hops on the
+# canonical synset only: the point is a near, recognisable word.
+_CONTRAST_RELATIONS = {
+    "contrast_hyponym": lambda s: s.hyponyms(),
+    "contrast_hypernym": lambda s: s.hypernyms(),
+    "contrast_meronym": lambda s: s.part_meronyms() + s.member_meronyms() + s.substance_meronyms(),
+    "contrast_holonym": lambda s: s.part_holonyms() + s.member_holonyms() + s.substance_holonyms(),
+}
+
+
+def compute_contrast_fanout(conn, schema: str, wn, term: dict) -> int:
+    """Direct hyponyms/hypernyms/meronyms/holonyms of a vocab term's
+    canonical synset, plus its siblings (compute_sibling_fanout), as
+    wn_relation_fanout rows -- the pool analogy_select draws contrast
+    options from. Returns rows written."""
+    if wn is None or not term.get("synset_name"):
+        return 0
+    try:
+        synset = wn.synset(term["synset_name"])
+    except Exception:  # noqa: BLE001 -- stale synset name
+        return 0
+    lemma_lc = term["lemma"].lower()
+    rows = set()
+    for rel, fn in _CONTRAST_RELATIONS.items():
+        for other in fn(synset):
+            for lw in _common_lemma_words(other):
+                if lw != lemma_lc:
+                    rows.add((rel, lw, other.pos()))
+    with conn.cursor() as cur:
+        cur.executemany(
+            f"""INSERT INTO {schema}.wn_relation_fanout (term_id, relation_type, target_lemma, target_pos)
+                VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING""",
+            [(term["id"], *r) for r in rows])
+    return len(rows) + compute_sibling_fanout(conn, schema, wn, term)
+
+
+def backfill_contrasts(conn, schema: str, recompute: bool = False, log=print) -> dict:
+    """compute_contrast_fanout for every term on either side of a verified
+    edge that doesn't have it yet (C needs its neighbourhood; D needs its
+    siblings, the D-level wrong options). CPU only. Marked done by a
+    'contrast_scanned' row so a term with no neighbours isn't rescanned."""
+    wn = _load_wordnet()
+    if wn is None:
+        log("[analogy-contrasts] WordNet unavailable")
+        return {"terms": 0, "rows": 0}
+    with conn.cursor() as cur:
+        if recompute:
+            cur.execute(f"""DELETE FROM {schema}.wn_relation_fanout
+                            WHERE relation_type LIKE 'contrast\\_%%' OR relation_type = 'sibling_of_hypernym_parent'""")
+        cur.execute(
+            f"""SELECT t.id, t.word_id, t.lemma, t.wn_pos, t.synset_name, t.gloss
+                FROM {schema}.wn_relation_term t
+                WHERE t.synset_name IS NOT NULL
+                  AND EXISTS (SELECT 1 FROM {schema}.word_relation_edge e
+                              WHERE e.verification_status = 'verified' AND t.id IN (e.term_a_id, e.term_b_id))
+                  AND NOT EXISTS (SELECT 1 FROM {schema}.wn_relation_fanout f
+                                  WHERE f.term_id = t.id AND f.relation_type = 'contrast_scanned')
+                ORDER BY t.id""")
+        terms = cur.fetchall()
+    log(f"[analogy-contrasts] {len(terms)} terms to scan")
+    total = 0
+    for i, (tid, wid, lemma, wn_pos, synset_name, gloss) in enumerate(terms, 1):
+        term = {"id": tid, "word_id": wid, "lemma": lemma, "wn_pos": wn_pos, "synset_name": synset_name,
+                "gloss": gloss}
+        total += compute_contrast_fanout(conn, schema, wn, term)
+        with conn.cursor() as cur:
+            cur.execute(f"""INSERT INTO {schema}.wn_relation_fanout (term_id, relation_type, target_lemma, target_pos)
+                            VALUES (%s, 'contrast_scanned', '', '') ON CONFLICT DO NOTHING""", (tid,))
+        if i % 500 == 0:
+            conn.commit()
+            log(f"[analogy-contrasts]   ...{i}/{len(terms)}")
+    conn.commit()
+    return {"terms": len(terms), "rows": total}
 
 
 # --- orchestrator --------------------------------------------------------------
@@ -1065,4 +1154,80 @@ def review_anchors(conn, schema: str, cfg, limit: int = 0, recheck: bool = False
         finally:
             if own_llm:
                 llm.close()
+    return stats
+
+
+# --- anchor clarity (score-analogy-anchors) ------------------------------------
+#
+# ok/rejected is too coarse: TOUGH:FIGHTER and WARD:SOMEBODY pass review but
+# teach the relation far less well than CURE:MEDICATION. A 1-5 score lets
+# analogy_select prefer the clearest pairs (>= 4) and drop the vague ones
+# (<= 2) without re-litigating the binary review.
+
+_CLARITY_SYSTEM = (
+    "You rate EXAMPLE pairs for vocabulary analogy questions 'A is to B as C is to ___'. The example pair "
+    "must show a relationship so plainly that a reader applies the same relationship to C. For each pair, "
+    "given the intended relation, score 1-5: 5 = textbook example, both words familiar, relation obvious "
+    "at a glance (dog/animal for 'kind of'); 4 = clear; 3 = correct but takes a moment; 2 = loose, vague or "
+    "relies on an unusual sense; 1 = misleading, or the pair suggests a different relation. "
+    'Output ONLY a JSON array, one object per input, in order: [{"i": <int>, "score": <1-5>}].'
+)
+
+
+def score_anchors(conn, schema: str, cfg, limit: int = 0, rescore: bool = False, batch_size: int = 20,
+                  llm=None, log=print) -> dict:
+    """Give every review-ok anchor edge a 1-5 anchor_clarity. Resumable
+    (only unscored unless `rescore`); commits per batch."""
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT e.id, e.relation_type, ta.lemma, ta.gloss, tb.lemma, tb.gloss
+                FROM {schema}.word_relation_edge e
+                JOIN {schema}.wn_relation_term ta ON ta.id = e.term_a_id
+                JOIN {schema}.wn_relation_term tb ON tb.id = e.term_b_id
+                WHERE e.verification_status = 'verified' AND e.anchor_status = 'ok'
+                  {"" if rescore else "AND e.anchor_clarity IS NULL"}
+                ORDER BY e.id""" + (" LIMIT %s" if limit else ""),
+            (limit,) if limit else ())
+        rows = cur.fetchall()
+    stats = {"scored": 0, "no_verdict": 0, "dist": {}}
+    if not rows:
+        return stats
+    own_llm = llm is None
+    llm = llm or _load_llm(cfg)
+    try:
+        for i in range(0, len(rows), batch_size):
+            batch = rows[i:i + batch_size]
+            items = [{"i": j, "relation": _RELATION_TYPE_DESCRIPTIONS.get(rt, rt), "a": la, "a_def": (ga or "")[:160],
+                      "b": lb, "b_def": (gb or "")[:160]} for j, (_, rt, la, ga, lb, gb) in enumerate(batch)]
+            verdicts = None
+            for _ in range(_MAX_VERIFY_PASSES):
+                try:
+                    out = llm.create_chat_completion(
+                        messages=[{"role": "system", "content": _CLARITY_SYSTEM},
+                                  {"role": "user", "content": json.dumps(items, ensure_ascii=False)}],
+                        temperature=0.0, max_tokens=len(batch) * 14 + 64)
+                    verdicts = _parse_verify_response(out["choices"][0]["message"]["content"])
+                    break
+                except Exception:  # noqa: BLE001
+                    verdicts = None
+            by_i = {v["i"]: v for v in (verdicts or []) if isinstance(v, dict) and isinstance(v.get("i"), int)}
+            updates = []
+            for j, row in enumerate(batch):
+                try:
+                    score = int(by_i[j]["score"])
+                except (KeyError, TypeError, ValueError):
+                    stats["no_verdict"] += 1
+                    continue
+                score = min(5, max(1, score))
+                stats["dist"][score] = stats["dist"].get(score, 0) + 1
+                updates.append((score, row[0]))
+            with conn.cursor() as cur:
+                cur.executemany(f"UPDATE {schema}.word_relation_edge SET anchor_clarity = %s WHERE id = %s", updates)
+            conn.commit()
+            stats["scored"] += len(updates)
+            if (i // batch_size) % 10 == 0:
+                log(f"[score-analogy-anchors]   ...{i + len(batch)}/{len(rows)} ({stats['dist']})")
+    finally:
+        if own_llm:
+            llm.close()
     return stats

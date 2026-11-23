@@ -86,7 +86,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from psycopg.types.json import Json
 from pydantic import BaseModel, Field
 
-from concordance import analogy_select as asel
+from concordance import analogy_bank as abank
 from concordance import calibration as calib
 from concordance import distractors as dx
 from concordance import spaced_repetition as sr
@@ -200,6 +200,7 @@ class QuizAnswerResult(BaseModel):
     pair_results: list[dict] | None = None                 # matching: [{"word_id", "is_correct", "correct_slot"}]
     quiz_definition: str | None = None
     correct_option_key: str | None = None                   # analogy
+    explanation: str | None = None                          # analogy: the relation both pairs share
 
 
 class QuizFinishResult(BaseModel):
@@ -219,6 +220,7 @@ class QuizReviewItem(BaseModel):
     credit: float  # 1.0/0.0 for mc/true_false, fraction of pairs correct for matching
     target_lemma: str
     quiz_definition: str
+    explanation: str | None = None  # analogy
 
 
 class QuizReview(BaseModel):
@@ -373,27 +375,12 @@ def _select_analogy_targets(conn, body: QuizStartRequest, count: int, exclude_id
     Deliberately NOT reusing _select_target_words unchanged: analogy
     eligibility is "has a usable relation edge," a different predicate than
     quiz_definition IS NOT NULL, even though both also require quizzable."""
-    filters = ["w.active", "wd.quizzable = true", "w.quiz_definition IS NOT NULL"]
-    params: list = []
-    if exclude_ids:
-        filters.append("NOT (w.id = ANY(%s))")
-        params.append(list(exclude_ids))
-    if body.pos:
-        filters.append("w.part_of_speech = ANY(%s)")
-        params.append(body.pos)
-    if body.difficulty_min is not None:
-        filters.append("coalesce(wpd.personal_difficulty, wd.difficulty) >= %s")
-        params.append(body.difficulty_min)
-    if body.difficulty_max is not None:
-        filters.append("coalesce(wpd.personal_difficulty, wd.difficulty) <= %s")
-        params.append(body.difficulty_max)
+    filters, params = _analogy_word_filters(body, exclude_ids)
     filters.append(
         f"""EXISTS (SELECT 1 FROM {_main.SCHEMA}.wn_relation_term t
                     JOIN {_main.SCHEMA}.word_relation_edge e ON e.term_a_id = t.id
                     WHERE t.word_id = w.id AND e.verification_status = 'verified')"""
     )
-    _add_book_author_filter(body, filters, params)
-    _add_genre_filter(body, filters, params)
     where = " AND ".join(filters)
 
     order_by = "random()"
@@ -416,6 +403,99 @@ def _select_analogy_targets(conn, body: QuizStartRequest, count: int, exclude_id
         )
         rows = cur.fetchall()
     return [{"id": r[0], "lemma": r[1], "quiz_definition": r[2], "pos": r[3]} for r in rows]
+
+
+# No relation family may fill more than this share of a quiz's banked
+# analogies (is_a is ~70% of all edges); the cap only reorders, so a
+# narrow filter still gets a full quiz.
+_FAMILY_SHARE_CAP = 0.4
+
+
+def _recent_anchor_ids(conn, user_id: int, limit: int = 300) -> set[int]:
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT (q.payload->>'anchor_edge_id')::int FROM {_main.SCHEMA}.quiz_question q
+                JOIN {_main.SCHEMA}.quiz_session s ON s.id = q.session_id
+                WHERE s.user_id = %s AND q.question_type = 'analogy' AND q.payload ? 'anchor_edge_id'
+                ORDER BY q.id DESC LIMIT %s""",
+            (user_id, limit),
+        )
+        return {r[0] for r in cur.fetchall() if r[0] is not None}
+
+
+def _select_bank_targets(conn, body: QuizStartRequest, count: int, exclude_ids: set[int], user_id: int,
+                         recent_anchor_ids: set[int]) -> list[dict]:
+    """Words with a banked analogy item (analogy_bank.py) still valid under
+    today's edge/anchor reviews -- one item per word: a model-checked 'ok'
+    item first, an unseen anchor first, then 'associative'. Reordered so no
+    relation family takes more than _FAMILY_SHARE_CAP of the quiz."""
+    filters, params = _analogy_word_filters(body, exclude_ids)
+    where = " AND ".join(filters)
+    order_by = "random()"
+    if body.spaced_repetition_enabled:
+        order_by = "(wrs.next_eligible_at IS NULL OR wrs.next_eligible_at <= now()) DESC, random()"
+    s = _main.SCHEMA
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT * FROM (
+                    SELECT DISTINCT ON (w.id) w.id, w.lemma, w.quiz_definition, w.part_of_speech,
+                           ai.id, ai.tested_edge_id, ai.anchor_edge_id, ai.relation_type, ai.relation_family,
+                           ai.style, ai.a_lemma, ai.b_lemma, ai.c_lemma, ai.d_lemma, ai.d_word_id, ai.options,
+                           ai.status, wrs.next_eligible_at
+                    FROM {s}.analogy_item ai
+                    JOIN {s}.word w ON w.id = ai.target_word_id
+                    JOIN {s}.word_difficulty wd ON wd.word_id = w.id
+                    JOIN {s}.word_relation_edge te ON te.id = ai.tested_edge_id
+                    JOIN {s}.word_relation_edge ae ON ae.id = ai.anchor_edge_id
+                    LEFT JOIN {s}.word_review_schedule wrs ON wrs.word_id = w.id AND wrs.user_id = %s
+                    LEFT JOIN {s}.word_personal_difficulty wpd ON wpd.word_id = w.id AND wpd.user_id = %s
+                    WHERE {where} AND ai.status IN ('ok', 'associative')
+                      AND te.verification_status = 'verified' AND ae.verification_status = 'verified'
+                      AND ae.anchor_status IS DISTINCT FROM 'rejected' AND coalesce(ae.anchor_clarity, 3) >= 3
+                    ORDER BY w.id, ai.status = 'ok' DESC, ai.anchor_edge_id = ANY(%s), random()
+                ) x ORDER BY {order_by.replace('wrs.', 'x.')}
+                LIMIT %s""",
+            (user_id, user_id, *params, list(recent_anchor_ids), count * 3),
+        )
+        rows = cur.fetchall()
+    targets = []
+    for (wid, lemma, qdef, pos, iid, te, ae, rtype, fam, style, a, b, c, d, d_wid, options, status, _) in rows:
+        targets.append({"id": wid, "lemma": lemma, "quiz_definition": qdef, "pos": pos, "bank_item": {
+            "id": iid, "target_word_id": wid, "tested_edge_id": te, "anchor_edge_id": ae, "relation_type": rtype,
+            "relation_family": fam, "style": style, "a_lemma": a, "b_lemma": b, "c_lemma": c, "d_lemma": d,
+            "d_word_id": d_wid, "options": options, "status": status}})
+    cap = max(1, -(-int(_FAMILY_SHARE_CAP * 100) * body.length // 100))
+    counts: dict[str, int] = {}
+    first, rest = [], []
+    for t in targets:
+        fam = t["bank_item"]["relation_family"]
+        if counts.get(fam, 0) < cap:
+            counts[fam] = counts.get(fam, 0) + 1
+            first.append(t)
+        else:
+            rest.append(t)
+    return first + rest
+
+
+def _analogy_word_filters(body: QuizStartRequest, exclude_ids: set[int]) -> tuple[list[str], list]:
+    """The word-level filters both analogy target pools share."""
+    filters = ["w.active", "wd.quizzable = true", "w.quiz_definition IS NOT NULL"]
+    params: list = []
+    if exclude_ids:
+        filters.append("NOT (w.id = ANY(%s))")
+        params.append(list(exclude_ids))
+    if body.pos:
+        filters.append("w.part_of_speech = ANY(%s)")
+        params.append(body.pos)
+    if body.difficulty_min is not None:
+        filters.append("coalesce(wpd.personal_difficulty, wd.difficulty) >= %s")
+        params.append(body.difficulty_min)
+    if body.difficulty_max is not None:
+        filters.append("coalesce(wpd.personal_difficulty, wd.difficulty) <= %s")
+        params.append(body.difficulty_max)
+    _add_book_author_filter(body, filters, params)
+    _add_genre_filter(body, filters, params)
+    return filters, params
 
 
 def _distractor_cfg(body: QuizStartRequest, zero_orthographic: bool) -> dx.DistractorConfig:
@@ -578,50 +658,46 @@ def _build_analogy_payload(conn, target: dict, body: QuizStartRequest,
                             exclude_ids: set[int]) -> tuple[dict, list[int], list[int]] | None:
     """One MAT-style analogy question ('A is to B as C is to ___') about
     `target` -- None if no usable relation edge/anchor/distractor set could
-    be assembled (same shortfall contract as every other builder). `target`
-    comes from _select_analogy_targets, already guaranteed to have >=1
-    verified edge, but the SPECIFIC edge analogy_select picks still might
-    have no usable anchor, so this can still legitimately return None."""
-    assembly = asel.select_analogy_edge(conn, _main.SCHEMA, target["id"], exclude_ids,
-                                        option_count=body.analogy_choice_count)
-    if assembly is None:
-        return None
-
-    distractor_count = body.analogy_choice_count - 1
-    result = dx.select_analogy_distractors(
-        conn, _main.SCHEMA, assembly.style, assembly.d_pos, assembly.a_lemma, assembly.b_lemma,
-        assembly.target_word_id, assembly.d_term_id, assembly.exclusion_lemmas, assembly.trap_lemmas,
-        distractor_count, exclude_word_ids=exclude_ids, d_word_id=assembly.d_word_id,
-        anchor_synonyms=assembly.anchor_synonyms, d_lemma=assembly.d_lemma,
-        prompt_lemmas=[assembly.a_lemma, assembly.b_lemma, assembly.c_lemma],
-    )
-    if len(result.candidates) < distractor_count:
-        if not result.candidates:
+    be assembled (same shortfall contract as every other builder). A target
+    from _select_bank_targets carries a pre-built, model-checked item
+    (concordance/analogy_bank.py), used unless one of its words is already
+    in the session; otherwise the item is assembled live. target["_state"]
+    (start_quiz) carries the session's relation-family counts and anchors."""
+    state = target.get("_state") or {}
+    item = target.get("bank_item")
+    if item is not None and (
+            len(item["options"]) != body.analogy_choice_count
+            or item["anchor_edge_id"] in state.get("anchor_ids", set())
+            or any(o.get("word_id") in exclude_ids for o in item["options"] if o.get("strategy") != "answer")):
+        item = None
+    degraded = False
+    if item is None:
+        item = abank.assemble(conn, _main.SCHEMA, target["id"], exclude_ids,
+                              option_count=body.analogy_choice_count,
+                              family_counts=state.get("family_counts"),
+                              avoid_anchor_ids=state.get("anchor_ids"),
+                              recent_anchor_ids=state.get("recent_anchor_ids"))
+        if item is None:
             return None
-        distractor_count = len(result.candidates)
-
-    options = [{"key": f"opt{i}", "label": c["lemma"], "word_id": c.get("id")}
-               for i, c in enumerate(result.candidates[:distractor_count])]
-    correct_key = f"opt{len(options)}"
-    options.append({"key": correct_key, "label": assembly.d_lemma, "word_id": assembly.d_word_id})
-    random.shuffle(options)
-    correct_option_key = next(o["key"] for o in options if o["label"] == assembly.d_lemma)
-
-    prompt = f"{assembly.a_lemma.upper()} is to {assembly.b_lemma.upper()} as {assembly.c_lemma.upper()} is to ___"
-    payload = {
-        "prompt": prompt,
-        "options": options,
-        "correct_option_key": correct_option_key,
-        "style": assembly.style,
-        "degraded": result.degraded,
+        degraded = item["degraded"]
+    payload = abank.payload_fields(item)
+    payload.update({
+        "degraded": degraded,
+        "bank_item_id": item.get("id"),
+        "bank_status": item.get("status"),
         "target_lemma": target["lemma"],
         "quiz_definition": target["quiz_definition"],
         # From the actual assembled option count, not body.analogy_choice_count --
         # same "actual, not nominal" rule guessing_floor follows for every other type.
-        "guessing_floor": calib.guessing_floor("analogy", len(options)),
-    }
-    consumed_ids = [target["id"]] + [c["id"] for c in result.candidates[:distractor_count] if c.get("id")]
-    return payload, [assembly.target_word_id], consumed_ids
+        "guessing_floor": calib.guessing_floor("analogy", len(payload["options"])),
+    })
+    if state:
+        fam = item["relation_family"]
+        state["family_counts"][fam] = state["family_counts"].get(fam, 0) + 1
+        state["anchor_ids"].add(item["anchor_edge_id"])
+    consumed_ids = [target["id"]] + [o["word_id"] for o in item["options"]
+                                     if o.get("word_id") and o.get("strategy") != "answer"]
+    return payload, [item["target_word_id"]], consumed_ids
 
 
 _BUILDERS = {"mc": _build_mc_payload, "true_false": _build_tf_payload, "matching": _build_matching_payload,
@@ -753,8 +829,19 @@ def start_quiz(body: QuizStartRequest, user: dict = Depends(_main.require_user))
         # while random.choice(body.types) kept picking it anyway.
         # 2x + 20: a target's edges can all be skipped by analogy_select's
         # quality rules (spelling giveaways, taxa, no matching anchor).
-        analogy_pool = (_select_analogy_targets(conn, body, body.length * 2 + 20, used_ids, user["id"])
-                         if "analogy" in body.types else [])
+        # Banked (pre-built, model-checked) items first, then live assembly
+        # for words the bank doesn't cover yet.
+        analogy_pool: list[dict] = []
+        if "analogy" in body.types:
+            analogy_state = {"family_counts": {}, "anchor_ids": set(),
+                             "recent_anchor_ids": _recent_anchor_ids(conn, user["id"])}
+            analogy_pool = _select_bank_targets(conn, body, body.length, used_ids, user["id"],
+                                                analogy_state["recent_anchor_ids"])
+            banked = {t["id"] for t in analogy_pool}
+            analogy_pool += [t for t in _select_analogy_targets(conn, body, body.length * 2 + 20, used_ids, user["id"])
+                             if t["id"] not in banked]
+            for t in analogy_pool:
+                t["_state"] = analogy_state
         analogy_idx = 0
 
         # (question_type, payload, target_word_ids -- what quiz_answer rows get
@@ -948,6 +1035,7 @@ def answer_quiz_question(session_id: int, body: QuizAnswerSubmit,
         result.correct_option_key = payload["correct_option_key"]
         result.correct_label = next((o["label"] for o in payload["options"]
                                       if o["key"] == payload["correct_option_key"]), "")
+        result.explanation = payload.get("explanation")
     else:  # true_false
         result.correct_answer = payload["is_true"]
     return result
@@ -1060,6 +1148,7 @@ def review_quiz(session_id: int, user: dict = Depends(_main.require_user)) -> Qu
             seq=seq, question_type=qtype, prompt=prompt, your_label=your_label,
             correct_label=correct_label, is_correct=is_correct, credit=credit,
             target_lemma=payload["target_lemma"], quiz_definition=payload["quiz_definition"],
+            explanation=payload.get("explanation") if qtype == "analogy" else None,
         ))
 
     return QuizReview(session_id=session_id, score_pct=session["score_pct"], items=items)

@@ -1325,6 +1325,44 @@ def _migration_0015_bare_ipa(conn: psycopg.Connection, s: str) -> None:
             cur.executemany(f"UPDATE {s}.word SET ipa = %s WHERE id = %s", rows)
 
 
+def _migration_0016_analogy_bank(conn: psycopg.Connection, s: str) -> None:
+    """Analogy item bank (`concordance build-analogy-bank`): questions built
+    and checked by the local model ahead of time, so the quiz serves ready,
+    verified items instead of assembling (and often failing) live. Plus a
+    1-5 clarity score for anchor (example) pairs."""
+    with conn.cursor() as cur:
+        cur.execute(f"ALTER TABLE {s}.word_relation_edge ADD COLUMN IF NOT EXISTS anchor_clarity smallint")
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {s}.analogy_item (
+                id              serial PRIMARY KEY,
+                target_word_id  integer NOT NULL REFERENCES {s}.word(id) ON DELETE CASCADE,
+                tested_edge_id  integer NOT NULL REFERENCES {s}.word_relation_edge(id) ON DELETE CASCADE,
+                anchor_edge_id  integer NOT NULL REFERENCES {s}.word_relation_edge(id) ON DELETE CASCADE,
+                relation_type   text NOT NULL,
+                relation_family text,
+                style           text NOT NULL,
+                a_lemma text NOT NULL, b_lemma text NOT NULL, c_lemma text NOT NULL, d_lemma text NOT NULL,
+                d_word_id       integer,
+                options         jsonb NOT NULL,   -- [(label, word_id, strategy)], answer included
+                -- 'ok': the model solved it with the example pair, no other option fits, and it
+                -- could NOT pick the answer without the pair; 'associative': solvable from C
+                -- alone (served only as a fallback); 'failed': wrong or ambiguous.
+                status          text NOT NULL,
+                check_note      text,
+                blind_hits      smallint,
+                checked_at      timestamptz NOT NULL DEFAULT now(),
+                UNIQUE (tested_edge_id, anchor_edge_id)
+            )""")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS analogy_item_word_idx ON {s}.analogy_item (target_word_id, status)")
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {s}.analogy_bank_scan (
+                word_id    integer PRIMARY KEY REFERENCES {s}.word(id) ON DELETE CASCADE,
+                scanned_at timestamptz NOT NULL DEFAULT now(),
+                built      integer NOT NULL,
+                ok         integer NOT NULL
+            )""")
+
+
 MIGRATIONS: list[tuple[int, object]] = [
     (1, _migration_0001_baseline),
     (2, _migration_0002_compound_verdict),
@@ -1341,6 +1379,7 @@ MIGRATIONS: list[tuple[int, object]] = [
     (13, _migration_0013_ipa_derived_from),
     (14, _migration_0014_analogy_anchor_review),
     (15, _migration_0015_bare_ipa),
+    (16, _migration_0016_analogy_bank),
 ]
 
 

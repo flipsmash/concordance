@@ -65,6 +65,7 @@ function QuizReview() {
               </span>
             </div>
             <p className="quiz-review-definition">{item.quiz_definition}</p>
+            {item.explanation && <p className="analogy-explanation">{item.explanation}</p>}
             {item.credit < 1 && (
               <p className="quiz-review-your-answer">
                 {item.question_type === 'matching'

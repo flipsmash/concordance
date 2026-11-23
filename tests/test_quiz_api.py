@@ -172,7 +172,7 @@ def test_quiz_round_trip_and_admin_settings_http():
         # ...so correctness is withheld now, unlike the earlier immediate-mode session.
         assert ans2 == {"accepted": True, "is_correct": None, "correct_word_id": None,
                          "correct_label": None, "correct_answer": None, "pair_results": None,
-                         "quiz_definition": None, "correct_option_key": None}
+                         "quiz_definition": None, "correct_option_key": None, "explanation": None}
     finally:
         main.SCHEMA = old_schema
         cleanup = db.connect(_URL)

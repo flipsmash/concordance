@@ -376,6 +376,24 @@ batch commits as its own unit. Runs as the last step of `maintain` by
 default (`--skip-analogies` to defer it) — don't run standalone
 concurrently with `maintain`, both load a local model onto the same GPU.
 
+`maintain` follows it with four more analogy steps, each also runnable alone:
+
+```bash
+concordance review-analogy-anchors   # ok/rejected for example (A:B) pairs
+concordance analogy-contrasts        # CPU: each term's WordNet neighbours (wrong options)
+concordance score-analogy-anchors    # 1–5 clarity per ok example pair
+concordance build-analogy-bank       # pre-built items, checked by the local model
+concordance analogy-stats            # accuracy by relation / option source; bank contents
+```
+
+Wrong options come from C's own neighbourhood through a different relation
+(siblings, narrower kinds, parts…), so an item can only be solved by reading
+the relation off the example pair. The bank keeps an item only if the model
+solves it, finds no second option that fits, and *can't* find the answer
+without the example pair (majority over three shuffles); the quiz serves
+banked items first, with no relation family over 40% of a quiz, and
+assembles live for words not banked yet.
+
 ## OED reference dictionary
 
 A separate, standalone ingestion pipeline over scanned OED volume PDFs, into

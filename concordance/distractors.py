@@ -591,7 +591,8 @@ def select_analogy_distractors(conn, schema: str, style: str, d_pos: str, a_lemm
                                 d_word_id: int | None = None,
                                 anchor_synonyms: set[str] | None = None,
                                 d_lemma: str | None = None,
-                                prompt_lemmas: list[str] | None = None) -> DistractorResult:
+                                prompt_lemmas: list[str] | None = None,
+                                contrast_lemmas: list[tuple[str, str]] | None = None) -> DistractorResult:
     """`count` wrong D-options for an analogy item. `d_pos` is the canonical
     POS (noun/verb/adjective/adverb) of the correct answer D, used to
     POS-match every strategy. `c_word_id` feeds the vocab_only style's
@@ -614,7 +615,11 @@ def select_analogy_distractors(conn, schema: str, style: str, d_pos: str, a_lemm
     (D included, via `d_lemma`) may be variants or synonyms of each other
     (_options_clash) -- three spellings of one wrong word mark all of them
     wrong. Nor may an option be spelled like a word already in the prompt
-    (`prompt_lemmas`: A, B, C) -- 'cue'/'clew' beside CLUE."""
+    (`prompt_lemmas`: A, B, C) -- 'cue'/'clew' beside CLUE.
+
+    Order: `contrast_lemmas` first (C's own neighbours through another
+    relation, so the option can only be ruled out by reading the relation
+    off the anchor), then the anchor-side traps, then the old fallbacks."""
     exclude_ids = set(exclude_word_ids or set()) | {c_word_id}  # never offer C itself
     exclusion_lemmas = {l.lower() for l in exclusion_lemmas}
     anchor_synonyms = {l.lower() for l in (anchor_synonyms or set())}
@@ -650,7 +655,15 @@ def select_analogy_distractors(conn, schema: str, style: str, d_pos: str, a_lemm
                 if c.get("id"):
                     exclude_ids.add(c["id"])
 
-        _take(_trap_candidates(cur, schema, trap_lemmas, d_pos, exclude_ids, count * 2))
+        for lemma, strategy in contrast_lemmas or []:
+            if len(picked) >= count:
+                break
+            cand = _trap_candidates(cur, schema, [lemma], d_pos, exclude_ids, 1)
+            for c in cand:
+                c["strategy"] = strategy
+            _take(cand)
+        if len(picked) < count:
+            _take(_trap_candidates(cur, schema, trap_lemmas, d_pos, exclude_ids, count * 2))
 
         degraded = False
         if len(picked) < count:

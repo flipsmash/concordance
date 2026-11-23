@@ -78,6 +78,15 @@ Item quality rules (2026-11-20 review of live items):
     DIVULGER -> divulge) is skipped outright: the answer can be read off C.
     A "which form?" variant (wrong options = other forms of C's stem) was
     tried and dropped -- picking the suffix is still spelling, not meaning.
+  * Wrong options come first from C's OWN neighbourhood through a relation
+    other than the tested one (2026-11-22, _contrast_lemmas): its siblings,
+    narrower kinds, parts, wholes, opposite... plus one or two of D's
+    siblings, so D isn't the lone general word. Measured on the old design:
+    in 62% of items the answer was by far the option closest in meaning to
+    C, because every wrong option came from the anchor's side -- the item
+    could be solved without the anchor. Exclusion now covers the tested
+    relation's whole family (a definition-pattern kind_of item still
+    excludes C's WordNet hypernyms; a member-of word on a part-of item).
   * Skipped too: holonym_member edges whose answer is a Latin taxon (prunus,
     ranunculaceae -- trivia, not vocabulary), and edges where C is a plural/
     inflected form (PHOTOMICROGRAPHS -> picture) of a word D's form doesn't
@@ -153,6 +162,12 @@ class AnalogyAssembly:
     # A's and B's own synonyms -- a trap/option equal to one is just the
     # anchor restated (FRANCE:EC offering 'eec'/'common market').
     anchor_synonyms: set[str] = field(default_factory=set)
+    # Wrong options from C's own neighbourhood through another relation,
+    # as (lemma, strategy) -- see _contrast_lemmas.
+    contrast_lemmas: list[tuple[str, str]] = field(default_factory=list)
+    tested_edge_id: int | None = None
+    anchor_edge_id: int | None = None
+    relation_family: str | None = None
 
 
 def _type_group(relation_type: str) -> str:
@@ -162,6 +177,23 @@ def _type_group(relation_type: str) -> str:
 def _group_members(relation_type: str) -> list[str]:
     g = _type_group(relation_type)
     return sorted({g, *(t for t, grp in _TYPE_GROUP.items() if grp == g)})
+
+
+def _family(relation_type: str) -> str | None:
+    from .analogies import _RELATION_FAMILY
+
+    return _RELATION_FAMILY.get(relation_type)
+
+
+def _family_members(relation_type: str) -> list[str]:
+    """Every relation type in the tested one's family: a word completing
+    ANY of them reads as a right answer (a member-of word on a part-of
+    item), so exclusion covers them all."""
+    from .analogies import _RELATION_FAMILY
+
+    fam = _RELATION_FAMILY.get(relation_type)
+    return sorted({relation_type, *_group_members(relation_type),
+                   *(t for t, f in _RELATION_FAMILY.items() if fam and f == fam)})
 
 
 def _wn_pos_eq(p: str | None) -> str | None:
@@ -225,7 +257,8 @@ def _tested_edge_candidates(cur, schema: str, target_term_id: int, style: str, e
 
 
 def _find_anchor(cur, schema: str, relation_type: str, pos_a: str, pos_b: str, style: str,
-                  exclude_term_ids: set[int], exclude_word_ids: set[int]) -> dict | None:
+                  exclude_term_ids: set[int], exclude_word_ids: set[int],
+                  avoid_edge_ids: set[int] | None = None, recent_edge_ids: set[int] | None = None) -> dict | None:
     """A DIFFERENT verified edge testing the same relation (relation_type,
     or one stating it from another source -- _TYPE_GROUP) with the same POS
     on each side, matching style (vocab<->vocab for style A / ordinary<->
@@ -234,7 +267,7 @@ def _find_anchor(cur, schema: str, relation_type: str, pos_a: str, pos_b: str, s
     vocab_clause = "IS NOT NULL" if style == "vocab_only" else "IS NULL"
     cur.execute(
         f"""SELECT ta.id, tb.id, ta.lemma, tb.lemma, ta.word_id, tb.word_id,
-                   ta.synonym_lemmas, tb.synonym_lemmas
+                   ta.synonym_lemmas, tb.synonym_lemmas, e.id
             FROM {schema}.word_relation_edge e
             JOIN {schema}.wn_relation_term ta ON ta.id = e.term_a_id
             JOIN {schema}.wn_relation_term tb ON tb.id = e.term_b_id
@@ -242,23 +275,29 @@ def _find_anchor(cur, schema: str, relation_type: str, pos_a: str, pos_b: str, s
               AND e.verification_status = 'verified'
               AND e.anchor_status IS DISTINCT FROM 'rejected'
               AND ta.word_id {vocab_clause} AND tb.word_id {vocab_clause}
-            ORDER BY (e.anchor_status = 'ok') DESC NULLS LAST, random() LIMIT 40""",
+              AND coalesce(e.anchor_clarity, 3) >= 3
+            ORDER BY (e.anchor_status = 'ok') DESC NULLS LAST, coalesce(e.anchor_clarity, 3) >= 4 DESC,
+                     random() LIMIT 40""",
         (_group_members(relation_type), pos_a, pos_b),
     )
-    for ta_id, tb_id, ta_lemma, tb_lemma, ta_word_id, tb_word_id, ta_syns, tb_syns in cur.fetchall():
+    rows = [r for r in cur.fetchall() if r[8] not in (avoid_edge_ids or set())]
+    # Anchors this user saw recently go last, not out: a small pool still works.
+    rows.sort(key=lambda r: r[8] in (recent_edge_ids or set()))
+    for ta_id, tb_id, ta_lemma, tb_lemma, ta_word_id, tb_word_id, ta_syns, tb_syns, edge_id in rows:
         if ta_id in exclude_term_ids or tb_id in exclude_term_ids:
             continue
         if (ta_word_id is not None and ta_word_id in exclude_word_ids) or \
            (tb_word_id is not None and tb_word_id in exclude_word_ids):
             continue
-        return {"a_id": ta_id, "b_id": tb_id, "a_lemma": ta_lemma, "b_lemma": tb_lemma,
+        return {"edge_id": edge_id, "a_id": ta_id, "b_id": tb_id, "a_lemma": ta_lemma, "b_lemma": tb_lemma,
                 "synonyms": {x.lower() for x in (ta_syns or []) + (tb_syns or [])}}
     return None
 
 
-def _fanout_lemmas(cur, schema: str, term_id: int, relation_type: str) -> set[str]:
-    cur.execute(f"SELECT target_lemma FROM {schema}.wn_relation_fanout WHERE term_id = %s AND relation_type = %s",
-                (term_id, relation_type))
+def _fanout_lemmas(cur, schema: str, term_id: int, relation_type: str | list[str]) -> set[str]:
+    types = [relation_type] if isinstance(relation_type, str) else relation_type
+    cur.execute(f"SELECT target_lemma FROM {schema}.wn_relation_fanout WHERE term_id = %s AND relation_type = ANY(%s)",
+                (term_id, types))
     return {r[0] for r in cur.fetchall()}
 
 
@@ -322,13 +361,107 @@ def _trap_lemmas(cur, schema: str, anchor_term_ids: list[int], relation_type: st
     return out
 
 
+# Neighbour kinds stored by analogies.backfill_contrasts / extract_wordnet_
+# edges, mapped to the relation family a neighbour of that kind completes
+# FROM C. None = a relation no item tests in that direction (siblings,
+# more specific kinds, parts of C), so always a wrong answer.
+_CONTRAST_KINDS = {
+    "sibling_of_hypernym_parent": None,
+    "contrast_hyponym": None,
+    "contrast_meronym": None,
+    "contrast_hypernym": "is_a",
+    "contrast_holonym": "part_of",
+    "antonym": "opposite",
+    "similar_to": "similar",
+    "derivationally_related": "derived",
+    "attribute": "attribute",
+}
+_CONTRAST_STRATEGY = {
+    "sibling_of_hypernym_parent": "contrast_sibling", "contrast_hyponym": "contrast_narrower",
+    "contrast_meronym": "contrast_part", "contrast_hypernym": "contrast_broader",
+    "contrast_holonym": "contrast_whole", "antonym": "contrast_opposite", "similar_to": "contrast_similar",
+    "derivationally_related": "contrast_derived", "attribute": "contrast_attribute",
+}
+_CONTRAST_PER_KIND = 4
+
+
+def _zipf(lemma: str) -> float:
+    from wordfreq import zipf_frequency
+
+    return zipf_frequency(lemma, "en")
+
+
+def _contrast_lemmas(cur, schema: str, c_term_id: int, d_term_id: int, relation_type: str,
+                     d_wn_pos: str | None, d_lemma: str, drop: set[str]) -> list[tuple[str, str]]:
+    """Wrong options that stand in some OTHER relation to C (its siblings,
+    narrower kinds, parts, opposite...), POS-matched to D, plus D's own
+    siblings (one option at D's level of generality, so the general word
+    isn't the odd one out). Within each kind, words closest to D in
+    frequency and length first, so D doesn't stand out as the only common
+    or the only one-word option. Kinds interleaved: C-side, D-side, C-side..."""
+    family = _family(relation_type)
+    kinds = [k for k, fam in _CONTRAST_KINDS.items() if fam is None or fam != family]
+    want_pos = _wn_pos_eq(d_wn_pos)
+    d_zipf, d_words = _zipf(d_lemma), len(d_lemma.split())
+    cur.execute(f"""SELECT relation_type, target_lemma, target_pos FROM {schema}.wn_relation_fanout
+                    WHERE term_id = %s AND relation_type = ANY(%s)""", (c_term_id, kinds))
+    rows = [(k, lemma, pos, "c") for k, lemma, pos in cur.fetchall()]
+    cur.execute(f"""SELECT target_lemma, target_pos FROM {schema}.wn_relation_fanout
+                    WHERE term_id = %s AND relation_type = 'sibling_of_hypernym_parent'""", (d_term_id,))
+    rows += [("d_sibling", lemma, pos, "d") for lemma, pos in cur.fetchall()]
+
+    by_kind: dict[str, list[tuple[float, str]]] = {}
+    seen: set[str] = set()
+    for kind, lemma, pos, _side in rows:
+        lc = lemma.lower()
+        if not lemma or lc in drop or lc in seen or lc in _TOO_GENERIC_FOR_TRAP:
+            continue
+        if want_pos and _wn_pos_eq(pos) != want_pos:
+            continue
+        if _TAXON_SYNONYM.search(lc) or not re.fullmatch(r"[a-z][a-z' -]*[a-z]", lc):
+            continue
+        seen.add(lc)
+        score = abs(_zipf(lemma) - d_zipf) + (1.0 if len(lemma.split()) != d_words else 0.0) + random.random()
+        by_kind.setdefault(kind, []).append((score, lemma))
+    c_lists, d_list = [], []
+    for kind, items in by_kind.items():
+        items.sort()
+        picked = [(lemma, "d_sibling" if kind == "d_sibling" else _CONTRAST_STRATEGY[kind])
+                  for _, lemma in items[:_CONTRAST_PER_KIND]]
+        (d_list if kind == "d_sibling" else c_lists).append(picked)
+    random.shuffle(c_lists)
+    late: list[tuple[str, str]] = []
+    if family == "is_a":
+        # On a kind-of item C's own siblings read as a second answer (bank
+        # pilot 2026-11-22: haversack -> kitbag, sigmoidoscope -> laparoscope
+        # sank 27% of the items they appeared in, D's siblings 9%), so they
+        # go last.
+        late = next((lst for lst in c_lists if lst and lst[0][1] == "contrast_sibling"), [])
+        c_lists = [lst for lst in c_lists if lst is not late]
+    c_flat = [x for i in range(_CONTRAST_PER_KIND) for lst in c_lists if i < len(lst) for x in [lst[i]]]
+    out: list[tuple[str, str]] = []
+    d_iter = iter(d_list[0] if d_list else [])
+    for i, item in enumerate(c_flat):
+        out.append(item)
+        if i in (0, 3):  # D-level options as the 2nd and 5th
+            nxt = next(d_iter, None)
+            if nxt:
+                out.append(nxt)
+    out.extend(d_iter)
+    return out + late
+
+
 def _exclusion_lemmas(cur, schema: str, c_term_id: int, d_term_id: int, d_lemma: str,
                        d_synonyms: list[str], relation_type: str) -> set[str]:
-    excl = _fanout_lemmas(cur, schema, c_term_id, relation_type)
+    # The whole family, not just relation_type: a definition-pattern kind_of
+    # edge has no fanout of its own, but C's WordNet hypernyms are still
+    # right answers to it.
+    types = _family_members(relation_type)
+    excl = _fanout_lemmas(cur, schema, c_term_id, types)
     if not excl:
         # C has no fanout for this relation (no synset, e.g. a definition-pattern-only
         # edge) -- D's own closure is the provably-equivalent fallback, see module docstring.
-        excl = _fanout_lemmas(cur, schema, d_term_id, relation_type)
+        excl = _fanout_lemmas(cur, schema, d_term_id, types)
     excl = {e.lower() for e in excl}
     excl.add(d_lemma.lower())
     excl |= {s.lower() for s in d_synonyms}
@@ -368,7 +501,16 @@ def _is_inflected_form(cur, c: str, pos: str) -> bool:
 
 
 def select_analogy_edge(conn, schema: str, target_word_id: int, exclude_ids: set[int],
-                        option_count: int = 4) -> "AnalogyAssembly | None":
+                        option_count: int = 4, family_counts: dict[str, int] | None = None,
+                        avoid_anchor_ids: set[int] | None = None,
+                        recent_anchor_ids: set[int] | None = None,
+                        skip_tested_edge_ids: set[int] | None = None,
+                        extra_exclusions: set[str] | None = None) -> "AnalogyAssembly | None":
+    """`family_counts`: relation families already in the session -- the
+    word's edges in the least-used family are tried first, so one family
+    (is_a, about 70% of edges) doesn't fill the quiz. `avoid_anchor_ids`
+    (this session's anchors) are never reused; `recent_anchor_ids` (this
+    user's recent ones) only as a last resort."""
     from .model import wordnet_pos
 
     with conn.cursor() as cur:
@@ -377,53 +519,87 @@ def select_analogy_edge(conn, schema: str, target_word_id: int, exclude_ids: set
             return None
         c_lemma = target_term["lemma"]
 
-        styles = ["vocab_only", "one_hard_term"]
-        random.shuffle(styles)
-        for style in styles:
-            tested_candidates = _tested_edge_candidates(cur, schema, target_term["id"], style, exclude_ids)
-            for tested in tested_candidates:
-                d_lemma = tested["d_lemma"]
-                if tested["relation_type"] == "holonym_member" and _is_taxon(tested["d_gloss"], tested["d_synonyms"]):
-                    continue
-                if tested["pos_a"] in ("noun", "verb") and tested["pos_a"] == tested["pos_b"] \
-                        and _is_inflected_form(cur, c_lemma, tested["pos_a"]):
-                    continue
+        candidates = [(style, t) for style in ("vocab_only", "one_hard_term")
+                      for t in _tested_edge_candidates(cur, schema, target_term["id"], style, exclude_ids)]
+        random.shuffle(candidates)
+        candidates.sort(key=lambda st: (family_counts or {}).get(_family(st[1]["relation_type"]), 0))
+        for style, tested in candidates:
+            if tested["edge_id"] in (skip_tested_edge_ids or set()):
+                continue
+            d_lemma = tested["d_lemma"]
+            if tested["relation_type"] == "holonym_member" and _is_taxon(tested["d_gloss"], tested["d_synonyms"]):
+                continue
+            if tested["pos_a"] in ("noun", "verb") and tested["pos_a"] == tested["pos_b"] \
+                    and _is_inflected_form(cur, c_lemma, tested["pos_a"]):
+                continue
 
-                if shares_stem(c_lemma, d_lemma):
-                    continue  # answer spelled inside C (DIVULGER/divulge) -- no test of meaning
-                exclusion_lemmas = _exclusion_lemmas(
-                    cur, schema, target_term["id"], tested["term_b_id"], d_lemma,
-                    tested["d_synonyms"], tested["relation_type"],
-                )
+            if shares_stem(c_lemma, d_lemma):
+                continue  # answer spelled inside C (DIVULGER/divulge) -- no test of meaning
+            exclusion_lemmas = _exclusion_lemmas(
+                cur, schema, target_term["id"], tested["term_b_id"], d_lemma,
+                tested["d_synonyms"], tested["relation_type"],
+            ) | {x.lower() for x in (extra_exclusions or set())}
 
-                anchor = _find_anchor(
-                    cur, schema, tested["relation_type"], tested["pos_a"], tested["pos_b"], style,
-                    exclude_term_ids={target_term["id"], tested["term_b_id"]},
-                    exclude_word_ids=exclude_ids,
-                )
-                if anchor is None:
-                    continue
-                a_lemma, b_lemma = anchor["a_lemma"], anchor["b_lemma"]
-                anchor_syns = anchor["synonyms"] | {a_lemma.lower(), b_lemma.lower()}
+            anchor = _find_anchor(
+                cur, schema, tested["relation_type"], tested["pos_a"], tested["pos_b"], style,
+                exclude_term_ids={target_term["id"], tested["term_b_id"]},
+                exclude_word_ids=exclude_ids,
+                avoid_edge_ids=avoid_anchor_ids, recent_edge_ids=recent_anchor_ids,
+            )
+            if anchor is None:
+                continue
+            a_lemma, b_lemma = anchor["a_lemma"], anchor["b_lemma"]
+            anchor_syns = anchor["synonyms"] | {a_lemma.lower(), b_lemma.lower()}
 
-                drop = (exclusion_lemmas | anchor_syns
-                        | {c_lemma.lower(), d_lemma.lower()}
-                        | {s.lower() for s in target_term["synonym_lemmas"]})
-                d_wn_pos = tested["d_wn_pos"] or wordnet_pos(tested["pos_b"])
-                trap_lemmas = _trap_lemmas(cur, schema, [anchor["a_id"], anchor["b_id"]],
-                                           tested["relation_type"], d_wn_pos, drop)
-                if tested["relation_type"] == "antonym":
-                    # Words LIKE C are the natural wrong answer for "opposite of C".
-                    like_c = ({s.lower() for s in target_term["synonym_lemmas"]}
-                              | {x.lower() for x in _fanout_lemmas(cur, schema, target_term["id"], "similar_to")})
-                    like_c -= exclusion_lemmas | {c_lemma.lower()}
-                    trap_lemmas = random.sample(sorted(like_c), len(like_c)) + trap_lemmas
+            drop = (exclusion_lemmas | anchor_syns
+                    | {c_lemma.lower(), d_lemma.lower()}
+                    | {s.lower() for s in target_term["synonym_lemmas"]})
+            d_wn_pos = tested["d_wn_pos"] or wordnet_pos(tested["pos_b"])
+            trap_lemmas = _trap_lemmas(cur, schema, [anchor["a_id"], anchor["b_id"]],
+                                       tested["relation_type"], d_wn_pos, drop)
+            contrast = _contrast_lemmas(cur, schema, target_term["id"], tested["term_b_id"],
+                                        tested["relation_type"], d_wn_pos, d_lemma, drop)
+            if tested["relation_type"] == "antonym":
+                # Words LIKE C are the natural wrong answer for "opposite of C".
+                like_c = ({s.lower() for s in target_term["synonym_lemmas"]}
+                          | {x.lower() for x in _fanout_lemmas(cur, schema, target_term["id"], "similar_to")})
+                like_c -= exclusion_lemmas | {c_lemma.lower()}
+                trap_lemmas = random.sample(sorted(like_c), len(like_c)) + trap_lemmas
 
-                return AnalogyAssembly(
-                    style=style, a_lemma=a_lemma, b_lemma=b_lemma, c_lemma=c_lemma,
-                    relation_type=tested["relation_type"], target_word_id=target_word_id,
-                    d_term_id=tested["term_b_id"], d_word_id=tested["d_word_id"], d_lemma=d_lemma,
-                    d_pos=tested["pos_b"], exclusion_lemmas=exclusion_lemmas, trap_lemmas=trap_lemmas,
-                    anchor_synonyms=anchor_syns,
-                )
+            return AnalogyAssembly(
+                style=style, a_lemma=a_lemma, b_lemma=b_lemma, c_lemma=c_lemma,
+                relation_type=tested["relation_type"], target_word_id=target_word_id,
+                d_term_id=tested["term_b_id"], d_word_id=tested["d_word_id"], d_lemma=d_lemma,
+                d_pos=tested["pos_b"], exclusion_lemmas=exclusion_lemmas, trap_lemmas=trap_lemmas,
+                anchor_synonyms=anchor_syns, contrast_lemmas=contrast,
+                tested_edge_id=tested["edge_id"], anchor_edge_id=anchor["edge_id"],
+                relation_family=_family(tested["relation_type"]),
+            )
     return None
+
+
+_EXPLAIN = {
+    "hypernym": "the first is a kind of the second",
+    "definition_pattern_kind_of": "the first is a kind of the second",
+    "holonym_part": "the first is part of the second",
+    "definition_pattern_part_of": "the first is part of the second",
+    "holonym_member": "the first is a member of the second",
+    "holonym_substance": "the first is made of the second",
+    "antonym": "the two words are opposites",
+    "similar_to": "the two words mean nearly the same",
+    "derivationally_related": "the second is a related form of the first, built on the same root",
+    "attribute": "the first is a value or degree of the second",
+    "definition_pattern_characterized_by": "the first is marked by the second",
+    "definition_pattern_agent": "the first is one who does or deals in the second",
+    "definition_pattern_purpose": "the first is used for the second",
+    "definition_pattern_relates_to": "the first relates to the second",
+    "definition_pattern_resembling": "the first resembles the second",
+}
+
+
+def explain(relation_type: str, a: str, b: str, c: str, d: str) -> str:
+    """One plain sentence naming the relation both pairs share, shown after
+    the answer: 'In both pairs the first is a kind of the second:
+    cure → medication, celandine → herb.'"""
+    rel = _EXPLAIN.get(relation_type, "the two words are related the same way")
+    return f"In both pairs {rel}: {a.lower()} → {b.lower()}, {c.lower()} → {d.lower()}."

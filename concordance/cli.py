@@ -2935,7 +2935,8 @@ def maintain(
     """Run the full post-ingest maintenance chain in dependency order:
     fill-definitions -> classify -> normalize-pos -> ngram -> archaic ->
     compounds -> word-origins -> difficulty -> quizdef -> quizzable -> calibrate-difficulty ->
-    wordnik-pron -> ipa -> embed -> backfill-analogies (+ review-analogy-anchors).
+    wordnik-pron -> ipa -> embed -> backfill-analogies (+ review-analogy-anchors, analogy-contrasts,
+    score-analogy-anchors, build-analogy-bank).
     This is the whole documented sequence from the README's
     "Backfilling definitions" / "Enrichment & scoring" / "Definition-quality
     cleanup" / "Pronunciation audio" / "Semantic distance" sections, chained
@@ -3187,6 +3188,18 @@ def maintain(
             stats = analogies.review_anchors(conn, schema, cfg, limit=limit, log=lambda m: None)
         console.print(f"[green]✓[/green] review-analogy-anchors: [bold]{stats['ok']}[/bold] ok, "
                       f"{stats['rejected_rule'] + stats['rejected_model']} rejected of {stats['reviewed']}")
+        with console.status("[bold]Storing analogy contrast neighbourhoods…"):
+            stats = analogies.backfill_contrasts(conn, schema, log=lambda m: None)
+        console.print(f"[green]✓[/green] analogy-contrasts: [bold]{stats['terms']}[/bold] terms, "
+                      f"{stats['rows']} neighbour rows")
+        with console.status("[bold]Scoring new analogy example pairs…"):
+            stats = analogies.score_anchors(conn, schema, cfg, limit=limit, log=lambda m: None)
+        console.print(f"[green]✓[/green] score-analogy-anchors: [bold]{stats['scored']}[/bold] scored")
+        from . import analogy_bank
+        with console.status("[bold]Building + checking analogy questions…"):
+            stats = analogy_bank.build_bank(conn, schema, cfg, limit=limit, log=lambda m: None)
+        console.print(f"[green]✓[/green] build-analogy-bank: [bold]{stats['words']}[/bold] words -> "
+                      f"[bold]{stats['ok']}[/bold] ok, {stats['associative']} associative, {stats['failed']} failed")
     else:
         console.print("[dim]backfill-analogies skipped.[/dim]")
 
@@ -3233,6 +3246,26 @@ def backfill_analogies_cmd(
                   f"([bold]{stats['edges_verified']}[/bold] verified, {stats['edges_rejected']} rejected)")
 
 
+@app.command("analogy-contrasts")
+def analogy_contrasts_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    recompute: bool = typer.Option(False, "--recompute", help="Drop and rebuild every term's contrast rows."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Store each analogy term's WordNet neighbourhood (siblings, more
+    specific/general kinds, parts, wholes): the wrong options that make an
+    analogy turn on the relation, not on which option is related to C.
+    CPU only; runs inside `maintain` after review-analogy-anchors."""
+    from . import analogies
+
+    conn = _connect(database_url)
+    db.apply_schema(conn, schema)
+    stats = analogies.backfill_contrasts(conn, schema, recompute=recompute, log=console.print)
+    conn.close()
+    console.print(f"[green]✓[/green] analogy-contrasts: [bold]{stats['terms']}[/bold] terms, "
+                  f"{stats['rows']} neighbour rows")
+
+
 @app.command("review-analogy-anchors")
 def review_analogy_anchors_cmd(
     schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
@@ -3264,6 +3297,102 @@ def review_analogy_anchors_cmd(
     console.print(f"[green]✓[/green] review-analogy-anchors: [bold]{stats['ok']}[/bold] ok, "
                   f"{stats['rejected_rule']} rejected by rules, {stats['rejected_model']} by the model "
                   f"({stats['reviewed']} reviewed)")
+
+
+@app.command("score-analogy-anchors")
+def score_analogy_anchors_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    model: Optional[Path] = typer.Option(None, "--model", "-m", help="Model for scoring (defaults to the 14B)."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap anchors scored this run (0 = all)."),
+    rescore: bool = typer.Option(False, "--rescore", help="Score already-scored anchors again."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Score every review-ok analogy example pair 1-5 for how plainly it
+    shows its relation (word_relation_edge.anchor_clarity). The quiz prefers
+    4-5 and never uses 1-2. Resumable; runs inside `maintain`."""
+    from . import analogies
+    from .gpu_lock import gpu_lock
+
+    conn = _connect(database_url)
+    db.apply_schema(conn, schema)
+    cfg = Config()
+    if model:
+        cfg.model_path = str(model)
+    with gpu_lock(database_url, on_wait=lambda: console.print("[yellow]Waiting for the GPU…[/yellow]")):
+        stats = analogies.score_anchors(conn, schema, cfg, limit=limit, rescore=rescore,
+                                        log=lambda m: console.print(m))
+    conn.close()
+    dist = ", ".join(f"{k}: {v}" for k, v in sorted(stats["dist"].items()))
+    console.print(f"[green]✓[/green] score-analogy-anchors: [bold]{stats['scored']}[/bold] scored ({dist}); "
+                  f"{stats['no_verdict']} without a verdict")
+
+
+@app.command("build-analogy-bank")
+def build_analogy_bank_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    model: Optional[Path] = typer.Option(None, "--model", "-m", help="Model for checking (defaults to the 14B)."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Cap words scanned this run (0 = all due)."),
+    per_word: int = typer.Option(2, "--per-word", help="Items to build per word."),
+    rebuild: bool = typer.Option(False, "--rebuild", help="Rebuild every word, not just new/changed ones."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Build analogy questions ahead of time and have the local model check
+    each: it must solve it with the example pair, find no second option that
+    fits, and fail to find the answer WITHOUT the pair (see
+    concordance/analogy_bank.py). The quiz serves these first. Resumable:
+    only words never scanned, or with an edge verified since, unless
+    --rebuild. Runs inside `maintain`."""
+    from . import analogy_bank
+    from .gpu_lock import gpu_lock
+
+    conn = _connect(database_url)
+    db.apply_schema(conn, schema)
+    cfg = Config()
+    if model:
+        cfg.model_path = str(model)
+    with gpu_lock(database_url, on_wait=lambda: console.print("[yellow]Waiting for the GPU…[/yellow]")):
+        stats = analogy_bank.build_bank(conn, schema, cfg, per_word=per_word, limit=limit, rebuild=rebuild,
+                                        log=lambda m: console.print(m))
+    conn.close()
+    console.print(f"[green]✓[/green] build-analogy-bank: [bold]{stats['words']}[/bold] words -> "
+                  f"[bold]{stats['ok']}[/bold] ok, {stats['associative']} associative, {stats['failed']} failed; "
+                  f"{stats['unbuildable']} words with no buildable item; {stats['words_served']} words servable")
+
+
+@app.command("analogy-stats")
+def analogy_stats_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Analogy answer accuracy by relation family, item source (bank/live)
+    and wrong-option source, plus what the bank holds. Questions from before
+    2026-11-22 carry no relation data and count as 'unrecorded'."""
+    conn = _connect(database_url)
+    with conn.cursor() as cur:
+        cur.execute(f"""SELECT coalesce(q.payload->>'relation_family', 'unrecorded'),
+                               CASE WHEN q.payload->>'bank_item_id' IS NOT NULL THEN 'bank'
+                                    WHEN q.payload ? 'relation_family' THEN 'live' ELSE '-' END,
+                               count(*), avg(a.is_correct::int)
+                        FROM {schema}.quiz_question q JOIN {schema}.quiz_answer a ON a.question_id = q.id
+                        WHERE q.question_type = 'analogy' GROUP BY 1, 2 ORDER BY 3 DESC""")
+        console.print("[bold]Accuracy by relation family / source[/bold]")
+        for fam, src, n, acc in cur.fetchall():
+            console.print(f"  {fam:14} {src:5} {n:6}  {acc:.0%}")
+        cur.execute(f"""SELECT o->>'strategy', count(*),
+                               avg((a.response->>'selected_option_key' = o->>'key')::int)
+                        FROM {schema}.quiz_question q JOIN {schema}.quiz_answer a ON a.question_id = q.id,
+                             jsonb_array_elements(q.payload->'options') o
+                        WHERE q.question_type = 'analogy' AND o ? 'strategy' AND o->>'strategy' <> 'answer'
+                        GROUP BY 1 ORDER BY 2 DESC""")
+        console.print("[bold]How often each kind of wrong option was chosen[/bold]")
+        for strat, n, rate in cur.fetchall():
+            console.print(f"  {strat or '?':22} shown {n:6}  chosen {rate:.0%}")
+        cur.execute(f"""SELECT relation_family, status, count(*) FROM {schema}.analogy_item
+                        GROUP BY 1, 2 ORDER BY 1, 2""")
+        console.print("[bold]Bank[/bold]")
+        for fam, status, n in cur.fetchall():
+            console.print(f"  {fam or '?':14} {status:12} {n}")
+    conn.close()
 
 
 @app.command("maintain-status")
