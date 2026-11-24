@@ -262,19 +262,26 @@ highest-leverage piece of the proper-noun-pollution defenses.
 
 ```bash
 concordance wordnik-pron       # fetch raw Wordnik transcriptions
+concordance dictcom-pron       # dictionary.com IPA, worst-pronounced words first
 concordance ipa                # backfill+validate word.ipa (kaikki -> Wordnik -> local Wiktionary -> OED)
+concordance derive-ipa         # IPA for derived words from their base word's
+concordance mw-pronounce       # Merriam-Webster recordings + respelling->IPA (licensed API, daily quota)
 concordance oed-ipa            # backfill word.ipa from OED's verified pronunciations specifically
 concordance commons-search     # find real Wikimedia Commons recordings kaikki's dump missed
 concordance commons-download   # download the recordings commons-search confirmed
-concordance audio              # Commons/MW recording if present, else Azure IPA-guided TTS
-concordance audio-guess        # last resort: Azure guesses from spelling alone
+concordance audio              # Commons/MW recording if present, else local Piper from the IPA
+concordance audio-guess        # last resort: Piper from the spelling alone
 ```
 
 Real recordings first, IPA-guided synthesis otherwise, spelling-guess only
-as a true last resort (`audio-guess` results are tagged `source='azure_guess'`
-so the app can flag them unverified). `wordnik-pron`/`ipa` are part of
-`maintain`; run `ipa` before `audio` since synthesis quality depends on the
-transcription it's given. `commons-search`/`commons-download`/`audio` stay
+as a true last resort (spelling-guess clips are tagged `source='piper'` so
+the app can flag them unverified). `wordnik-pron`, `dictcom-pron`, `ipa`,
+`derive-ipa`, `mw-pronounce` and the re-voicing of spelling-guess clips for
+words that gained IPA are all part of `maintain`, in that order; run `ipa`
+before `audio` since synthesis quality depends on the transcription it's
+given. `mw-pronounce` stops at MW's 1,000-a-day API quota minus 100 kept
+for ingest; it also runs daily at 01:00 on its own timer
+(`concordance-mw-pronounce.timer`), sharing that quota with `maintain`. `commons-search`/`commons-download`/`audio` stay
 separate commands — Commons rate-limits hard and is meant to run for hours
 unattended, which would starve every other step if interleaved.
 

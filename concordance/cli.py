@@ -2923,6 +2923,8 @@ def maintain(
     skip_wordnik: bool = typer.Option(False, "--skip-wordnik", help="Skip the wordnik-pron fetch step."),
     skip_dictcom: bool = typer.Option(False, "--skip-dictcom", help="Skip the dictionary.com pronunciation step."),
     skip_derive_ipa: bool = typer.Option(False, "--skip-derive-ipa", help="Skip deriving IPA from base words."),
+    skip_mw: bool = typer.Option(False, "--skip-mw",
+                                 help="Skip Merriam-Webster recordings + IPA (mw-pronounce; uses the daily API quota)."),
     skip_ipa: bool = typer.Option(False, "--skip-ipa", help="Skip the ipa backfill step."),
     skip_audio_upgrade: bool = typer.Option(False, "--skip-audio-upgrade",
                                             help="Skip re-voicing spelling-guess audio for words that now have IPA."),
@@ -2935,7 +2937,8 @@ def maintain(
     """Run the full post-ingest maintenance chain in dependency order:
     fill-definitions -> classify -> normalize-pos -> ngram -> archaic ->
     compounds -> word-origins -> difficulty -> quizdef -> quizzable -> calibrate-difficulty ->
-    wordnik-pron -> ipa -> embed -> backfill-analogies (+ review-analogy-anchors, analogy-contrasts,
+    wordnik-pron -> dictcom-pron -> ipa -> derive-ipa -> mw-pronounce -> audio upgrade ->
+    embed -> backfill-analogies (+ review-analogy-anchors, analogy-contrasts,
     score-analogy-anchors, build-analogy-bank).
     This is the whole documented sequence from the README's
     "Backfilling definitions" / "Enrichment & scoring" / "Definition-quality
@@ -3151,6 +3154,24 @@ def maintain(
                       f"{stats.get('candidates', 0)} words without IPA derived")
     else:
         console.print("[dim]derive-ipa skipped.[/dim]")
+
+    if not skip_mw:
+        # After the other IPA sources, so MW's respelling only fills words
+        # still without IPA (derived IPA counts as none); its recordings
+        # replace synthesized clips. Stops at the daily API quota minus the
+        # ingest reserve -- the 01:00 mw-pronounce timer draws on the same
+        # quota, so whichever runs first that day does the work.
+        from . import mw_pron
+        console.print("[bold]Fetching Merriam-Webster recordings + IPA…[/bold]")
+        stats = mw_pron.pronounce(conn, schema, limit=limit, log=lambda m: None)
+        if "candidates" not in stats:
+            console.print("[dim]mw-pronounce skipped — no MW_DICTIONARY_API_KEY.[/dim]")
+        else:
+            console.print(f"[green]✓[/green] mw-pronounce: [bold]{stats.get('checked', 0)}[/bold] checked — "
+                          f"{stats.get('recordings', 0)} recordings, {stats.get('ipa_added', 0)} IPA added"
+                          + (" (stopped at today's API reserve)" if stats.get("stopped_for_quota") else ""))
+    else:
+        console.print("[dim]mw-pronounce skipped.[/dim]")
 
     if not skip_audio_upgrade:
         # audio follows IPA: a word that gained IPA (this run's ipa step,
