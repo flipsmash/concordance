@@ -376,9 +376,10 @@ batch commits as its own unit. Runs as the last step of `maintain` by
 default (`--skip-analogies` to defer it) — don't run standalone
 concurrently with `maintain`, both load a local model onto the same GPU.
 
-`maintain` follows it with four more analogy steps, each also runnable alone:
+`maintain` follows it with five more analogy steps, each also runnable alone:
 
 ```bash
+concordance seed-analogy-anchors     # CPU: hand-picked plain example pairs (knife : cut…)
 concordance review-analogy-anchors   # ok/rejected for example (A:B) pairs
 concordance analogy-contrasts        # CPU: each term's WordNet neighbours (wrong options)
 concordance score-analogy-anchors    # 1–5 clarity per ok example pair
@@ -388,11 +389,13 @@ concordance analogy-stats            # accuracy by relation / option source; ban
 
 Wrong options come from C's own neighbourhood through a different relation
 (siblings, narrower kinds, parts…), so an item can only be solved by reading
-the relation off the example pair. The bank keeps an item only if the model
-solves it, finds no second option that fits, and *can't* find the answer
-without the example pair (majority over three shuffles); the quiz serves
-banked items first, with no relation family over 40% of a quiz, and
-assembles live for words not banked yet.
+the relation off the example pair; no option is a random filler word, and
+every option is mainly used as the answer's part of speech. The bank keeps an
+item only if the model solves it and finds no second option that fits; items
+it can also solve *without* the example pair (majority over three shuffles)
+are marked associative and served after the rest. The quiz serves banked
+items first, with no relation family over 40% of a quiz, and assembles live
+for words not banked yet.
 
 ## OED reference dictionary
 

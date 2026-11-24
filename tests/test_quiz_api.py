@@ -891,6 +891,16 @@ def _seed_analogy_fixture(conn, schema: str, n_plain: int = 6) -> dict:
                     VALUES (%s,%s,'hypernym','is_a','noun','noun','wordnet_hypernym','verified')""",
                 (a, b),
             )
+        # Related wrong options (siblings of each answer) -- analogies get no
+        # random filler words, so without these no item could be assembled.
+        for term, siblings in ((t_shackle, ("handcuff", "padlock", "chain")),
+                               (t_vambrace, ("helmet", "breastplate", "greave"))):
+            for lemma in siblings:
+                cur.execute(
+                    f"""INSERT INTO {schema}.wn_relation_fanout (term_id, relation_type, target_lemma, target_pos)
+                        VALUES (%s, 'sibling_of_hypernym_parent', %s, 'n')""",
+                    (term, lemma),
+                )
     conn.commit()
     return wid
 

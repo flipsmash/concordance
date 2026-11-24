@@ -563,3 +563,36 @@ def test_bank_check_rules():
     p = ab.payload_fields({**item(), "style": "one_hard_term", "relation_type": "hypernym", "relation_family": "is_a",
                            "tested_edge_id": 1, "anchor_edge_id": 2, "d_lemma": "herb"})
     assert next(o["label"] for o in p["options"] if o["key"] == p["correct_option_key"]) == "herb"
+
+
+def test_option_pos_gate_rejects_words_mainly_another_pos():
+    from concordance.distractors import pos_is_usual
+
+    assert pos_is_usual("canoe", "noun")
+    assert pos_is_usual("configure", "verb")
+    assert not pos_is_usual("confection", "verb")   # mainly a noun
+    assert not pos_is_usual("set", "adjective")     # mainly a verb
+    assert pos_is_usual("xyzzyplugh", "noun")       # unknown to WordNet: nothing to judge by
+
+
+def test_taxon_wholes_are_detected():
+    from concordance.analogy_select import _synset_is_taxon, _whole_is_taxon
+
+    assert _synset_is_taxon("vanellus.n.01")
+    assert not _synset_is_taxon("lapwing.n.01")
+    # madwort's member holonym 'alyssum' is genus Alyssum, not the plant
+    assert _whole_is_taxon("alyssum.n.01", "alyssum")
+    assert not _whole_is_taxon("trigger.n.01", "gun")
+
+
+def test_seed_pairs_are_well_formed():
+    from concordance.analogies import _RELATION_FAMILY
+    from concordance.analogy_seed import seed_pairs
+
+    pairs = seed_pairs()
+    assert len(pairs) > 150
+    for rtype, pos_a, pos_b, a, b in pairs:
+        assert rtype in _RELATION_FAMILY
+        assert a and b and a != b
+    assert ("definition_pattern_purpose", "noun", "verb", "knife", "cut") in pairs
+    assert ("attribute", "noun", "adjective", "weight", "heavy") in pairs

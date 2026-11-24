@@ -3184,6 +3184,8 @@ def maintain(
             stats = analogies.backfill_analogies(conn, schema, cfg, limit=limit)
         console.print(f"[green]✓[/green] backfill-analogies: [bold]{stats['terms_scanned']}[/bold] terms scanned "
                       f"-> [bold]{stats['edges_verified']}[/bold]/{stats['edges_found']} edges verified")
+        from . import analogy_seed
+        analogy_seed.seed_anchors(conn, schema, log=lambda m: None)
         with console.status("[bold]Reviewing new analogy example pairs…"):
             stats = analogies.review_anchors(conn, schema, cfg, limit=limit, log=lambda m: None)
         console.print(f"[green]✓[/green] review-analogy-anchors: [bold]{stats['ok']}[/bold] ok, "
@@ -3264,6 +3266,27 @@ def analogy_contrasts_cmd(
     conn.close()
     console.print(f"[green]✓[/green] analogy-contrasts: [bold]{stats['terms']}[/bold] terms, "
                   f"{stats['rows']} neighbour rows")
+
+
+@app.command("seed-analogy-anchors")
+def seed_analogy_anchors_cmd(
+    schema: str = typer.Option(db.DEFAULT_SCHEMA, "--schema", help="Postgres schema."),
+    database_url: Optional[str] = typer.Option(None, "--database-url", help="Overrides DATABASE_URL / .env."),
+) -> None:
+    """Add the hand-picked analogy example pairs (knife : cut, thief : steal,
+    marine : sea, heavy : weight...) for relations whose mined pool of plain
+    example pairs is tiny. They stay unreviewed, so review-analogy-anchors
+    and score-analogy-anchors judge them like any other. Idempotent; CPU
+    only; runs inside `maintain` before review-analogy-anchors."""
+    from . import analogy_seed
+
+    conn = _connect(database_url)
+    db.apply_schema(conn, schema)
+    stats = analogy_seed.seed_anchors(conn, schema, log=lambda m: None)
+    conn.close()
+    console.print(f"[green]✓[/green] seed-analogy-anchors: [bold]{stats['inserted']}[/bold] added, "
+                  f"{stats['existing']} already there, {stats['vocab_word']} skipped (a vocab word), "
+                  f"{stats['not_in_wordnet']} skipped (not in WordNet)")
 
 
 @app.command("review-analogy-anchors")

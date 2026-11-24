@@ -32,6 +32,7 @@ actually a valid synonym of the correct answer isn't wrong, it's a second correc
 
 from __future__ import annotations
 
+import functools
 import re
 from dataclasses import dataclass, field, replace
 
@@ -503,26 +504,46 @@ def _sibling_fanout_candidates(cur, schema: str, d_term_id: int, d_pos: str,
     return out
 
 
-def _random_ordinary_candidates(cur, schema: str, d_pos: str, exclude_lemmas: set[str], limit: int) -> list[dict]:
-    """Last-resort fill for the one_hard_term style: a random common
-    (is_common) ordinary term of the right POS, not tied to any word row."""
-    from .model import wordnet_pos
+_WN_POS = {"noun": "n", "verb": "v", "adjective": "a", "adverb": "r"}
 
-    wn_pos = wordnet_pos(d_pos) or "n"
-    cur.execute(
-        f"""SELECT lemma FROM {schema}.wn_relation_term
-            WHERE word_id IS NULL AND wn_pos = %s AND is_common
-            ORDER BY random() LIMIT %s""",
-        (wn_pos, limit * 3),
-    )
-    out = []
-    for (lemma,) in cur.fetchall():
-        if lemma.lower() in exclude_lemmas:
-            continue
-        out.append({"id": None, "lemma": lemma, "quiz_definition": None, "strategy": "random_ordinary"})
-        if len(out) >= limit:
-            break
-    return out
+
+@functools.lru_cache(maxsize=50000)
+def pos_is_usual(lemma: str, pos: str) -> bool:
+    """True unless WordNet says `lemma` is mainly another part of speech --
+    'confection' (noun) or 'set' (verb) offered among adjectives. Usage
+    is judged by tagged-corpus counts, or synset counts when those are
+    thin; the wanted POS must be at least half as used as the commonest
+    (by counts) or have the most senses (by synsets).
+    Lemmas WordNet doesn't know pass (nothing to judge by)."""
+    want = _WN_POS.get(pos, pos)
+    wn = _wordnet()
+    if wn is None or want not in ("n", "v", "a", "r"):
+        return True
+    counts: dict[str, int] = {}
+    senses: dict[str, int] = {}
+    key = lemma.lower().replace(" ", "_")
+    for syn in wn.synsets(key):
+        p = "a" if syn.pos() == "s" else syn.pos()
+        senses[p] = senses.get(p, 0) + 1
+        counts[p] = counts.get(p, 0) + sum(l.count() for l in syn.lemmas() if l.name().lower() == key)
+    if not senses:
+        return True
+    if not senses.get(want):
+        return False
+    if sum(counts.values()) >= 3:
+        return counts.get(want, 0) * 2 >= max(counts.values())
+    return senses[want] >= max(senses.values())
+
+
+_wn_cache: list = []
+
+
+def _wordnet():
+    if not _wn_cache:
+        from .analogies import _load_wordnet
+
+        _wn_cache.append(_load_wordnet())
+    return _wn_cache[0]
 
 
 def _option_key(lemma: str) -> str:
@@ -645,6 +666,8 @@ def select_analogy_distractors(conn, schema: str, style: str, d_pos: str, a_lemm
                     continue
                 if _is_abbreviation(c["lemma"]):
                     continue
+                if not pos_is_usual(c["lemma"], d_pos):
+                    continue  # 'confection' among verbs: the answer's POS gives it away
                 shown = [p["lemma"] for p in picked] + ([d_lemma] if d_lemma else [])
                 if any(_options_clash(c["lemma"], s) for s in shown + list(prompt_lemmas or [])):
                     continue
@@ -676,16 +699,8 @@ def select_analogy_distractors(conn, schema: str, style: str, d_pos: str, a_lemm
                                                    exclude_ids, remaining * 2)
             _take(more, check_exclusion=False)
 
-        if len(picked) < count:
-            remaining = count - len(picked)
-            if style == "vocab_only":
-                cfg = DistractorConfig(strategy_weights={"orthographic": 0, "semantic": 0, "domain": 0, "antonym": 0})
-                more = _random_candidates(conn, schema, d_pos, cfg, exclude_ids, [], False, remaining * 2)
-                for c in more:
-                    c["strategy"] = "random"
-            else:
-                more = _random_ordinary_candidates(cur, schema, d_pos, exclusion_lemmas, remaining * 2)
-            _take(more)
-            degraded = len(picked) < count
+        # No random filler: an unrelated word beside related ones marks the
+        # answer. Short of options, the item is skipped (degraded).
+        degraded = len(picked) < count
 
     return DistractorResult(candidates=picked[:count], degraded=degraded or len(picked) < count)

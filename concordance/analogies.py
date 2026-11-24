@@ -556,6 +556,23 @@ _RELATION_TYPE_DESCRIPTIONS = {
     "definition_pattern_characterized_by": "b is the quality, feature, or characteristic that a's own definition states it has (e.g. 'having b' / 'characterized by b') -- b is the DIMENSION a varies along, not a synonym of a",
 }
 
+# For judging an EXAMPLE pair the reader sees two words, not definitions:
+# the anchor review and clarity score ask whether the relation is plain,
+# so the definition-pattern relations are described without "a's own
+# definition literally states" (that was the edge verifier's question,
+# already answered -- and a hand-picked knife : cut fails it, since
+# WordNet's gloss for knife doesn't mention cutting).
+_ANCHOR_DESCRIPTIONS = {
+    **_RELATION_TYPE_DESCRIPTIONS,
+    "definition_pattern_kind_of": "a is a kind, type, or sort of b",
+    "definition_pattern_agent": "a is a person or agent who does b",
+    "definition_pattern_part_of": "a is part of b",
+    "definition_pattern_purpose": "a is used for or to do b",
+    "definition_pattern_relates_to": "a means relating or pertaining to b",
+    "definition_pattern_resembling": "a means resembling or like b",
+    "definition_pattern_characterized_by": "a means having, full of, or marked by b",
+}
+
 
 _VERIFY_SYSTEM = (
     "You are checking candidate word-analogy relation pairs for a vocabulary quiz. "
@@ -1021,8 +1038,12 @@ _ANCHOR_SYSTEM_VOCAB = (
 )
 
 
-def _anchor_rule_verdict(wn, a: dict, b: dict, ordinary: bool) -> str | None:
-    """A rejection reason from the cheap rules, or None to send it to the model."""
+_CURATED_ZIPF_MIN = 3.0  # hand-picked pairs: everyday words (broom, oven, feline) sit below the mined bar
+
+
+def _anchor_rule_verdict(wn, a: dict, b: dict, ordinary: bool, curated: bool = False) -> str | None:
+    """A rejection reason from the cheap rules, or None to send it to the
+    model. `curated` (seed-analogy-anchors pairs) lowers the frequency bar."""
     from .analogy_select import shares_stem
 
     for t in (a, b):
@@ -1032,7 +1053,9 @@ def _anchor_rule_verdict(wn, a: dict, b: dict, ordinary: bool) -> str | None:
     if a["pos"] == b["pos"] and shares_stem(a["lemma"], b["lemma"]):
         return "same word in another form"
     if ordinary:
-        if not (a["is_common"] and b["is_common"]):
+        common = ((a["zipf"] or 0) >= _CURATED_ZIPF_MIN and (b["zipf"] or 0) >= _CURATED_ZIPF_MIN) if curated \
+            else (a["is_common"] and b["is_common"])
+        if not common:
             return "rare word"
         if wn is not None:
             for t in (a, b):
@@ -1052,7 +1075,7 @@ def _anchor_rule_verdict(wn, a: dict, b: dict, ordinary: bool) -> str | None:
 
 
 def _anchor_query(llm, batch: list[dict], vocab: bool) -> str:
-    items = [{"i": i, "relation_description": _RELATION_TYPE_DESCRIPTIONS.get(e["relation_type"], e["relation_type"]),
+    items = [{"i": i, "relation_description": _ANCHOR_DESCRIPTIONS.get(e["relation_type"], e["relation_type"]),
               "a": e["a"]["lemma"], "a_def": (e["a"]["gloss"] or "")[:200],
               "b": e["b"]["lemma"], "b_def": (e["b"]["gloss"] or "")[:200]}
              for i, e in enumerate(batch)]
@@ -1076,7 +1099,8 @@ def review_anchors(conn, schema: str, cfg, limit: int = 0, recheck: bool = False
         cur.execute(
             f"""SELECT e.id, e.relation_type, e.pos_a, e.pos_b, ta.word_id IS NULL,
                        ta.lemma, ta.wn_pos, ta.synset_name, ta.gloss, ta.is_common,
-                       tb.lemma, tb.wn_pos, tb.synset_name, tb.gloss, tb.is_common
+                       tb.lemma, tb.wn_pos, tb.synset_name, tb.gloss, tb.is_common,
+                       e.source = 'curated_anchor', ta.zipf, tb.zipf
                 FROM {schema}.word_relation_edge e
                 JOIN {schema}.wn_relation_term ta ON ta.id = e.term_a_id
                 JOIN {schema}.wn_relation_term tb ON tb.id = e.term_b_id
@@ -1089,10 +1113,12 @@ def review_anchors(conn, schema: str, cfg, limit: int = 0, recheck: bool = False
         rows = cur.fetchall()
 
     edges = []
-    for (eid, rtype, pos_a, pos_b, ordinary, la, wa, sa, ga, ca, lb, wb, sb, gb, cb) in rows:
-        edges.append({"id": eid, "relation_type": rtype, "ordinary": ordinary,
-                      "a": {"lemma": la, "pos": pos_a, "wn_pos": wa, "synset": sa, "gloss": ga, "is_common": ca},
-                      "b": {"lemma": lb, "pos": pos_b, "wn_pos": wb, "synset": sb, "gloss": gb, "is_common": cb}})
+    for (eid, rtype, pos_a, pos_b, ordinary, la, wa, sa, ga, ca, lb, wb, sb, gb, cb, curated, za, zb) in rows:
+        edges.append({"id": eid, "relation_type": rtype, "ordinary": ordinary, "curated": curated,
+                      "a": {"lemma": la, "pos": pos_a, "wn_pos": wa, "synset": sa, "gloss": ga, "is_common": ca,
+                            "zipf": za},
+                      "b": {"lemma": lb, "pos": pos_b, "wn_pos": wb, "synset": sb, "gloss": gb, "is_common": cb,
+                            "zipf": zb}})
 
     stats = {"reviewed": 0, "ok": 0, "rejected_rule": 0, "rejected_model": 0}
 
@@ -1104,7 +1130,7 @@ def review_anchors(conn, schema: str, cfg, limit: int = 0, recheck: bool = False
     to_model: dict[bool, list[dict]] = {True: [], False: []}
     rule_updates = []
     for e in edges:
-        reason = _anchor_rule_verdict(wn, e["a"], e["b"], e["ordinary"])
+        reason = _anchor_rule_verdict(wn, e["a"], e["b"], e["ordinary"], e["curated"])
         if reason:
             rule_updates.append(("rejected", reason, e["id"]))
         else:
@@ -1197,7 +1223,7 @@ def score_anchors(conn, schema: str, cfg, limit: int = 0, rescore: bool = False,
     try:
         for i in range(0, len(rows), batch_size):
             batch = rows[i:i + batch_size]
-            items = [{"i": j, "relation": _RELATION_TYPE_DESCRIPTIONS.get(rt, rt), "a": la, "a_def": (ga or "")[:160],
+            items = [{"i": j, "relation": _ANCHOR_DESCRIPTIONS.get(rt, rt), "a": la, "a_def": (ga or "")[:160],
                       "b": lb, "b_def": (gb or "")[:160]} for j, (_, rt, la, ga, lb, gb) in enumerate(batch)]
             verdicts = None
             for _ in range(_MAX_VERIFY_PASSES):

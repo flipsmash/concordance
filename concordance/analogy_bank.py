@@ -33,22 +33,32 @@ from . import distractors as dx
 
 _BLIND_SHUFFLES = 3
 _CHECK_BATCH = 8
+_ASSEMBLE_TRIES = 4
 
 
 def assemble(conn, schema: str, word_id: int, exclude_ids: set[int], option_count: int = 4,
              **select_kwargs) -> dict | None:
     """One analogy item for `word_id` (tested edge, anchor, options with
     the answer included and each option's source), or None."""
-    a = asel.select_analogy_edge(conn, schema, word_id, exclude_ids, option_count=option_count, **select_kwargs)
-    if a is None:
-        return None
-    result = dx.select_analogy_distractors(
-        conn, schema, a.style, a.d_pos, a.a_lemma, a.b_lemma, a.target_word_id, a.d_term_id,
-        a.exclusion_lemmas, a.trap_lemmas, option_count - 1, exclude_word_ids=exclude_ids,
-        d_word_id=a.d_word_id, anchor_synonyms=a.anchor_synonyms, d_lemma=a.d_lemma,
-        prompt_lemmas=[a.a_lemma, a.b_lemma, a.c_lemma], contrast_lemmas=a.contrast_lemmas,
-    )
-    if not result.candidates:
+    # An edge whose options can't be filled from related words is skipped
+    # for the word's next edge -- no random filler words (they make the
+    # answer the only related option).
+    skip = set(select_kwargs.pop("skip_tested_edge_ids", None) or ())
+    for _ in range(_ASSEMBLE_TRIES):
+        a = asel.select_analogy_edge(conn, schema, word_id, exclude_ids, option_count=option_count,
+                                     skip_tested_edge_ids=skip, **select_kwargs)
+        if a is None:
+            return None
+        result = dx.select_analogy_distractors(
+            conn, schema, a.style, a.d_pos, a.a_lemma, a.b_lemma, a.target_word_id, a.d_term_id,
+            a.exclusion_lemmas, a.trap_lemmas, option_count - 1, exclude_word_ids=exclude_ids,
+            d_word_id=a.d_word_id, anchor_synonyms=a.anchor_synonyms, d_lemma=a.d_lemma,
+            prompt_lemmas=[a.a_lemma, a.b_lemma, a.c_lemma], contrast_lemmas=a.contrast_lemmas,
+        )
+        if len(result.candidates) >= option_count - 1:
+            break
+        skip.add(a.tested_edge_id)
+    else:
         return None
     options = [{"label": c["lemma"], "word_id": c.get("id"), "strategy": c.get("strategy")}
                for c in result.candidates[:option_count - 1]]

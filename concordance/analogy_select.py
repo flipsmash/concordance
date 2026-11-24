@@ -95,6 +95,7 @@ Item quality rules (2026-11-20 review of live items):
 
 from __future__ import annotations
 
+import functools
 import os
 import random
 import re
@@ -200,8 +201,49 @@ def _wn_pos_eq(p: str | None) -> str | None:
     return _WN_POS_EQ.get(p, p)
 
 
-def _is_taxon(gloss: str, synonyms: list[str]) -> bool:
-    return bool(_TAXON_GLOSS.search(gloss or "")) or any(_TAXON_SYNONYM.search(x) for x in synonyms or [])
+def _is_taxon(gloss: str, synonyms: list[str], synset_name: str | None = None) -> bool:
+    return (bool(_TAXON_GLOSS.search(gloss or "")) or any(_TAXON_SYNONYM.search(x) for x in synonyms or [])
+            or _synset_is_taxon(synset_name))
+
+
+@functools.lru_cache(maxsize=50000)
+def _synset_is_taxon(synset_name: str | None) -> bool:
+    """WordNet's own view: the synset is a genus/family/... (a hyponym of
+    taxonomic_group) -- 'alyssum' as genus Alyssum, even when the word's
+    dictionary gloss describes the plant."""
+    if not synset_name:
+        return False
+    from .distractors import _wordnet
+
+    wn = _wordnet()
+    if wn is None:
+        return False
+    try:
+        syn = wn.synset(synset_name)
+    except Exception:  # noqa: BLE001 -- unknown synset name
+        return False
+    return any(h.name() == "taxonomic_group.n.01" for h in syn.closure(lambda x: x.hypernyms()))
+
+
+@functools.lru_cache(maxsize=50000)
+def _whole_is_taxon(part_synset: str | None, whole_lemma: str) -> bool:
+    """The WordNet whole of `part_synset` named `whole_lemma` is a taxon --
+    madwort's member holonym 'alyssum' is genus Alyssum, though the word
+    alyssum's own row holds the plant sense."""
+    if not part_synset:
+        return False
+    from .distractors import _wordnet
+
+    wn = _wordnet()
+    if wn is None:
+        return False
+    try:
+        syn = wn.synset(part_synset)
+    except Exception:  # noqa: BLE001 -- unknown synset name
+        return False
+    key = whole_lemma.lower().replace(" ", "_")
+    wholes = syn.member_holonyms() + syn.part_holonyms() + syn.substance_holonyms()
+    return any(_synset_is_taxon(h.name()) for h in wholes if key in {n.lower() for n in h.lemma_names()})
 
 
 def shares_stem(c: str, d: str) -> bool:
@@ -217,12 +259,13 @@ def shares_stem(c: str, d: str) -> bool:
 
 
 def _term_row(cur, schema: str, word_id: int) -> dict | None:
-    cur.execute(f"SELECT id, word_id, lemma, wn_pos, synonym_lemmas FROM {schema}.wn_relation_term "
+    cur.execute(f"SELECT id, word_id, lemma, wn_pos, synonym_lemmas, synset_name FROM {schema}.wn_relation_term "
                 f"WHERE word_id = %s", (word_id,))
     row = cur.fetchone()
     if row is None:
         return None
-    return {"id": row[0], "word_id": row[1], "lemma": row[2], "wn_pos": row[3], "synonym_lemmas": row[4] or []}
+    return {"id": row[0], "word_id": row[1], "lemma": row[2], "wn_pos": row[3], "synonym_lemmas": row[4] or [],
+            "synset_name": row[5]}
 
 
 def _tested_edge_candidates(cur, schema: str, target_term_id: int, style: str, exclude_word_ids: set[int]) -> list[dict]:
@@ -231,7 +274,7 @@ def _tested_edge_candidates(cur, schema: str, target_term_id: int, style: str, e
     term_b to be ordinary (word_id IS NULL)."""
     cur.execute(
         f"""SELECT e.id, e.term_b_id, e.relation_type, e.relation_family, e.pos_a, e.pos_b,
-                   tb.word_id, tb.lemma, tb.wn_pos, tb.synonym_lemmas, tb.gloss
+                   tb.word_id, tb.lemma, tb.wn_pos, tb.synonym_lemmas, tb.gloss, tb.synset_name
             FROM {schema}.word_relation_edge e
             JOIN {schema}.wn_relation_term tb ON tb.id = e.term_b_id
             WHERE e.term_a_id = %s AND e.verification_status = 'verified'""",
@@ -240,7 +283,7 @@ def _tested_edge_candidates(cur, schema: str, target_term_id: int, style: str, e
     rows = cur.fetchall()
     out = []
     for (edge_id, term_b_id, relation_type, relation_family, pos_a, pos_b,
-         tb_word_id, tb_lemma, tb_wn_pos, tb_syns, tb_gloss) in rows:
+         tb_word_id, tb_lemma, tb_wn_pos, tb_syns, tb_gloss, tb_synset) in rows:
         is_vocab_b = tb_word_id is not None
         if style == "vocab_only" and not is_vocab_b:
             continue
@@ -251,7 +294,7 @@ def _tested_edge_candidates(cur, schema: str, target_term_id: int, style: str, e
         out.append({"edge_id": edge_id, "term_b_id": term_b_id, "relation_type": relation_type,
                     "relation_family": relation_family, "pos_a": pos_a, "pos_b": pos_b, "d_word_id": tb_word_id,
                     "d_lemma": tb_lemma, "d_wn_pos": tb_wn_pos, "d_synonyms": tb_syns or [],
-                    "d_gloss": tb_gloss or ""})
+                    "d_gloss": tb_gloss or "", "d_synset": tb_synset})
     random.shuffle(out)
     return out
 
@@ -267,7 +310,8 @@ def _find_anchor(cur, schema: str, relation_type: str, pos_a: str, pos_b: str, s
     vocab_clause = "IS NOT NULL" if style == "vocab_only" else "IS NULL"
     cur.execute(
         f"""SELECT ta.id, tb.id, ta.lemma, tb.lemma, ta.word_id, tb.word_id,
-                   ta.synonym_lemmas, tb.synonym_lemmas, e.id
+                   ta.synonym_lemmas, tb.synonym_lemmas, e.id,
+                   ta.gloss, tb.gloss, ta.synset_name, tb.synset_name
             FROM {schema}.word_relation_edge e
             JOIN {schema}.wn_relation_term ta ON ta.id = e.term_a_id
             JOIN {schema}.wn_relation_term tb ON tb.id = e.term_b_id
@@ -280,10 +324,13 @@ def _find_anchor(cur, schema: str, relation_type: str, pos_a: str, pos_b: str, s
                      random() LIMIT 40""",
         (_group_members(relation_type), pos_a, pos_b),
     )
-    rows = [r for r in cur.fetchall() if r[8] not in (avoid_edge_ids or set())]
+    part_of = _family(relation_type) == "part_of"
+    rows = [r for r in cur.fetchall() if r[8] not in (avoid_edge_ids or set())
+            and not (part_of and (_is_taxon(r[9], r[6], r[11]) or _is_taxon(r[10], r[7], r[12])
+                                  or _whole_is_taxon(r[11], r[3])))]
     # Anchors this user saw recently go last, not out: a small pool still works.
     rows.sort(key=lambda r: r[8] in (recent_edge_ids or set()))
-    for ta_id, tb_id, ta_lemma, tb_lemma, ta_word_id, tb_word_id, ta_syns, tb_syns, edge_id in rows:
+    for ta_id, tb_id, ta_lemma, tb_lemma, ta_word_id, tb_word_id, ta_syns, tb_syns, edge_id, *_ in rows:
         if ta_id in exclude_term_ids or tb_id in exclude_term_ids:
             continue
         if (ta_word_id is not None and ta_word_id in exclude_word_ids) or \
@@ -527,8 +574,11 @@ def select_analogy_edge(conn, schema: str, target_word_id: int, exclude_ids: set
             if tested["edge_id"] in (skip_tested_edge_ids or set()):
                 continue
             d_lemma = tested["d_lemma"]
-            if tested["relation_type"] == "holonym_member" and _is_taxon(tested["d_gloss"], tested["d_synonyms"]):
-                continue
+            if _family(tested["relation_type"]) == "part_of" and (
+                    _is_taxon(tested["d_gloss"], tested["d_synonyms"], tested["d_synset"])
+                    or _synset_is_taxon(target_term["synset_name"])
+                    or _whole_is_taxon(target_term["synset_name"], tested["d_lemma"])):
+                continue  # madwort : alyssum (the genus) -- taxonomy, not part-of
             if tested["pos_a"] in ("noun", "verb") and tested["pos_a"] == tested["pos_b"] \
                     and _is_inflected_form(cur, c_lemma, tested["pos_a"]):
                 continue
